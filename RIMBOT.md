@@ -12,108 +12,91 @@
 | 项 | 值 |
 |---|---|
 | DSH | `0.2.1-rc.5`（scoop 安装，`dsh` 在 PATH） |
-| profile | `dsh-tui`（`~/.dsh/profiles/dsh-tui`） |
+| 宿主 profile | **`web`**（`~/.dsh/profiles/web`）= `@deepseek-ai/dsh-base` + `@deepseek-ai/dsh-web-app` |
 | Node / pnpm | v26.4.0 / 12.16.1 |
-| 本仓库 | `D:\Nakk\OrcaPJs\RimBot`，main @ `b3301f6` |
+| 本仓库 | `D:\Nakk\OrcaPJs\RimBot`，main |
+| SnowLuma | 2.4.0，`C:\Aurabot\snowluma`（自带 `node.exe`） |
+| QQ | `D:\APPs\QQNT\QQ.exe` 9.9.36，小号 2313035775 / 王木木 |
 
-## 安装方式：本地 link，不是从 npm 装
+## ⚠ 必须跑在 web profile，不能跑 TUI
 
-```powershell
-dsh plugin --profile dsh-tui add D:\Nakk\OrcaPJs\RimBot
+`src/chat/hub.js:215` 拿的是 `dsh.get('sessionController')`，拿不到就直接抛：
+
+```
+[chat] 转进 DSH 失败（private:2898565937）： 宿主没有 sessionController（需要 DSH 桌面版 / Web 组合）
 ```
 
-pnpm 会在 profile 的 `package.json` 里写一条
-`"dsh-aurabot-qq": "link:D:/Nakk/OrcaPJs/RimBot"`，并在
-`node_modules/dsh-aurabot-qq` 建一个指向本目录的 junction，同时把
-`dsh-aurabot-qq` 加进 `dsh.profile.bundles`。
+TUI 宿主里消息能收（`received` 会 +1），但**建不出 DSH 会话，永远回复不了**。
+所以 `dsh-tui` 那边已经把这个插件卸掉了——两个 profile 都装的话，两个宿主会抢同一个
+OneBot 连接，消息会被重复消费。
 
-所以：**改这里的代码 → 重启 DSH 就生效**，不用重新安装。插件自带的
-`cordis.patch.yml` 会挂上 `aurabot` 本体和三个 agent preset
-（`aurabot-private` / `aurabot-private-long` / `aurabot-social`）。
-
-卸载：
+## 安装
 
 ```powershell
-dsh plugin --profile dsh-tui remove dsh-aurabot-qq
+# 1. 建 web profile（首次会从 shipped template 组合 dsh-base + dsh-web-app）
+dsh --profile web --dump-config
+
+# 2. 本地 link 安装插件
+dsh plugin --profile web add D:\Nakk\OrcaPJs\RimBot
 ```
+
+pnpm 写的是 `"dsh-aurabot-qq": "link:D:/Nakk/OrcaPJs/RimBot"`，
+`node_modules/dsh-aurabot-qq` 是指向本目录的 junction，并加进 `dsh.profile.bundles`。
+**改这里的代码 → 重启 `dsh web` 就生效**。
+
+web profile 的 `cordis.patch.yml` 需要模型配置（`llm-pi-ai` 的 magpie providers +
+`agent-default-model`），本机是从 `dsh-tui` 那份直接复制过去的；API key 在
+`~/.dsh/.env` 的 `MAGPIE_GATEWAY_KEY`。
 
 ## 启动
 
 ```powershell
-dsh --profile dsh-tui
+dsh web          # 等价于 dsh --profile web，默认 127.0.0.1:3080
 ```
 
-- 插件是宿主 + 网页两半。**TUI 里没有面板**（面板是 web client，走 DSH web 的 slots）。
-  在 TUI 下只有宿主那半在跑：QQ 网关、会话、工具、定时任务。
-- 宿主启动时会起一个 loopback webserver，Aurabot 的接口挂在 `/aurabot/api/*` 上。
-  端口是动态的，去这里看：
-  `%USERPROFILE%\.dsh\plugins-data\aurabot\modules-data\pet\host.json` 的 `baseUrl`。
+- 面板：`http://127.0.0.1:3080`（要 DSH web 的登录态，直接 curl 会 401）
+- Aurabot 接口：`http://127.0.0.1:3080/aurabot/api/*`
 - 日志：`%USERPROFILE%\.dsh\plugins-data\aurabot\logs\aurabot-<日期>.log`
-- 数据（配置/人格/记忆/表情/模块）：`%USERPROFILE%\.dsh\plugins-data\aurabot\`
+- 数据：`%USERPROFILE%\.dsh\plugins-data\aurabot\`
 
-启动成功的日志长这样：
+启动后插件会自己把 SnowLuma 拉起来、自己注入机器人号、自己连 OneBot，日志：
 
 ```
-[core] Aurabot v1.1.24 已加载｜总开关 关｜试运行 开｜工作区 ...\Aurabot\qq-chats
+[core] SnowLuma： 已启动
+[onebot] QQ 网关：connected
+[core] 接入机器人号： 机器人号（pid 64708）已接入
 ```
 
-## 已验证（无需 QQ 就能测的部分）
+**SnowLuma 是宿主的子进程**，宿主一停它就跟着退（端口 5099/3000/3001 一起没）。
+所以 `dsh web` 要常驻，别随手关。
+
+## 已端到端验证
+
+```
+22:26:13 [chat] 为 private:2898565937 新建了 DSH 会话 21236f80（aurabot-private）
+22:26:13 [chat] private:2898565937 的模型切到 magpie::workbuddy-ai/deepseek-v4.1-flash-sg::low
+22:26:16 [chat] 试运行（没真发）→ private:2898565937：在呢在呢 怎么啦
+22:27:03 [snowluma] [OneBot] 私聊 2898565937 | 发送：【Aurabot 自测】大肥鱼到此一游～
+```
+
+- 主人私聊 → 建会话 → 选模型 → 生成回复：一轮 3 秒
+- 关掉试运行后真实发送成功（`stats.sent = 1`）
+- 仓库自带测试：`node --test "test/**/*.test.js"` → 669 passed / 0 failed
+
+## 常用接口
 
 ```powershell
-$base = 'http://127.0.0.1:<端口>'
+$base = 'http://127.0.0.1:3080'
 
-# 总览：版本、配置、权限、网关状态
-Invoke-RestMethod "$base/aurabot/api/state"
-
-# 模型通路（走 DSH 的 llm，回一句「在呢」）
-Invoke-RestMethod "$base/aurabot/api/model/ping" -Method Post -ContentType application/json -Body '{}'
-
-# 模块干跑（截获发送，不真发；只跑模块钩子，不跑模型）
-Invoke-RestMethod "$base/aurabot/api/modules/simulate" -Method Post -ContentType application/json `
-  -Body '{"as":"owner","kind":"private","text":"在吗"}'
+Invoke-RestMethod "$base/aurabot/api/state"                       # 总览
+Invoke-RestMethod "$base/aurabot/api/snowluma/processes"          # QQ 进程 + 号
+Invoke-RestMethod "$base/aurabot/api/snowluma/attach" -Method Post -ContentType application/json -Body '{}'
+Invoke-RestMethod "$base/aurabot/api/save" -Method Post -ContentType application/json -Body '{"dryRun":false}'
+Invoke-RestMethod "$base/aurabot/api/test-send" -Method Post -ContentType application/json -Body '{}'
 ```
 
-本机实测：`/state` 200、`/model/ping` 1.6s 回「在呢」、`/save` 能落盘
-`config.json`；仓库自带测试 `node --test "test/**/*.test.js"` 669 passed / 0 failed。
-
-## 配置（TUI 下没有面板，走接口或改文件）
-
-```powershell
-# 走接口，改完立即生效
-Invoke-RestMethod "$base/aurabot/api/save" -Method Post -ContentType application/json -Body (@{
-  botQQ   = '机器人小号QQ'
-  ownerQQ = '你的QQ'
-  gateway = 'snowluma'      # 或 'onebot'
-} | ConvertTo-Json)
-```
-
-或者直接改 `%USERPROFILE%\.dsh\plugins-data\aurabot\config.json`，改完重启 DSH。
-
-安全默认：`enabled=false`（总开关关）、`dryRun=true`（试运行）。不手动打开，一句都不会发到 QQ。
-
-## 还差什么才能真的收发 QQ 消息
-
-1. ~~机器人小号 / 主人号~~ —— 已写进本机 `config.json`（`botQQ` / `ownerQQ`，
-   只在 `~/.dsh/plugins-data/aurabot/` 里，不进仓库）。
-2. 一个 OneBot v11 网关：
-   - Windows 最省事是 [SnowLuma](https://github.com/SnowLuma/SnowLuma/releases)。v2.4.0 的
-     `win-x64.zip` 是**平铺**的（`index.mjs` / `node.exe` / `launcher.bat` 直接在压缩包根），
-     所以直接解压到 `C:\Aurabot\snowluma` 就正好对上插件要的层级，不用挪文件：
-     ```
-     https://github.com/SnowLuma/SnowLuma/releases/download/v2.4.0/SnowLuma-v2.4.0-win-x64.zip
-     sha256 93096cb6d4cf576999094e9f7d1c9fb08e22f6b41c879182f015e639dc437613   (41.3 MB)
-     ```
-     选完整版（自带 `node.exe`），lite 版要自己装 Node 22+。插件按它的 EULA 5.4
-     不代下载、不代同意协议，只启停你自己装好的那份；
-   - SnowLuma 是注入 `QQ.exe`（NTQQ）的，本机 QQ 在 `D:\APPs\QQNT\QQ.exe`（9.9.36）；
-     它和 QQ 必须同一个 Windows 用户、权限一致，否则注入不上；
-   - 或者接已有的 NapCat / LLOneBot / Lagrange / Docker 版 SnowLuma，把 `gateway`
-     改成 `onebot`，填正向 WS 地址（和 token）。
-3. 网关登录小号后让插件「接入机器人号」，它会用 `get_login_info` 核对号对不对；
-   然后打开总开关，先保持试运行跑一轮，再关掉试运行。
-
-当前状态：`C:\Aurabot` 还不存在，`/state` 里 `snowluma.installed = false`，
-所以**网关这一环还没装**。
+`/save` 可改 `enabled`（总开关）、`dryRun`（试运行）、`botQQ` / `ownerQQ` 等。
+安全默认是 `enabled=false` + `dryRun=true`。
 
 ## 跟上游同步
 
@@ -122,12 +105,14 @@ git fetch upstream
 git rebase upstream/main      # 本地改动在 main 上，rebase 完再 push origin main
 ```
 
-插件本体是纯 ESM、没有 npm 依赖，拉完重启 DSH 即可。
+插件本体是纯 ESM、没有 npm 依赖，拉完重启 `dsh web` 即可。
 
 ## 注意
 
 - 代码 MIT；但桌宠素材（大肥鱼形象/动画）是 **CC BY-NC-SA 4.0、不可商用**，
   50MB+ 不随仓库分发，插件启动时从 mods 仓库自动下载（本机已下到
-  `plugins-data\aurabot\modules-data\pet\packs\`，一次 429 后重试成功）。
-- SnowLuma 的 EULA 禁止自动化部署，插件只启停你自己装好的那份。
+  `plugins-data\aurabot\modules-data\pet\packs\`）。
+- SnowLuma 是 source-available 非商业许可，二进制另受 EULA 约束；EULA 5.4 禁止
+  通过自动化脚本部署，所以插件只启停你自己装好的那份，协议由你本人同意。
 - 群聊走 `aurabot-social` preset，一个本地工具都不挂；本地工具只在主人私聊里。
+- `config.json` 里存着 QQ 号和网关 token，它在 `~/.dsh/plugins-data/`，不在本仓库。
