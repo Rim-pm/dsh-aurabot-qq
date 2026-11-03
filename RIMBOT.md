@@ -93,15 +93,20 @@ Invoke-RestMethod "$base/aurabot/api/save" -Method Post -ContentType application
 
 ## 还差什么才能真的收发 QQ 消息
 
-1. 一个**机器人 QQ 小号**，以及它的登录凭据（这个只能你本人扫码/登录）。
+1. ~~机器人小号 / 主人号~~ —— 已写进本机 `config.json`（`botQQ` / `ownerQQ`，
+   只在 `~/.dsh/plugins-data/aurabot/` 里，不进仓库）。
 2. 一个 OneBot v11 网关：
    - Windows 最省事是 [SnowLuma](https://github.com/SnowLuma/SnowLuma/releases)：
-     自己下载解压，在面板里同意 EULA（插件按它的 5.4 条不代下载、不代同意），
-     登录小号后让插件「接入机器人号」；
-   - 或者接已有的 NapCat / LLOneBot / Lagrange / Docker 版 SnowLuma，把正向 WS 地址填进来。
-3. 填完 `botQQ` / `ownerQQ`，打开总开关，先保持试运行跑一轮，再关掉试运行。
+     解压到 `C:\Aurabot\snowluma`，**`index.mjs` 必须在目录根**（官方 zip 常多套一层
+     `SnowLuma\`，要么挪上来，要么把 `snowluma.dir` 指到内层）。插件按它的 EULA 5.4
+     不代下载、不代同意协议，只启停你自己装好的那份；
+   - 或者接已有的 NapCat / LLOneBot / Lagrange / Docker 版 SnowLuma，把 `gateway`
+     改成 `onebot`，填正向 WS 地址（和 token）。
+3. 网关登录小号后让插件「接入机器人号」，它会用 `get_login_info` 核对号对不对；
+   然后打开总开关，先保持试运行跑一轮，再关掉试运行。
 
-当前本机：`C:\Aurabot` 不存在，全盘也没搜到 SnowLuma，所以**网关这一环还没装**。
+当前状态：`C:\Aurabot` 还不存在，`/state` 里 `snowluma.installed = false`，
+所以**网关这一环还没装**。
 
 ## 跟上游同步
 
