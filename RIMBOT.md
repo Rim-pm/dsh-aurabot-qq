@@ -1,8 +1,11 @@
 # RimBot · 本机跑通记录
 
-这份文件是本仓库在本机的落地笔记（不是上游内容）。上游是
-[`aureth-labs/dsh-aurabot-qq`](https://github.com/aureth-labs/dsh-aurabot-qq)，
-`origin` 目前仍指向上游；等你在 GitHub 上 fork 完，改成自己的地址即可。
+这份文件是本仓库在本机的落地笔记（不是上游内容）。
+
+| remote | 地址 | 用途 |
+|---|---|---|
+| `origin` | https://github.com/Rim-pm/dsh-aurabot-qq | 自己的 fork，日常提交推这里 |
+| `upstream` | https://github.com/aureth-labs/dsh-aurabot-qq | 原作者仓库，只用来拉更新 |
 
 ## 本机环境（2026-11-03）
 
@@ -103,8 +106,8 @@ Invoke-RestMethod "$base/aurabot/api/save" -Method Post -ContentType application
 ## 跟上游同步
 
 ```powershell
-git fetch origin
-git pull --rebase origin main
+git fetch upstream
+git rebase upstream/main      # 本地改动在 main 上，rebase 完再 push origin main
 ```
 
 插件本体是纯 ESM、没有 npm 依赖，拉完重启 DSH 即可。
