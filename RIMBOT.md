@@ -96,10 +96,17 @@ Invoke-RestMethod "$base/aurabot/api/save" -Method Post -ContentType application
 1. ~~机器人小号 / 主人号~~ —— 已写进本机 `config.json`（`botQQ` / `ownerQQ`，
    只在 `~/.dsh/plugins-data/aurabot/` 里，不进仓库）。
 2. 一个 OneBot v11 网关：
-   - Windows 最省事是 [SnowLuma](https://github.com/SnowLuma/SnowLuma/releases)：
-     解压到 `C:\Aurabot\snowluma`，**`index.mjs` 必须在目录根**（官方 zip 常多套一层
-     `SnowLuma\`，要么挪上来，要么把 `snowluma.dir` 指到内层）。插件按它的 EULA 5.4
+   - Windows 最省事是 [SnowLuma](https://github.com/SnowLuma/SnowLuma/releases)。v2.4.0 的
+     `win-x64.zip` 是**平铺**的（`index.mjs` / `node.exe` / `launcher.bat` 直接在压缩包根），
+     所以直接解压到 `C:\Aurabot\snowluma` 就正好对上插件要的层级，不用挪文件：
+     ```
+     https://github.com/SnowLuma/SnowLuma/releases/download/v2.4.0/SnowLuma-v2.4.0-win-x64.zip
+     sha256 93096cb6d4cf576999094e9f7d1c9fb08e22f6b41c879182f015e639dc437613   (41.3 MB)
+     ```
+     选完整版（自带 `node.exe`），lite 版要自己装 Node 22+。插件按它的 EULA 5.4
      不代下载、不代同意协议，只启停你自己装好的那份；
+   - SnowLuma 是注入 `QQ.exe`（NTQQ）的，本机 QQ 在 `D:\APPs\QQNT\QQ.exe`（9.9.36）；
+     它和 QQ 必须同一个 Windows 用户、权限一致，否则注入不上；
    - 或者接已有的 NapCat / LLOneBot / Lagrange / Docker 版 SnowLuma，把 `gateway`
      改成 `onebot`，填正向 WS 地址（和 token）。
 3. 网关登录小号后让插件「接入机器人号」，它会用 `get_login_info` 核对号对不对；
