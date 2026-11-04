@@ -151,11 +151,20 @@ export const DEFAULTS = {
     shotChance: 0.35, // 刷完发截图给主人；0 = 不自动发
     shotLibrary: 300,
     // 订阅 UP 主动态：定时查订阅列表，有新动态就私聊告诉主人
-    subs: [], // [{mid, name, filters: []}]，filters 见 src/bili/dynamics.js
+    subs: [], // [{mid, name, filters, prompt, mode, minLevel}]，字段见 src/bili/dynamics.js
     subIntervalMin: 15, // 多久查一轮（B 站对高频读会降级，别调太小）
     subGapSec: 6, // 号与号之间歇几秒（同一个出口连读容易被 -352）
     subMaxPerPoll: 3, // 一个号一次最多推几条，防止隔几天没开就刷屏
     subForwardImages: true, // 图文动态把配图也发过去
+    // AI 过滤：新动态先让模型判断要不要推、怎么总结（默认关；关着就是原样转，不花 token）
+    aiFilter: false,
+    aiFilterPrompt: '', // 全局判定规则（什么算重要、要什么口吻）
+    aiFilterModel: { provider: '', model: '' }, // 判定用模型，留空跟随默认模型
+    aiFilterMinLevel: 2, // 1 都推 / 2 值得说一声 / 3 很重要
+    aiFilterVision: false, // 没有正文的纯图动态要不要看图判断（会多花 token）
+    aiFilterMaxChars: 800, // 交给模型判断的正文最多多少字
+    aiFilterLink: false, // 摘要末尾带不带原动态链接
+    cardRenderer: 'none', // 预留：none | svg（把摘要渲染成卡片图，第一期不做）
   },
   // 刷抖音：专用浏览器（独立登录资料，不碰你平时的浏览器），经 CDP 控制。浏览 / 点赞 / 评论 / 分享各项权限在 profilePerms.douyin*。
   douyin: {
@@ -361,12 +370,26 @@ export function normalize(raw) {
   b.subGapSec = num(b.subGapSec, 6, 0, 120)
   b.subMaxPerPoll = Math.round(num(b.subMaxPerPoll, 3, 1, 10))
   b.subForwardImages = bool(b.subForwardImages, true)
+  b.aiFilter = bool(b.aiFilter, false)
+  b.aiFilterPrompt = String(b.aiFilterPrompt || '').slice(0, 2000)
+  b.aiFilterModel = {
+    provider: String(b.aiFilterModel?.provider || '').trim(),
+    model: String(b.aiFilterModel?.model || '').trim(),
+  }
+  b.aiFilterMinLevel = Math.round(num(b.aiFilterMinLevel, 2, 1, 3))
+  b.aiFilterVision = bool(b.aiFilterVision, false)
+  b.aiFilterMaxChars = Math.round(num(b.aiFilterMaxChars, 800, 100, 3000))
+  b.aiFilterLink = bool(b.aiFilterLink, false)
+  b.cardRenderer = ['none', 'svg'].includes(b.cardRenderer) ? b.cardRenderer : 'none'
   // 订阅列表：只收数字 UID，按 mid 去重（面板 / 工具都可能写进来）
   b.subs = (Array.isArray(b.subs) ? b.subs : [])
     .map((x) => ({
       mid: String(x && x.mid != null ? x.mid : '').trim(),
       name: String((x && x.name) || '').trim().slice(0, 40),
       filters: (Array.isArray(x && x.filters) ? x.filters : String((x && x.filters) || '').split(/[\s,，]+/)).map((f) => String(f).trim()).filter(Boolean).slice(0, 12),
+      prompt: String((x && x.prompt) || '').trim().slice(0, 500),
+      mode: x && x.mode === 'raw' ? 'raw' : 'auto', // auto = 跟随 AI 过滤总开关
+      minLevel: Math.round(num(x && x.minLevel, 0, 0, 3)), // 0 = 跟随全局
     }))
     .filter((x) => /^\d{3,}$/.test(x.mid))
     .filter((x, i, arr) => arr.findIndex((y) => y.mid === x.mid) === i)

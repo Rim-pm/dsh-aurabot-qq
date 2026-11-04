@@ -10,6 +10,7 @@
 
 import { dataDir, readJson, writeJson } from '../core/store.js'
 import { createBiliApi, UA } from './api.js'
+import { createJudge, formatSummary, pickImages } from './judge.js'
 
 const FILE = () => dataDir('bili-subs.json')
 const MAX_SUBS = 50
@@ -123,13 +124,15 @@ async function grabImage(url, fetchImpl = fetch) {
  * @param {object} [o.memory]     记经历
  * @param {object} o.log
  * @param {object} [o.api]        注入假的 B 站（测试用）
+ * @param {Function} [o.ask]      api.ask：AI 过滤用（一次性问模型，不进会话）；不给就整段跳过
  * @param {Function} [o.sleep]
  */
-export function createSubs({ getConfig, setConfig, hub, memory, log, api: injected, sleep }) {
+export function createSubs({ getConfig, setConfig, hub, memory, log, api: injected, ask, sleep, fetchImpl = fetch }) {
   const api = injected || createBiliApi({ getCookie: () => getConfig().bili.cookie, log })
   const wait = sleep || ((ms) => new Promise((r) => setTimeout(r, ms)))
-  const load = () => readJson(FILE(), () => ({ cursors: {}, lastPoll: 0 }))
+  const load = () => readJson(FILE(), () => ({ cursors: {}, lastPoll: 0, judged: [] }))
   const save = (s) => writeJson(FILE(), s)
+  const judge = createJudge({ getConfig, ask, log, fetchImpl })
   let busy = false
 
   const cfg = () => getConfig().bili
@@ -137,32 +140,90 @@ export function createSubs({ getConfig, setConfig, hub, memory, log, api: inject
   const ownerChat = () => (getConfig().ownerQQ ? `private:${getConfig().ownerQQ}` : '')
   const intervalMs = () => Math.max(1, Number(cfg().subIntervalMin) || 15) * 60_000
 
-  /** 推一条：文字先走，图跟着走（发不出去不影响文字）。 */
-  async function push(sub, item) {
+  /**
+   * 推一条。AI 判定过时，摘要和挑过的图放进同一条消息（文字里说「图1 图2」，下面就跟着那两张）；
+   * 原样转还是老样子：文字先走，图跟着走，发不出去不影响文字。
+   */
+  async function push(sub, item, verdict) {
     const g = getConfig()
     const to = ownerChat()
     if (!to) return false
-    const text = formatDynamic(item, sub)
+    const ai = Boolean(verdict && verdict.by === 'ai')
+    let text = ai
+      ? formatSummary(item, sub, verdict, { images: g.bili.subForwardImages, link: g.bili.aiFilterLink })
+      : formatDynamic(item, sub)
+    // 判失败了也照转，但要让主人知道这不是「AI 觉得不重要」而是没判成
+    if (verdict && verdict.by === 'fail') text += '\n（AI 没判成，原样转给你）'
     if (g.dryRun) {
-      log.info(`试运行：本来要推送 B 站动态（${sub.name || item.author || sub.mid}）${clip(item.text || item.title, 40)}`)
+      log.info(`试运行：本来要推送 B 站动态（${sub.name || item.author || sub.mid}）${clip(item.text || item.title, 40)}${ai ? `（AI 判 ${verdict.level} 级）` : ''}`)
       return false
     }
-    try {
-      await hub.sendText(to, text)
-    } catch (error) {
-      log.warn('推送 B 站动态失败：', error.message)
-      return false
-    }
-    if (g.bili.subForwardImages && (item.images || []).length) {
-      for (const url of item.images.slice(0, 9)) {
-        const buf = await grabImage(url)
-        if (!buf) continue
-        await hub.sendImage(to, 'base64://' + buf.toString('base64')).catch(() => null)
+    // 有图才取图：AI 只挑相关的几张，没判过 / 判失败就照旧全发
+    const withImages = Boolean(g.bili.subForwardImages)
+    let sent = false
+    // AI 摘要和图合成一条：文字里的「图1 图2」和下面跟着的图对得上
+    if (ai && withImages && typeof hub.sendSegments === 'function') {
+      const urls = pickImages(item, verdict).slice(0, 9)
+      const bufs = urls.length ? (await Promise.all(urls.map((url) => grabImage(url, fetchImpl)))).filter(Boolean) : []
+      if (bufs.length) {
+        const segs = [
+          { type: 'text', data: { text } },
+          ...bufs.map((buf) => ({ type: 'image', data: { file: 'base64://' + buf.toString('base64') } })),
+        ]
+        try {
+          await hub.sendSegments(to, segs, '[B站动态] ' + clip(text, 40))
+          sent = true
+        } catch (error) {
+          // 一条发不出去就拆开：文字一定送到，图（已经取回来了，别再取一遍）尽力
+          log.warn('图文一条没发出去，拆开发：', error.message)
+          try {
+            await hub.sendText(to, text)
+          } catch (e2) {
+            log.warn('推送 B 站动态失败：', e2.message)
+            return false
+          }
+          for (const buf of bufs) await hub.sendImage(to, 'base64://' + buf.toString('base64')).catch(() => null)
+          sent = true
+        }
       }
     }
-    memory?.addEvent?.({ text: `在B站看到${sub.name || item.author || 'UP主'}发了动态：${clip(item.text || item.title || '（无正文）', 60)}`, tags: ['B站', '动态'], importance: 0.4 })
-    log.info(`推送了 B 站动态：${sub.name || item.author || sub.mid} ${item.id}`)
+    // 原样转（或没图 / 合成没成功）：还是老样子，文字先走，图跟着走
+    if (!sent) {
+      try {
+        await hub.sendText(to, text)
+      } catch (error) {
+        log.warn('推送 B 站动态失败：', error.message)
+        return false
+      }
+      if (withImages) {
+        const urls = (ai ? pickImages(item, verdict) : (item.images || [])).slice(0, 9)
+        for (const url of urls) {
+          const buf = await grabImage(url, fetchImpl)
+          if (!buf) continue
+          await hub.sendImage(to, 'base64://' + buf.toString('base64')).catch(() => null)
+        }
+      }
+    }
+    memory?.addEvent?.({ text: `在B站看到${sub.name || item.author || 'UP主'}发了动态：${clip(verdict?.title || item.text || item.title || '（无正文）', 60)}`, tags: ['B站', '动态'], importance: 0.4 })
+    log.info(`推送了 B 站动态：${sub.name || item.author || sub.mid} ${item.id}${ai ? `（AI：${verdict.level} 级）` : ''}`)
     return true
+  }
+
+  /** 判定历史（面板「最近判定」）：只留最近 40 条，不然状态文件会越长越大。 */
+  function recordJudged(s, sub, item, verdict, keep) {
+    s.judged = Array.isArray(s.judged) ? s.judged : []
+    s.judged.unshift({
+      at: Date.now(),
+      mid: String(sub.mid),
+      name: sub.name || '',
+      id: item.id,
+      keep,
+      level: Number(verdict.level) || 0,
+      by: verdict.by || '',
+      title: verdict.title || clip(item.text || item.title || '（无正文）', 40),
+      why: verdict.why || '',
+    })
+    s.judged.length = Math.min(s.judged.length, 40)
   }
 
   /**
@@ -218,11 +279,27 @@ export function createSubs({ getConfig, setConfig, hub, memory, log, api: inject
         const top = items.reduce((a, b) => (compareId(b.id, a) > 0 ? b.id : a), st.cursor || '0')
         if (!st.cursor) { st.cursor = top; continue } // 冷启动：只记游标，不补发历史
         const filters = resolveFilters(sub.filters)
-        const fresh = items
+        const batch = items
           .filter((it) => it.id && keepDynamic(it, filters) && compareId(it.id, st.cursor) > 0)
           .sort((a, b) => compareId(a.id, b.id))
-        // 一次最多推几条，防止隔了几天没开就一次性刷屏
-        for (const it of fresh.slice(-limit)) if (await push(sub, it)) pushed++
+          // 一次最多推几条，防止隔了几天没开就一次性刷屏
+          .slice(-limit)
+        if (batch.length) {
+          // 先判再推：一批一次调用，省 token，也让模型能横向比较哪条更值得说
+          const verdicts = await judge.judge(sub, batch).catch((error) => {
+            log.debug('整批判定出错（原样转）：', error.message)
+            return []
+          })
+          const byId = new Map(verdicts.map((v) => [v.id, v]))
+          const floor = judge.minLevelOf(sub)
+          for (const it of batch) {
+            const v = byId.get(it.id) || { id: it.id, keep: true, level: 2, by: 'fail', why: '没拿到判定，照转' }
+            // 只有真让模型判过的才受阈值管；raw / skip / fail 一律照转
+            const keep = v.by === 'ai' ? v.keep !== false && v.level >= floor : v.keep !== false
+            recordJudged(s, sub, it, v, keep)
+            if (keep && await push(sub, it, v)) pushed++
+          }
+        }
         st.cursor = top
       }
       s.lastPoll = Date.now()
@@ -289,7 +366,8 @@ export function createSubs({ getConfig, setConfig, hub, memory, log, api: inject
     }
     const wanted = (Array.isArray(filters) ? filters : String(filters || '').split(/[\s,，]+/))
       .map((f) => String(f).trim()).filter(Boolean)
-    const next = { mid, name, filters: wanted }
+    // mode 默认 auto：AI 过滤总开关开着就走判定，关着就原样转；号上写 raw 是单独关掉
+    const next = { mid, name, filters: wanted, prompt: '', mode: 'auto', minLevel: 0 }
     setConfig((cur) => ({ ...cur, bili: { ...cur.bili, subs: [...(cur.bili.subs || []), next] } }))
     // 冷启动：先把当前最新一条记成游标，免得第一次轮询把历史全推一遍
     try {
@@ -313,8 +391,28 @@ export function createSubs({ getConfig, setConfig, hub, memory, log, api: inject
     setConfig((cur) => ({ ...cur, bili: { ...cur.bili, subs: (cur.bili.subs || []).filter((x) => String(x.mid) !== String(hit.mid)) } }))
     const s = load()
     delete s.cursors[hit.mid]
+    if (Array.isArray(s.judged)) s.judged = s.judged.filter((x) => String(x.mid) !== String(hit.mid))
     save(s)
     return { ok: true, message: `取消订阅了 ${hit.name || hit.mid}` }
+  }
+
+  /**
+   * 改某个号的判定设置（面板用）：prompt = 这个号的情况，mode = auto / raw，minLevel = 0 表示跟随全局。
+   * 订阅列表在面板上没有可编辑字段（保存配置时会保留原值），所以这些只能走这里写回去。
+   */
+  function update(mid, patch = {}) {
+    const key = String(mid || '').trim()
+    const hit = subs().find((x) => String(x.mid) === key)
+    if (!hit) return { ok: false, message: `没订阅 ${key || '这个号'}` }
+    const prompt = patch.prompt === undefined ? (hit.prompt || '') : String(patch.prompt || '').trim().slice(0, 500)
+    const mode = ['auto', 'raw'].includes(patch.mode) ? patch.mode : (hit.mode === 'raw' ? 'raw' : 'auto')
+    const own = patch.minLevel === undefined ? Number(hit.minLevel) || 0 : Math.round(Number(patch.minLevel) || 0)
+    const minLevel = Math.max(0, Math.min(3, own))
+    setConfig((cur) => ({
+      ...cur,
+      bili: { ...cur.bili, subs: (cur.bili.subs || []).map((x) => (String(x.mid) === key ? { ...x, prompt, mode, minLevel } : x)) },
+    }))
+    return { ok: true, message: `改了 ${hit.name || hit.mid} 的判定设置`, item: { mid: key, prompt, mode, minLevel } }
   }
 
   /** 面板 / 工具用：订阅列表 + 每个号的健康情况。 */
@@ -326,12 +424,20 @@ export function createSubs({ getConfig, setConfig, hub, memory, log, api: inject
         mid: sub.mid,
         name: sub.name || '',
         filters: Array.isArray(sub.filters) ? sub.filters : [],
+        prompt: sub.prompt || '',
+        mode: sub.mode === 'raw' ? 'raw' : 'auto',
+        minLevel: Number(sub.minLevel) || 0,
         cursor: st.cursor || '',
         fails: st.fails || 0,
         lastError: st.lastError || '',
         lastPollAt: st.lastPollAt || 0,
       }
     })
+  }
+
+  /** 面板「最近判定」：最近 40 条，新的在前。 */
+  function judged() {
+    return (load().judged || []).slice(0, 40)
   }
 
   /** 每分钟调一次：醒着的时候按间隔查。 */
@@ -349,7 +455,7 @@ export function createSubs({ getConfig, setConfig, hub, memory, log, api: inject
   }
 
   return {
-    poll, subscribe, unsubscribe, list, tick,
-    state: () => ({ count: subs().length, lastPoll: load().lastPoll || 0 }),
+    poll, subscribe, unsubscribe, update, list, judged, tick,
+    state: () => ({ count: subs().length, lastPoll: load().lastPoll || 0, judgedCount: (load().judged || []).length }),
   }
 }

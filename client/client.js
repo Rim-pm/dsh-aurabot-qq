@@ -2468,11 +2468,19 @@ h(Card, { title: '群里什么时候必回', desc: '被 @、有人引用回复�
     function BiliSubs({ draft, setDraft, toast }) {
       const f = useField(draft, setDraft)
       const [items, setItems] = useState(null)
+      const [judged, setJudged] = useState([])
       const [who, setWho] = useState('')
       const [filters, setFilters] = useState('')
+      const [edits, setEdits] = useState({}) // mid → {prompt, mode}：面板上改的判定设置，保存前只在本机
       const [busy, setBusy] = useState('')
-      const load = () => get('/bili/subs').then((r) => setItems(r.items || [])).catch((e) => { setItems([]); toast(e.message, 'err') })
+      const load = () => get('/bili/subs')
+        .then((r) => { setItems(r.items || []); setJudged(r.judged || []) })
+        .catch((e) => { setItems([]); setJudged([]); toast(e.message, 'err') })
       useEffect(() => { load() }, [])
+      const aiOn = !!(draft.bili && draft.bili.aiFilter)
+      const editOf = (it) => ({ prompt: it.prompt || '', mode: it.mode || 'auto', ...(edits[it.mid] || {}) })
+      const setEdit = (mid, patch) => setEdits((e) => ({ ...e, [mid]: { ...(e[mid] || {}), ...patch } }))
+      const dirty = (it) => { const e = editOf(it); return e.prompt !== (it.prompt || '') || e.mode !== (it.mode || 'auto') }
       const add = async () => {
         const v = who.trim()
         if (!v) return toast('填 UID 或主页链接', 'err')
@@ -2486,6 +2494,14 @@ h(Card, { title: '群里什么时候必回', desc: '被 @、有人引用回复�
         const r = await post('/bili/sub/del', { mid })
         toast(r.message, r.ok ? 'ok' : 'err')
         load()
+      }
+      const saveSub = async (it) => {
+        const e = editOf(it)
+        setBusy('save:' + it.mid)
+        const r = await post('/bili/sub/update', { mid: it.mid, prompt: e.prompt, mode: e.mode })
+        setBusy('')
+        toast(r.message, r.ok ? 'ok' : 'err')
+        if (r.ok) { setEdits((x) => { const n = { ...x }; delete n[it.mid]; return n }); load() }
       }
       const check = async () => {
         setBusy('check')
@@ -2504,16 +2520,60 @@ h(Card, { title: '群里什么时候必回', desc: '被 @、有人引用回复�
           h('input', { className: 'ab-input', style: { flex: '0 1 190px' }, placeholder: '过滤（可空）：lottery forward', value: filters, onChange: (e) => setFilters(e.target.value) }),
           h(Btn, { small: true, kind: 'primary', onClick: add, disabled: !!busy }, busy === 'add' ? '添加中…' : '添加')),
         !items ? h(Empty, { icon: '⏳', text: '加载中…' }) : items.length === 0 ? h(Empty, { icon: '📮', text: '还没订阅。填个游戏官方的 UID 或主页链接试试。' }) :
-          h('div', { className: 'ab-list' }, items.map((it) => h('div', { key: it.mid, className: 'ab-li' },
-            h('div', { className: 'meta' }, it.mid, h('br'), it.fails ? '连续失败 ' + it.fails + ' 次' : it.lastPollAt ? timeAgo(it.lastPollAt) + '查过' : '还没查过'),
-            h('div', { className: 'body' },
-              h('b', null, it.name || '（还没查到名字）'),
-              it.filters && it.filters.length ? h('div', { className: 'ab-muted ab-small' }, '过滤：' + it.filters.join(' ')) : null,
-              it.lastError ? h('div', { className: 'ab-small', style: { color: 'var(--ab-warn)' } }, it.lastError) : null,
-              h('div', { className: 'ab-flex', style: { marginTop: 4 } }, h(Btn, { small: true, kind: 'ghost', onClick: () => del(it.mid) }, '取消订阅')))))),
+          h('div', { className: 'ab-list' }, items.map((it) => {
+            const e = editOf(it)
+            return h('div', { key: it.mid, className: 'ab-li' },
+              h('div', { className: 'meta' }, it.mid, h('br'), it.fails ? '连续失败 ' + it.fails + ' 次' : it.lastPollAt ? timeAgo(it.lastPollAt) + '查过' : '还没查过'),
+              h('div', { className: 'body' },
+                h('b', null, it.name || '（还没查到名字）'),
+                it.filters && it.filters.length ? h('div', { className: 'ab-muted ab-small' }, '过滤：' + it.filters.join(' ')) : null,
+                it.lastError ? h('div', { className: 'ab-small', style: { color: 'var(--ab-warn)' } }, it.lastError) : null,
+                // 每个号可以单独选「AI 摘要 / 原样转」，再写一句这个号的情况（给判定用）；AI 关着就不显示
+                aiOn ? h('div', { className: 'ab-flex', style: { marginTop: 6, flexWrap: 'wrap', gap: 6 } },
+                  h(Seg, {
+                    value: e.mode,
+                    options: [{ value: 'auto', label: 'AI 摘要' }, { value: 'raw', label: '原样转' }],
+                    onChange: (v) => setEdit(it.mid, { mode: v }),
+                  }),
+                  h('input', {
+                    className: 'ab-input', style: { flex: '1 1 200px' },
+                    placeholder: '这个号的情况（可空）：比如「明日方舟官号，只看活动公告和补偿」',
+                    value: e.prompt, onChange: (ev) => setEdit(it.mid, { prompt: ev.target.value }),
+                  }),
+                  dirty(it) ? h(Btn, { small: true, kind: 'primary', disabled: !!busy, onClick: () => saveSub(it) }, busy === 'save:' + it.mid ? '保存中…' : '保存') : null) : null,
+                h('div', { className: 'ab-flex', style: { marginTop: 4 } },
+                  h(Btn, { small: true, kind: 'ghost', onClick: () => del(it.mid) }, '取消订阅')))
+            )
+          })),
         h(Row, { label: '多久查一轮', hint: 'B 站对高频读取会降级，别调太小' }, f.range('bili.subIntervalMin', 5, 120, 5, (v) => v + ' 分钟')),
         h(Row, { label: '一个号一次最多推几条', hint: '隔了几天没开时，防止一次刷屏' }, f.num('bili.subMaxPerPoll', { min: 1, max: 10 }), h('span', { className: 'ab-muted' }, '条')),
         h(Row, { label: '图文动态连图一起发' }, f.sw('bili.subForwardImages')),
+        h('div', { style: { marginTop: 14, borderTop: '1px solid var(--ab-line-2)', paddingTop: 12 } },
+          h(Row, { label: '先让 AI 看一眼再推', hint: '开着时新动态先问一次模型：要不要推、压成一句话 + 要点。只有新动态才花 token，一轮一批一次调用；关着就是原样转，不花钱' }, f.sw('bili.aiFilter')),
+          ...[
+            aiOn ? h(Row, { key: 'lvl', label: '判到多重要才推', hint: '号上还能单独设；调高就只收重要的，调低就都收' }, f.range('bili.aiFilterMinLevel', 1, 3, 1, (v) => ['', '都推', '值得说一声', '很重要'][v])) : null,
+            aiOn ? h(Row, { key: 'vis', label: '没有正文的纯图动态也看图', hint: '会多花 token（一张图按 token 算）；不开就照转' }, f.sw('bili.aiFilterVision')) : null,
+            aiOn ? h(Row, { key: 'link', label: '摘要末尾带原动态链接', hint: '默认不带，看着清爽；想回溯点进去就打开' }, f.sw('bili.aiFilterLink')) : null,
+            aiOn ? h('div', { key: 'prompt', style: { marginTop: 8 } },
+              h('div', { className: 'ab-label' }, h('b', null, '全局判定提示词'), h('small', null, '什么算重要、要什么口吻；每个号还能在列表里单独写一句')),
+              h('textarea', {
+                className: 'ab-textarea', style: { minHeight: 96, marginTop: 6 },
+                placeholder: '默认已经会做这几件事：判断值不值得推、像随口说一声那样写、把「2026/11/5 10:00」换成「明天上午10点」、只留维护时间和奖励、不带安装包大小和配置要求。\n这里只写你想额外加的，比如：\n- 我在玩这个游戏，新角色和卡池信息优先；\n- 补偿和兑换码一定要提醒我领。',
+                value: getPath(draft, 'bili.aiFilterPrompt') || '',
+                onChange: (ev) => setDraft(setPath(draft, 'bili.aiFilterPrompt', ev.target.value)),
+              })) : null,
+            aiOn && judged.length ? h('div', { key: 'judged', style: { marginTop: 12 } },
+              h('div', { className: 'ab-label' }, h('b', null, '最近判定'), h('small', null, '模型为什么推 / 为什么没推；觉得判歪了就改上面的提示词')),
+              h('div', { className: 'ab-list' }, judged.slice(0, 8).map((x, i) => h('div', { key: x.id + '-' + i, className: 'ab-li' },
+                h('div', { className: 'meta' }, x.keep ? '推了' : '没推', x.level ? h('br') : null, x.level ? x.level + ' 级' : null, h('br'), timeAgo(x.at)),
+                h('div', { className: 'body' },
+                  h('b', null, x.name || x.mid),
+                  h('div', { className: 'ab-small' }, x.title || '（没有摘要）'),
+                  x.why ? h('div', { className: 'ab-muted ab-small' }, x.why) : null,
+                  x.by === 'fail' ? h('div', { className: 'ab-small', style: { color: 'var(--ab-warn)' } }, '判定失败，原样转了') : null,
+                  x.by === 'skip' ? h('div', { className: 'ab-small', style: { color: 'var(--ab-muted)' } }, '没有正文，照转') : null,
+                  x.by === 'raw' ? h('div', { className: 'ab-small', style: { color: 'var(--ab-muted)' } }, '这个号设的是「原样转」，没走 AI') : null))))) : null,
+          ].filter(Boolean)),
       )
     }
 

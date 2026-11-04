@@ -39,9 +39,9 @@ function boot({ owner = true, bili = {} } = {}) {
   return { cfg, routes, builders, timers, chat }
 }
 
-test('面板接线：订阅的四个接口和定时任务都注册上了', () => {
+test('面板接线：订阅的五个接口和定时任务都注册上了', () => {
   const { routes, timers } = boot()
-  for (const p of ['/bili/subs', '/bili/sub/add', '/bili/sub/del', '/bili/subs/check']) {
+  for (const p of ['/bili/subs', '/bili/sub/add', '/bili/sub/del', '/bili/sub/update', '/bili/subs/check']) {
     assert.ok(routes.has(p), `缺接口 ${p}`)
   }
   assert.ok(timers.includes('订阅B站动态'), '每分钟要有一次订阅 tick')
@@ -98,6 +98,53 @@ test('面板要读的配置项都在（默认值）', () => {
   assert.equal(c.bili.subMaxPerPoll, 3)
   assert.equal(c.bili.subForwardImages, true)
   assert.equal(c.bili.subsOnly, false, '默认不改变原有行为')
+  // AI 过滤默认关：升级后行为和以前一模一样，不偷偷花 token
+  assert.equal(c.bili.aiFilter, false)
+  assert.equal(c.bili.aiFilterPrompt, '')
+  assert.deepEqual(c.bili.aiFilterModel, { provider: '', model: '' })
+  assert.equal(c.bili.aiFilterMinLevel, 2)
+  assert.equal(c.bili.aiFilterVision, false)
+  assert.equal(c.bili.aiFilterMaxChars, 800)
+  assert.equal(c.bili.aiFilterLink, false, '摘要默认不带原链接')
+  assert.equal(c.bili.cardRenderer, 'none', '卡片渲染是第二期，先留位子')
+})
+
+test('面板接口：每号的判定设置能改，列表能把它们读回来（不联网）', async () => {
+  const { routes, cfg } = boot({ bili: { subs: [{ mid: '161775300', name: 'A' }] } })
+  const r = await routes.get('/bili/sub/update')({ body: { mid: '161775300', prompt: '只看公告', mode: 'raw', minLevel: 3 } })
+  assert.equal(r.ok, true)
+  assert.equal(cfg.bili.subs[0].prompt, '只看公告')
+  assert.equal(cfg.bili.subs[0].mode, 'raw')
+  assert.equal(cfg.bili.subs[0].minLevel, 3)
+
+  const list = await routes.get('/bili/subs')({})
+  assert.equal(list.items[0].prompt, '只看公告')
+  assert.equal(list.items[0].mode, 'raw')
+  assert.equal(list.items[0].minLevel, 3)
+  assert.deepEqual(list.judged, [], '还没判过就是空数组，面板照着渲染')
+
+  const miss = await routes.get('/bili/sub/update')({ body: { mid: '999', prompt: 'x' } })
+  assert.equal(miss.ok, false)
+  assert.match(miss.message, /没订阅/)
+})
+
+test('配置：每号的 prompt / mode / minLevel 会被归一化（老配置也认）', () => {
+  const c = normalize({
+    bili: {
+      subs: [
+        { mid: '161775300', name: 'A' },
+        { mid: '200', name: 'B', prompt: '只看卡池', mode: 'raw', minLevel: 3 },
+        { mid: '300', mode: '乱写', minLevel: 99 },
+      ],
+    },
+  })
+  assert.equal(c.bili.subs[0].mode, 'auto', '老配置没有 mode 就是跟随开关')
+  assert.equal(c.bili.subs[0].prompt, '')
+  assert.equal(c.bili.subs[0].minLevel, 0)
+  assert.equal(c.bili.subs[1].prompt, '只看卡池')
+  assert.equal(c.bili.subs[1].mode, 'raw')
+  assert.equal(c.bili.subs[2].mode, 'auto')
+  assert.equal(c.bili.subs[2].minLevel, 3, '越界的阈值夹回来')
 })
 
 test('只要订阅：只剩三个订阅工具，看视频 / 评论 / 截图 / 改资料全不给她', () => {

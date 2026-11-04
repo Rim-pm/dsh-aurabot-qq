@@ -11,10 +11,10 @@ import { avatarSource } from '../profile/index.js'
 export default {
   id: 'bili',
   name: 'B站',
-  version: '1.2.0',
-  description: '看别人发的 B 站视频；定时自己刷、评论、回评论；订阅 UP 主动态并私聊推送；抽帧看画面、发截图；按权限改自己的头像 / 签名（bili_watch / bili_comment / bili_subscribe / bili_unsubscribe / bili_subs / qq_send_shot / bili_set_avatar / bili_set_sign）',
+  version: '1.3.0',
+  description: '看别人发的 B 站视频；定时自己刷、评论、回评论；订阅 UP 主动态并私聊推送（可让 AI 先判断要不要、并总结成要点）；抽帧看画面、发截图；按权限改自己的头像 / 签名（bili_watch / bili_comment / bili_subscribe / bili_unsubscribe / bili_subs / qq_send_shot / bili_set_avatar / bili_set_sign）',
   tab: 'bili',
-  files: ['bili/duty.js', 'bili/api.js', 'bili/vision.js', 'bili/shots.js', 'bili/dynamics.js'],
+  files: ['bili/duty.js', 'bili/api.js', 'bili/vision.js', 'bili/shots.js', 'bili/dynamics.js', 'bili/judge.js'],
   setup(api) {
     const { hub } = api.core
     const lastImage = new Map() // chatId → 最近一张图的网址（给 bili_set_avatar 的 last 用）
@@ -26,7 +26,7 @@ export default {
     const bili = createBili({ getConfig: api.config, hub, memory: api.lazy('memory'), log: api.log, dsh: api.dsh })
     api.every(60_000, () => bili.tick(), '刷B站')
     // 订阅 UP 主动态：单独的引擎，不跟「刷视频」抢配额（它自己会按 subIntervalMin 节流）
-    const subs = createSubs({ getConfig: api.config, setConfig: api.setConfig, hub, memory: api.lazy('memory'), log: api.log })
+    const subs = createSubs({ getConfig: api.config, setConfig: api.setConfig, hub, memory: api.lazy('memory'), log: api.log, ask: api.ask })
     api.every(60_000, () => subs.tick(), '订阅B站动态')
 
     // 看视频谁发的链接都能看，评论要主人开口；「只要订阅」模式下这几样连同截图都不给她
@@ -83,10 +83,11 @@ export default {
           execute: async () => {
             const items = subs.list()
             if (!items.length) return { ok: true, list: [], message: '还没订阅任何 UP 主' }
+            const ai = api.config().bili.aiFilter
             return {
               ok: true,
               list: items,
-              message: `订阅了 ${items.length} 个：` + items.map((x) => `${x.name || x.mid}${x.fails ? '（最近失败 ' + x.fails + ' 次）' : ''}`).join('、'),
+              message: `订阅了 ${items.length} 个：` + items.map((x) => `${x.name || x.mid}${ai && x.mode !== 'raw' ? '（AI 过滤）' : ''}${x.fails ? '（最近失败 ' + x.fails + ' 次）' : ''}`).join('、'),
             }
           },
         }),
@@ -154,10 +155,14 @@ export default {
 
     api.route('/bili/state', async () => ({ ok: true, ...bili.state(), account: await bili.account() }))
     // 订阅动态（面板「订阅」卡片）
-    api.route('/bili/subs', async () => ({ ok: true, items: subs.list(), ...subs.state() }))
+    api.route('/bili/subs', async () => ({ ok: true, items: subs.list(), judged: subs.judged(), ...subs.state() }))
     api.route('/bili/sub/add', async (req) => {
       const b = await api.core.http.body(req)
       return subs.subscribe(String(b.who || b.mid || ''), b.filters)
+    })
+    api.route('/bili/sub/update', async (req) => {
+      const b = await api.core.http.body(req)
+      return subs.update(String(b.mid || ''), { prompt: b.prompt, mode: b.mode, minLevel: b.minLevel })
     })
     api.route('/bili/sub/del', async (req) => {
       const b = await api.core.http.body(req)
