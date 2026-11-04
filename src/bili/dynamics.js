@@ -10,7 +10,8 @@
 
 import { dataDir, readJson, writeJson } from '../core/store.js'
 import { createBiliApi, UA } from './api.js'
-import { createJudge, formatSummary, pickImages } from './judge.js'
+import { createJudge, formatSummary, formatDigest, pickImages } from './judge.js'
+import { cleanExamples } from './examples.js'
 
 const FILE = () => dataDir('bili-subs.json')
 const MAX_SUBS = 50
@@ -144,7 +145,7 @@ export function createSubs({ getConfig, setConfig, hub, memory, log, api: inject
    * 推一条。AI 判定过时，摘要和挑过的图放进同一条消息（文字里说「图1 图2」，下面就跟着那两张）；
    * 原样转还是老样子：文字先走，图跟着走，发不出去不影响文字。
    */
-  async function push(sub, item, verdict) {
+  async function pushOne(sub, item, verdict) {
     const g = getConfig()
     const to = ownerChat()
     if (!to) return false
@@ -207,6 +208,70 @@ export function createSubs({ getConfig, setConfig, hub, memory, log, api: inject
     memory?.addEvent?.({ text: `在B站看到${sub.name || item.author || 'UP主'}发了动态：${clip(verdict?.title || item.text || item.title || '（无正文）', 60)}`, tags: ['B站', '动态'], importance: 0.4 })
     log.info(`推送了 B 站动态：${sub.name || item.author || sub.mid} ${item.id}${ai ? `（AI：${verdict.level} 级）` : ''}`)
     return true
+  }
+
+  /** digest 发出去之后统一记经历 / 日志：每条都要留痕，别因为合并了只记一条。 */
+  function noteDigest(sub, entries) {
+    for (const e of entries) {
+      memory?.addEvent?.({ text: `在B站看到${sub.name || e.item.author || 'UP主'}发了动态：${clip(e.verdict?.title || e.item.text || e.item.title || '（无正文）', 60)}`, tags: ['B站', '动态'], importance: 0.4 })
+    }
+    log.info(`推送了 B 站动态（合并 ${entries.length} 条）：${sub.name || sub.mid} ${entries.map((e) => e.item.id).join(',')}`)
+  }
+
+  /**
+   * 一轮里的几条合成一条 digest。合成只是为了少刷屏：发送失败就拆回 pushOne，
+   * 一条一条发，绝不能因为排版 / 分段接口出问题把动态丢了。
+   */
+  async function pushDigest(sub, entries) {
+    const g = getConfig()
+    const to = ownerChat()
+    if (!to || !entries.length) return 0
+    if (g.dryRun) {
+      log.info(`试运行：本来要合并推送 B 站动态（${sub.name || sub.mid}）${entries.length} 条`)
+      return 0
+    }
+    const split = async (why) => {
+      log.warn(`合并推送没发出去（${why}），拆回一条一条发`)
+      let n = 0
+      for (const e of entries) if (await pushOne(sub, e.item, e.verdict)) n++
+      return n
+    }
+    let text = ''
+    let images = []
+    try {
+      ({ text, images } = formatDigest(sub, entries, { images: g.bili.subForwardImages, link: g.bili.aiFilterLink }))
+    } catch (error) {
+      return split('排版出错：' + error.message)
+    }
+    const bufs = images.length ? (await Promise.all(images.map((url) => grabImage(url, fetchImpl)))).filter(Boolean) : []
+    // 图一张都没取回来：把文字里的「图1 图2」去掉，别让主人对着空气找图
+    if (images.length && !bufs.length) {
+      try {
+        ({ text } = formatDigest(sub, entries, { images: false, link: g.bili.aiFilterLink }))
+      } catch (error) { /* 保持原文，至少文字能发出去 */ }
+    }
+    if (bufs.length && typeof hub.sendSegments === 'function') {
+      const segs = [
+        { type: 'text', data: { text } },
+        ...bufs.map((buf) => ({ type: 'image', data: { file: 'base64://' + buf.toString('base64') } })),
+      ]
+      try {
+        await hub.sendSegments(to, segs, '[B站动态] ' + clip(text, 40))
+        noteDigest(sub, entries)
+        return entries.length
+      } catch (error) {
+        return split(error.message)
+      }
+    }
+    // 没图 / 网关不支持分段：文字先发，图再一张张跟；文字都发不出去才拆回逐条
+    try {
+      await hub.sendText(to, text)
+    } catch (error) {
+      return split(error.message)
+    }
+    for (const buf of bufs) await hub.sendImage(to, 'base64://' + buf.toString('base64')).catch(() => null)
+    noteDigest(sub, entries)
+    return entries.length
   }
 
   /** 判定历史（面板「最近判定」）：只留最近 40 条，不然状态文件会越长越大。 */
@@ -292,13 +357,24 @@ export function createSubs({ getConfig, setConfig, hub, memory, log, api: inject
           })
           const byId = new Map(verdicts.map((v) => [v.id, v]))
           const floor = judge.minLevelOf(sub)
+          const kept = []
           for (const it of batch) {
             const v = byId.get(it.id) || { id: it.id, keep: true, level: 2, by: 'fail', why: '没拿到判定，照转' }
             // 只有真让模型判过的才受阈值管；raw / skip / fail 一律照转
             const keep = v.by === 'ai' ? v.keep !== false && v.level >= floor : v.keep !== false
             recordJudged(s, sub, it, v, keep)
-            if (keep && await push(sub, it, v)) pushed++
+            if (keep) kept.push({ item: it, verdict: v })
           }
+          // 先收集 keep 的条目再决定怎么发：AI 摘要的多条合成一条 digest；
+          // 原样 / 判失败的仍然逐条发（要带原文和「AI 没判成」），一条都不能吞。
+          const aiKept = kept.filter((e) => e.verdict.by === 'ai')
+          const rawKept = kept.filter((e) => e.verdict.by !== 'ai')
+          if (c.subDigest && judge.modeOf(sub) === 'ai' && aiKept.length > 1) {
+            pushed += await pushDigest(sub, aiKept)
+          } else {
+            for (const e of aiKept) if (await pushOne(sub, e.item, e.verdict)) pushed++
+          }
+          for (const e of rawKept) if (await pushOne(sub, e.item, e.verdict)) pushed++
         }
         st.cursor = top
       }
@@ -367,7 +443,7 @@ export function createSubs({ getConfig, setConfig, hub, memory, log, api: inject
     const wanted = (Array.isArray(filters) ? filters : String(filters || '').split(/[\s,，]+/))
       .map((f) => String(f).trim()).filter(Boolean)
     // mode 默认 auto：AI 过滤总开关开着就走判定，关着就原样转；号上写 raw 是单独关掉
-    const next = { mid, name, filters: wanted, prompt: '', mode: 'auto', minLevel: 0 }
+    const next = { mid, name, filters: wanted, prompt: '', mode: 'auto', minLevel: 0, examples: [] }
     setConfig((cur) => ({ ...cur, bili: { ...cur.bili, subs: [...(cur.bili.subs || []), next] } }))
     // 冷启动：先把当前最新一条记成游标，免得第一次轮询把历史全推一遍
     try {
@@ -397,7 +473,8 @@ export function createSubs({ getConfig, setConfig, hub, memory, log, api: inject
   }
 
   /**
-   * 改某个号的判定设置（面板用）：prompt = 这个号的情况，mode = auto / raw，minLevel = 0 表示跟随全局。
+   * 改某个号的判定设置（面板用）：prompt = 这个号的情况，mode = auto / raw，minLevel = 0 表示跟随全局，
+   * examples = 主人给的判定例子（最多 5 条）。
    * 订阅列表在面板上没有可编辑字段（保存配置时会保留原值），所以这些只能走这里写回去。
    */
   function update(mid, patch = {}) {
@@ -408,11 +485,26 @@ export function createSubs({ getConfig, setConfig, hub, memory, log, api: inject
     const mode = ['auto', 'raw'].includes(patch.mode) ? patch.mode : (hit.mode === 'raw' ? 'raw' : 'auto')
     const own = patch.minLevel === undefined ? Number(hit.minLevel) || 0 : Math.round(Number(patch.minLevel) || 0)
     const minLevel = Math.max(0, Math.min(3, own))
-    setConfig((cur) => ({
-      ...cur,
-      bili: { ...cur.bili, subs: (cur.bili.subs || []).map((x) => (String(x.mid) === key ? { ...x, prompt, mode, minLevel } : x)) },
-    }))
-    return { ok: true, message: `改了 ${hit.name || hit.mid} 的判定设置`, item: { mid: key, prompt, mode, minLevel } }
+    // 例子写坏了就整次不写，保留原来的；别把主人已经存好的几条清空
+    let examples = cleanExamples(hit.examples)
+    if (patch.examples !== undefined) {
+      if (!Array.isArray(patch.examples)) return { ok: false, message: '例子的格式不对，没存（原来的没动）' }
+      examples = cleanExamples(patch.examples)
+    }
+    try {
+      setConfig((cur) => ({
+        ...cur,
+        bili: { ...cur.bili, subs: (cur.bili.subs || []).map((x) => (String(x.mid) === key ? { ...x, prompt, mode, minLevel, examples } : x)) },
+      }))
+    } catch (error) {
+      return { ok: false, message: `没存进去（${error.message}），原来的没动` }
+    }
+    const saved = subs().find((x) => String(x.mid) === key) || hit
+    return {
+      ok: true,
+      message: `改了 ${hit.name || hit.mid} 的判定设置`,
+      item: { mid: key, prompt: saved.prompt || '', mode: saved.mode === 'raw' ? 'raw' : 'auto', minLevel: Number(saved.minLevel) || 0, examples: cleanExamples(saved.examples) },
+    }
   }
 
   /** 面板 / 工具用：订阅列表 + 每个号的健康情况。 */
@@ -427,6 +519,7 @@ export function createSubs({ getConfig, setConfig, hub, memory, log, api: inject
         prompt: sub.prompt || '',
         mode: sub.mode === 'raw' ? 'raw' : 'auto',
         minLevel: Number(sub.minLevel) || 0,
+        examples: cleanExamples(sub.examples),
         cursor: st.cursor || '',
         fails: st.fails || 0,
         lastError: st.lastError || '',

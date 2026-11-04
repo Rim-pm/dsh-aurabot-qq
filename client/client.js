@@ -2471,16 +2471,33 @@ h(Card, { title: '群里什么时候必回', desc: '被 @、有人引用回复�
       const [judged, setJudged] = useState([])
       const [who, setWho] = useState('')
       const [filters, setFilters] = useState('')
-      const [edits, setEdits] = useState({}) // mid → {prompt, mode}：面板上改的判定设置，保存前只在本机
+      const [edits, setEdits] = useState({}) // mid → {prompt, mode, examples}：面板上改的判定设置，保存前只在本机
+      const [exOpen, setExOpen] = useState({}) // mid → 例子编辑区展开没
+      const [exText, setExText] = useState({}) // mid → 正在填的例子正文
+      const [exWhy, setExWhy] = useState({}) // mid → 正在填的例子原因
+      const [exKeep, setExKeep] = useState({}) // mid → 这条例子是「推」还是「不推」
       const [busy, setBusy] = useState('')
       const load = () => get('/bili/subs')
         .then((r) => { setItems(r.items || []); setJudged(r.judged || []) })
         .catch((e) => { setItems([]); setJudged([]); toast(e.message, 'err') })
       useEffect(() => { load() }, [])
       const aiOn = !!(draft.bili && draft.bili.aiFilter)
-      const editOf = (it) => ({ prompt: it.prompt || '', mode: it.mode || 'auto', ...(edits[it.mid] || {}) })
+      const editOf = (it) => ({ prompt: it.prompt || '', mode: it.mode || 'auto', examples: it.examples || [], ...(edits[it.mid] || {}) })
       const setEdit = (mid, patch) => setEdits((e) => ({ ...e, [mid]: { ...(e[mid] || {}), ...patch } }))
-      const dirty = (it) => { const e = editOf(it); return e.prompt !== (it.prompt || '') || e.mode !== (it.mode || 'auto') }
+      const dirty = (it) => {
+        const e = editOf(it)
+        return e.prompt !== (it.prompt || '') || e.mode !== (it.mode || 'auto') || JSON.stringify(e.examples) !== JSON.stringify(it.examples || [])
+      }
+      const addExample = (it) => {
+        const text = String(exText[it.mid] || '').trim()
+        if (!text) return toast('先写一句例子：这个号发过的一条动态，或者一句话', 'err')
+        const e = editOf(it)
+        if (e.examples.length >= 5) return toast('最多 5 条例子，删一条再加', 'err')
+        setEdit(it.mid, { examples: [...e.examples, { text, keep: exKeep[it.mid] !== false, why: String(exWhy[it.mid] || '').trim() }] })
+        setExText((x) => ({ ...x, [it.mid]: '' }))
+        setExWhy((x) => ({ ...x, [it.mid]: '' }))
+      }
+      const delExample = (it, i) => setEdit(it.mid, { examples: editOf(it).examples.filter((_, j) => j !== i) })
       const add = async () => {
         const v = who.trim()
         if (!v) return toast('填 UID 或主页链接', 'err')
@@ -2498,7 +2515,7 @@ h(Card, { title: '群里什么时候必回', desc: '被 @、有人引用回复�
       const saveSub = async (it) => {
         const e = editOf(it)
         setBusy('save:' + it.mid)
-        const r = await post('/bili/sub/update', { mid: it.mid, prompt: e.prompt, mode: e.mode })
+        const r = await post('/bili/sub/update', { mid: it.mid, prompt: e.prompt, mode: e.mode, examples: e.examples })
         setBusy('')
         toast(r.message, r.ok ? 'ok' : 'err')
         if (r.ok) { setEdits((x) => { const n = { ...x }; delete n[it.mid]; return n }); load() }
@@ -2512,7 +2529,7 @@ h(Card, { title: '群里什么时候必回', desc: '被 @、有人引用回复�
       }
       return h(Card, {
         title: '订阅 UP 主动态' + (items ? '（' + items.length + '）' : ''),
-        desc: '比如游戏官方号：它一发动态（公告、开播、投稿），她就私聊告诉你，图文动态连图一起发。按动态 id 记游标，所以不会重复推；B 站偶尔返回空列表时不会当成「没发」而漏掉。',
+        desc: '比如游戏官方号：它一发动态（公告、开播、投稿），她就私聊告诉你，图文动态连图一起发。按动态 id 记游标，所以不会重复推；B 站偶尔返回空列表时不会当成「没发」而漏掉。AI 过滤开着时，一轮多条会合成一条 digest（最多 3 张图，合成失败自动拆回逐条发）。',
         right: h(Btn, { small: true, onClick: check, disabled: !!busy }, busy === 'check' ? '正在查…' : '现在查一轮'),
       },
         h('div', { className: 'ab-flex', style: { marginBottom: 8, flexWrap: 'wrap' } },
@@ -2541,6 +2558,27 @@ h(Card, { title: '群里什么时候必回', desc: '被 @、有人引用回复�
                     value: e.prompt, onChange: (ev) => setEdit(it.mid, { prompt: ev.target.value }),
                   }),
                   dirty(it) ? h(Btn, { small: true, kind: 'primary', disabled: !!busy, onClick: () => saveSub(it) }, busy === 'save:' + it.mid ? '保存中…' : '保存') : null) : null,
+                // 判定例子：最多 5 条，跟这个号的提示词一起存；AI 关着不显示
+                aiOn ? h('div', { style: { marginTop: 6 } },
+                  h('div', { className: 'ab-flex', style: { flexWrap: 'wrap', gap: 6 } },
+                    h(Btn, { small: true, kind: 'ghost', onClick: () => setExOpen((x) => ({ ...x, [it.mid]: !x[it.mid] })) }, (exOpen[it.mid] ? '收起判定例子' : '判定例子') + '（' + e.examples.length + '/5）'),
+                    dirty(it) ? h('span', { className: 'ab-muted ab-small' }, '有改动，点上面的「保存」') : null),
+                  exOpen[it.mid] ? h('div', { style: { marginTop: 4 } },
+                    e.examples.length
+                      ? h('div', { className: 'ab-list' }, e.examples.map((ex, i) => h('div', { key: i, className: 'ab-li' },
+                        h('div', { className: 'meta' }, ex.keep ? '推' : '不推'),
+                        h('div', { className: 'body' }, ex.text,
+                          ex.why ? h('div', { className: 'ab-muted ab-small' }, ex.why) : null,
+                          h('div', { className: 'ab-flex', style: { marginTop: 4 } },
+                            h(Btn, { small: true, kind: 'ghost', onClick: () => delExample(it, i) }, '删掉'))))))
+                      : h('div', { className: 'ab-muted ab-small' }, '还没有例子。贴一条这个号发过的原话，标上「推 / 不推」，判定时一起给模型看。'),
+                    e.examples.length < 5
+                      ? h('div', { className: 'ab-flex', style: { marginTop: 6, flexWrap: 'wrap', gap: 6 } },
+                        h('input', { className: 'ab-input', style: { flex: '1 1 220px' }, placeholder: '这个号发过的一条动态，或一句话', value: exText[it.mid] || '', onChange: (ev) => setExText((x) => ({ ...x, [it.mid]: ev.target.value })) }),
+                        h('input', { className: 'ab-input', style: { flex: '0 1 150px' }, placeholder: '为什么（可空）', value: exWhy[it.mid] || '', onChange: (ev) => setExWhy((x) => ({ ...x, [it.mid]: ev.target.value })) }),
+                        h(Seg, { value: exKeep[it.mid] === false ? 'drop' : 'keep', options: [{ value: 'keep', label: '推' }, { value: 'drop', label: '不推' }], onChange: (v) => setExKeep((x) => ({ ...x, [it.mid]: v === 'keep' })) }),
+                        h(Btn, { small: true, onClick: () => addExample(it) }, '加'))
+                      : h('div', { className: 'ab-muted ab-small', style: { marginTop: 4 } }, '到 5 条上限了，删一条再加。')) : null) : null,
                 h('div', { className: 'ab-flex', style: { marginTop: 4 } },
                   h(Btn, { small: true, kind: 'ghost', onClick: () => del(it.mid) }, '取消订阅')))
             )
@@ -2554,6 +2592,7 @@ h(Card, { title: '群里什么时候必回', desc: '被 @、有人引用回复�
             aiOn ? h(Row, { key: 'lvl', label: '判到多重要才推', hint: '号上还能单独设；调高就只收重要的，调低就都收' }, f.range('bili.aiFilterMinLevel', 1, 3, 1, (v) => ['', '都推', '值得说一声', '很重要'][v])) : null,
             aiOn ? h(Row, { key: 'vis', label: '没有正文的纯图动态也看图', hint: '会多花 token（一张图按 token 算）；不开就照转' }, f.sw('bili.aiFilterVision')) : null,
             aiOn ? h(Row, { key: 'link', label: '摘要末尾带原动态链接', hint: '默认不带，看着清爽；想回溯点进去就打开' }, f.sw('bili.aiFilterLink')) : null,
+            aiOn ? h(Row, { key: 'digest', label: '一轮多条合成一条', hint: '同一个号一次查到多条值得推的，合成一条 digest，图最多 3 张（重要的先占名额）；关掉就一条一条发。合成失败会自动拆回逐条发' }, f.sw('bili.subDigest')) : null,
             aiOn ? h('div', { key: 'prompt', style: { marginTop: 8 } },
               h('div', { className: 'ab-label' }, h('b', null, '全局判定提示词'), h('small', null, '什么算重要、要什么口吻；每个号还能在列表里单独写一句')),
               h('textarea', {

@@ -5,6 +5,7 @@ import { DEFAULT_GROUP_POLICY } from '../chat/group-policy.js'
 import { LEVELS, PROFILE_PERM_KEYS, PROFILE_PERM_LEVELS, profilePermDefault } from '../chat/access.js'
 import { normalizeChatModels } from '../chat/chat-model.js'
 import { DIARY_AUDIENCES } from '../features/qzone-audience.js'
+import { cleanExamples } from '../bili/examples.js'
 
 export const DEFAULTS = {
   enabled: false, // 总开关：关着一句都不发
@@ -151,11 +152,12 @@ export const DEFAULTS = {
     shotChance: 0.35, // 刷完发截图给主人；0 = 不自动发
     shotLibrary: 300,
     // 订阅 UP 主动态：定时查订阅列表，有新动态就私聊告诉主人
-    subs: [], // [{mid, name, filters, prompt, mode, minLevel}]，字段见 src/bili/dynamics.js
+    subs: [], // [{mid, name, filters, prompt, mode, minLevel, examples}]，字段见 src/bili/dynamics.js
     subIntervalMin: 15, // 多久查一轮（B 站对高频读会降级，别调太小）
     subGapSec: 6, // 号与号之间歇几秒（同一个出口连读容易被 -352）
     subMaxPerPoll: 3, // 一个号一次最多推几条，防止隔几天没开就刷屏
     subForwardImages: true, // 图文动态把配图也发过去
+    subDigest: true, // AI 过滤开着时，一轮多条合成一条（最多 3 张图）；关掉就一条一条发
     // AI 过滤：新动态先让模型判断要不要推、怎么总结（默认关；关着就是原样转，不花 token）
     aiFilter: false,
     aiFilterPrompt: '', // 全局判定规则（什么算重要、要什么口吻）
@@ -370,6 +372,7 @@ export function normalize(raw) {
   b.subGapSec = num(b.subGapSec, 6, 0, 120)
   b.subMaxPerPoll = Math.round(num(b.subMaxPerPoll, 3, 1, 10))
   b.subForwardImages = bool(b.subForwardImages, true)
+  b.subDigest = bool(b.subDigest, true)
   b.aiFilter = bool(b.aiFilter, false)
   b.aiFilterPrompt = String(b.aiFilterPrompt || '').slice(0, 2000)
   b.aiFilterModel = {
@@ -390,6 +393,7 @@ export function normalize(raw) {
       prompt: String((x && x.prompt) || '').trim().slice(0, 500),
       mode: x && x.mode === 'raw' ? 'raw' : 'auto', // auto = 跟随 AI 过滤总开关
       minLevel: Math.round(num(x && x.minLevel, 0, 0, 3)), // 0 = 跟随全局
+      examples: cleanExamples(x && x.examples), // 主人给的判定例子，最多 5 条
     }))
     .filter((x) => /^\d{3,}$/.test(x.mid))
     .filter((x, i, arr) => arr.findIndex((y) => y.mid === x.mid) === i)

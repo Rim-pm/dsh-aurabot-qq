@@ -8,6 +8,7 @@ import { join } from 'node:path'
 
 let judge
 let dyn
+let examples
 let normalize
 let dataDir
 
@@ -15,6 +16,7 @@ before(async () => {
   process.env.AURABOT_DATA_DIR = mkdtempSync(join(tmpdir(), 'aurabot-bili-judge-'))
   judge = await import('../src/bili/judge.js')
   dyn = await import('../src/bili/dynamics.js')
+  examples = await import('../src/bili/examples.js')
   ;({ normalize } = await import('../src/core/config.js'))
   ;({ dataDir } = await import('../src/core/store.js'))
 })
@@ -41,7 +43,7 @@ function makeEngine({ cfg = {}, feed, ask, extraApi = {}, fetchImpl, segments = 
     hub: {
       sendText: async (to, text) => { sent.push({ to, text }); return { message_id: '1' } },
       sendImage: async (to, src) => { sent.push({ to, image: src }); return { message_id: '2' } },
-      ...(segments ? { sendSegments: async (to, segs, note) => { sent.push({ to, segs, note }); return { message_id: '3' } } } : {}),
+      ...(segments ? { sendSegments: typeof segments === 'function' ? segments : async (to, segs, note) => { sent.push({ to, segs, note }); return { message_id: '3' } } } : {}),
     },
     memory: { addEvent: (e) => events.push(e) },
     log: silent,
@@ -148,6 +150,124 @@ test('提示词：告诉模型「现在几点」，并要求把绝对时间换�
 test('提示词：要点压到两条，多给的丢掉', () => {
   const v = judge.parseVerdicts('[{"i":1,"keep":true,"level":2,"points":["a","b","c","d"]}]', 1)[0]
   assert.equal(v.points.length, 2)
+})
+
+test('例子：去空白、丢空条、默认推，最多留 5 条', () => {
+  const list = examples.cleanExamples([
+    { text: '  新活动「波朗」开启  ', keep: true, why: ' 主人在玩 ' },
+    { text: '   ', keep: false },
+    { text: '角色生日祝福', keep: false },
+    { text: 'x'.repeat(300) },
+    { text: '第四条' },
+    { text: '第五条' },
+    { text: '第六条（要被截掉）' },
+  ])
+  assert.equal(list.length, 5)
+  assert.deepEqual(list[0], { text: '新活动「波朗」开启', keep: true, why: '主人在玩' })
+  assert.equal(list[1].keep, false)
+  assert.equal(list[2].text.length, 201, '正文最多 200 字，多出来的用省略号')
+  assert.deepEqual(examples.cleanExamples(null), [])
+  assert.deepEqual(examples.cleanExamples([null, 'x', { text: '' }]), [], '坏条目直接丢')
+})
+
+test('例子：提示词里带「推 / 不推」和原因，没有例子就不占地方', () => {
+  const req = judge.buildJudgeRequest({
+    sub: {
+      mid: '161775300', name: '明日方舟',
+      examples: [
+        { text: '新卡池「波朗」开启', keep: true, why: '主人在玩，新角色优先' },
+        { text: '今天是阿米娅生日', keep: false, why: '日常问候，没信息量' },
+      ],
+    },
+    items: [item('1', '公告')],
+  })
+  assert.match(req.system, /主人给的例子/)
+  assert.match(req.system, /推：新卡池「波朗」开启 —— 主人在玩，新角色优先/)
+  assert.match(req.system, /不推：今天是阿米娅生日 —— 日常问候，没信息量/)
+  assert.match(req.system, /不要照抄/, '例子是标准，不是让模型抄')
+
+  const none = judge.buildJudgeRequest({ items: [item('1', '公告')] })
+  assert.doesNotMatch(none.system, /主人给的例子/)
+})
+
+test('例子：判定时真的会带给模型，不只是存在配置里', async () => {
+  const cfg = normalize({ bili: { enabled: true, aiFilter: true } })
+  const calls = []
+  const j = judge.createJudge({
+    getConfig: () => cfg,
+    log: silent,
+    ask: async (o) => { calls.push(o); return '[{"i":1,"keep":true,"level":2,"title":"T"}]' },
+  })
+  await j.judge({ mid: '1', name: 'A', examples: [{ text: '这种要推', keep: true, why: '主人说的' }] }, [item('1', '公告')])
+  assert.equal(calls.length, 1)
+  assert.match(calls[0].system, /主人给的例子/)
+  assert.match(calls[0].system, /推：这种要推/)
+})
+
+test('例子：配置归一化会截到 5 条，老配置没有 examples 就是空数组', () => {
+  const c = normalize({
+    bili: {
+      subs: [
+        { mid: '161775300', examples: Array.from({ length: 8 }, (_, i) => ({ text: `例子${i}`, keep: i % 2 === 1, why: `原因${i}` })) },
+        { mid: '200' },
+      ],
+    },
+  })
+  assert.equal(c.bili.subs[0].examples.length, 5)
+  assert.equal(c.bili.subs[0].examples[0].keep, false)
+  assert.equal(c.bili.subs[0].examples[1].keep, true)
+  assert.deepEqual(c.bili.subs[1].examples, [])
+})
+
+test('digest：编号 + 要点 + 图号；图最多 3 张，level 高的先占，同 level 按 id 升序', () => {
+  const low = item('10', '', { images: ['a1', 'a2'] })
+  const high = item('11', '', { images: ['b1', 'b2'] })
+  const mid = item('12', '', { images: ['c1'] })
+  const d = judge.formatDigest({ name: '明日方舟' }, [
+    { item: low, verdict: { title: '低', points: ['p1'], level: 1, images: [] } },
+    { item: high, verdict: { title: '高', points: ['p2', 'p3'], level: 3, images: [1, 2] } },
+    { item: mid, verdict: { title: '中', points: ['p4'], level: 2, images: [1] } },
+  ])
+  assert.match(d.text, /^【B站动态】明日方舟 · 3 条/)
+  assert.match(d.text, /1\. 低/)
+  assert.match(d.text, /2\. 高/)
+  assert.match(d.text, /3\. 中/)
+  assert.match(d.text, /   · p2/)
+  assert.match(d.text, /   · p3/)
+  // 3 级的高先占两张，2 级的中占一张；1 级的低没有名额
+  assert.deepEqual(d.images, ['b1', 'b2', 'c1'])
+  // 图号按正文顺序编：第 2 条说图1 图2，第 3 条说图3，第 1 条没有图
+  assert.match(d.text, /2\. 高[\s\S]*图1 图2/)
+  assert.match(d.text, /3\. 中[\s\S]*图3/)
+  assert.doesNotMatch(d.text, /1\. 低[\s\S]*图\d[\s\S]*2\. 高/, '低优先级的不该先占图号')
+})
+
+test('digest：同 level 按动态 id 升序抢图，图号仍按正文顺序编', () => {
+  const later = item('20', '', { images: ['x1', 'x2'] })
+  const earlier = item('10', '', { images: ['y1', 'y2'] })
+  const d = judge.formatDigest({ name: 'A' }, [
+    { item: later, verdict: { title: '后发的', level: 2, images: [1, 2] } },
+    { item: earlier, verdict: { title: '先发的', level: 2, images: [1, 2] } },
+  ])
+  // 同 level 先选 id 小的 10：y1、y2，再轮到 20 的 x1；正文里 20 在前，所以它是图1
+  assert.deepEqual(d.images, ['x1', 'y1', 'y2'])
+  assert.match(d.text, /1\. 后发的[\s\S]*图1/)
+  assert.match(d.text, /2\. 先发的[\s\S]*图2 图3/)
+})
+
+test('digest：没有图就只发文字；关掉连图也不标图号', () => {
+  const d = judge.formatDigest({ name: 'A' }, [
+    { item: item('1', '', { images: [] }), verdict: { title: 'T1', level: 2 } },
+    { item: item('2', '', { images: [] }), verdict: { title: 'T2', level: 1 } },
+  ])
+  assert.doesNotMatch(d.text, /图\d/)
+  assert.deepEqual(d.images, [])
+
+  const no = judge.formatDigest({ name: 'A' }, [
+    { item: item('1', '', { images: ['a.jpg'] }), verdict: { title: 'T1', level: 2, images: [1] } },
+  ], { images: false })
+  assert.doesNotMatch(no.text, /图\d/)
+  assert.deepEqual(no.images, [])
 })
 
 test('挑图：按模型点的号取，越界忽略；没点就全发', () => {
@@ -339,6 +459,144 @@ test('订阅 + AI 过滤：阈值能卡掉「说不上重要」的', async () =>
   assert.equal(r.pushed, 0, '2 级在阈值 3 下不推')
   assert.equal(engine.judged()[0].keep, false)
   assert.equal(engine.list()[0].cursor, '101')
+})
+
+test('订阅 + AI：一轮多条合成一条 digest，图最多 3 张', async () => {
+  reset()
+  let items = [item('100')]
+  const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0x00, 0x11])
+  const { engine, sent } = makeEngine({
+    cfg: { bili: { enabled: true, aiFilter: true, subForwardImages: true, subs: [{ mid: '161775300', name: 'A' }], subGapSec: 0 } },
+    feed: async () => items,
+    ask: async () => JSON.stringify([
+      { i: 1, keep: true, level: 3, title: '第一条', points: ['重要'], images: [1, 2], why: '重要' },
+      { i: 2, keep: true, level: 2, title: '第二条', points: ['一般'], images: [1], why: '一般' },
+      { i: 3, keep: true, level: 2, title: '第三条', points: ['闲聊'], images: [1], why: '闲聊' },
+    ]),
+    fetchImpl: async () => ({ ok: true, arrayBuffer: async () => jpeg.buffer }),
+    segments: true,
+  })
+  await engine.poll({ force: true })
+  items = [
+    item('103', '第三条', { images: ['c1'] }),
+    item('102', '第二条', { images: ['b1'] }),
+    item('101', '第一条', { images: ['a1', 'a2'] }),
+    item('100'),
+  ]
+  const r = await engine.poll({ force: true })
+  assert.equal(r.pushed, 3, '推送条数还是按动态算，不是按消息算')
+  assert.equal(sent.length, 1, '三条要合成一条，不能刷屏')
+  assert.equal(sent[0].segs[0].type, 'text')
+  assert.equal(sent[0].segs.length, 4, '一条文字 + 3 张图')
+  const text = sent[0].segs[0].data.text
+  assert.match(text, /【B站动态】A · 3 条/)
+  assert.match(text, /1\. 第一条/)
+  assert.match(text, /2\. 第二条/)
+  assert.match(text, /3\. 第三条/)
+  assert.match(text, /1\. 第一条[\s\S]*图1 图2/, '3 级的两张先占名额')
+  assert.match(text, /2\. 第二条[\s\S]*图3/)
+  assert.doesNotMatch(text, /3\. 第三条[\s\S]*图\d/, '名额用完，第三条没图')
+})
+
+test('订阅 + AI：digest 发送失败会拆回一条一条发，不能丢动态', async () => {
+  reset()
+  let items = [item('100')]
+  const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0x00, 0x11])
+  let calls = 0
+  const { engine, sent } = makeEngine({
+    cfg: { bili: { enabled: true, aiFilter: true, subForwardImages: true, subs: [{ mid: '161775300', name: 'A' }], subGapSec: 0 } },
+    feed: async () => items,
+    ask: async () => JSON.stringify([
+      { i: 1, keep: true, level: 3, title: '第一条', points: ['a'], images: [1] },
+      { i: 2, keep: true, level: 2, title: '第二条', points: ['b'], images: [1] },
+    ]),
+    fetchImpl: async () => ({ ok: true, arrayBuffer: async () => jpeg.buffer }),
+    // 第一次（digest）故意失败，后面逐条发成功
+    segments: async (to, segs, note) => {
+      calls++
+      if (calls === 1) throw new Error('格式不对')
+      sent.push({ to, segs, note })
+      return { message_id: '3' }
+    },
+  })
+  await engine.poll({ force: true })
+  items = [item('102', '第二条', { images: ['b1'] }), item('101', '第一条', { images: ['a1'] }), item('100')]
+  const r = await engine.poll({ force: true })
+  assert.equal(r.pushed, 2)
+  assert.equal(sent.length, 2, '合成失败要拆回两条，不能一条都不发')
+  assert.match(sent[0].segs[0].data.text, /第一条/)
+  assert.match(sent[1].segs[0].data.text, /第二条/)
+})
+
+test('订阅 + AI：subDigest 关掉就退回一条一条发（老行为）', async () => {
+  reset()
+  let items = [item('100')]
+  const { engine, sent } = makeEngine({
+    cfg: { bili: { enabled: true, aiFilter: true, subDigest: false, subForwardImages: false, subs: [{ mid: '161775300', name: 'A' }], subGapSec: 0 } },
+    feed: async () => items,
+    ask: async () => JSON.stringify([
+      { i: 1, keep: true, level: 3, title: '第一条', points: ['a'] },
+      { i: 2, keep: true, level: 2, title: '第二条', points: ['b'] },
+    ]),
+  })
+  await engine.poll({ force: true })
+  items = [item('102', '第二条'), item('101', '第一条'), item('100')]
+  const r = await engine.poll({ force: true })
+  assert.equal(r.pushed, 2)
+  assert.equal(sent.length, 2, '关掉 digest 就一条一条发')
+  assert.match(sent[0].text, /第一条/)
+  assert.match(sent[1].text, /第二条/)
+  assert.doesNotMatch(sent[0].text, /· 2 条/)
+})
+
+test('订阅：aiFilter 关着时 subDigest 不生效，行为和以前一模一样', async () => {
+  reset()
+  let items = [item('100')]
+  const { engine, sent } = makeEngine({
+    cfg: { bili: { enabled: true, aiFilter: false, subDigest: true, subForwardImages: false, subs: [{ mid: '161775300', name: 'A' }], subGapSec: 0 } },
+    feed: async () => items,
+  })
+  await engine.poll({ force: true })
+  items = [item('102', '第二条'), item('101', '第一条'), item('100')]
+  const r = await engine.poll({ force: true })
+  assert.equal(r.pushed, 2)
+  assert.equal(sent.length, 2, 'AI 没开时不能偷偷合并')
+  assert.match(sent[0].text, /第一条[\s\S]*opus\/101/)
+  assert.match(sent[1].text, /第二条[\s\S]*opus\/102/)
+})
+
+test('每号设置：例子能存、能读回来，超过上限截到 5 条，坏格式不覆盖', () => {
+  reset()
+  const { engine, state } = makeEngine({
+    cfg: { bili: { enabled: true, subs: [{ mid: '161775300', name: 'A' }] } },
+    feed: async () => [item('100')],
+  })
+  const r = engine.update('161775300', {
+    examples: [
+      { text: ' 新活动开启 ', keep: true, why: ' 主人在玩 ' },
+      { text: '角色生日祝福', keep: false },
+    ],
+  })
+  assert.equal(r.ok, true)
+  assert.deepEqual(r.item.examples, [
+    { text: '新活动开启', keep: true, why: '主人在玩' },
+    { text: '角色生日祝福', keep: false, why: '' },
+  ])
+  assert.deepEqual(engine.list()[0].examples, r.item.examples)
+  assert.equal(state.cfg.bili.subs[0].examples.length, 2)
+
+  const many = engine.update('161775300', { examples: Array.from({ length: 7 }, (_, i) => ({ text: `例子${i}` })) })
+  assert.equal(many.ok, true)
+  assert.equal(many.item.examples.length, 5, '最多 5 条')
+  assert.equal(engine.list()[0].examples.length, 5)
+
+  const before = engine.list()[0].examples
+  const bad = engine.update('161775300', { examples: '不是数组' })
+  assert.equal(bad.ok, false)
+  assert.deepEqual(engine.list()[0].examples, before, '写坏了不能把原来的例子清空')
+
+  const keep = engine.update('161775300', { prompt: '只看公告' })
+  assert.equal(keep.item.examples.length, 5, '只改提示词时例子要留着')
 })
 
 test('每号设置：prompt / mode / minLevel 能改，取消订阅时判定历史一起清', async () => {

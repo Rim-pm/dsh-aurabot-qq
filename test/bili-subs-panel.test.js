@@ -97,6 +97,7 @@ test('面板要读的配置项都在（默认值）', () => {
   assert.equal(c.bili.subGapSec, 6)
   assert.equal(c.bili.subMaxPerPoll, 3)
   assert.equal(c.bili.subForwardImages, true)
+  assert.equal(c.bili.subDigest, true, 'AI 开着时默认合并成一条')
   assert.equal(c.bili.subsOnly, false, '默认不改变原有行为')
   // AI 过滤默认关：升级后行为和以前一模一样，不偷偷花 token
   assert.equal(c.bili.aiFilter, false)
@@ -111,16 +112,26 @@ test('面板要读的配置项都在（默认值）', () => {
 
 test('面板接口：每号的判定设置能改，列表能把它们读回来（不联网）', async () => {
   const { routes, cfg } = boot({ bili: { subs: [{ mid: '161775300', name: 'A' }] } })
-  const r = await routes.get('/bili/sub/update')({ body: { mid: '161775300', prompt: '只看公告', mode: 'raw', minLevel: 3 } })
+  const r = await routes.get('/bili/sub/update')({
+    body: {
+      mid: '161775300', prompt: '只看公告', mode: 'raw', minLevel: 3,
+      examples: [{ text: '新活动开启', keep: true, why: '主人在玩' }, { text: '角色生日', keep: false }],
+    },
+  })
   assert.equal(r.ok, true)
   assert.equal(cfg.bili.subs[0].prompt, '只看公告')
   assert.equal(cfg.bili.subs[0].mode, 'raw')
   assert.equal(cfg.bili.subs[0].minLevel, 3)
+  assert.equal(cfg.bili.subs[0].examples.length, 2)
 
   const list = await routes.get('/bili/subs')({})
   assert.equal(list.items[0].prompt, '只看公告')
   assert.equal(list.items[0].mode, 'raw')
   assert.equal(list.items[0].minLevel, 3)
+  assert.deepEqual(list.items[0].examples, [
+    { text: '新活动开启', keep: true, why: '主人在玩' },
+    { text: '角色生日', keep: false, why: '' },
+  ])
   assert.deepEqual(list.judged, [], '还没判过就是空数组，面板照着渲染')
 
   const miss = await routes.get('/bili/sub/update')({ body: { mid: '999', prompt: 'x' } })
@@ -141,8 +152,10 @@ test('配置：每号的 prompt / mode / minLevel 会被归一化（老配置也
   assert.equal(c.bili.subs[0].mode, 'auto', '老配置没有 mode 就是跟随开关')
   assert.equal(c.bili.subs[0].prompt, '')
   assert.equal(c.bili.subs[0].minLevel, 0)
+  assert.deepEqual(c.bili.subs[0].examples, [], '老配置没有例子就是空数组')
   assert.equal(c.bili.subs[1].prompt, '只看卡池')
   assert.equal(c.bili.subs[1].mode, 'raw')
+  assert.equal(c.bili.subs[1].examples.length, 0)
   assert.equal(c.bili.subs[2].mode, 'auto')
   assert.equal(c.bili.subs[2].minLevel, 3, '越界的阈值夹回来')
 })

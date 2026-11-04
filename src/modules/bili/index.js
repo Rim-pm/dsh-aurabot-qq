@@ -11,10 +11,10 @@ import { avatarSource } from '../profile/index.js'
 export default {
   id: 'bili',
   name: 'B站',
-  version: '1.3.0',
-  description: '看别人发的 B 站视频；定时自己刷、评论、回评论；订阅 UP 主动态并私聊推送（可让 AI 先判断要不要、并总结成要点）；抽帧看画面、发截图；按权限改自己的头像 / 签名（bili_watch / bili_comment / bili_subscribe / bili_unsubscribe / bili_subs / qq_send_shot / bili_set_avatar / bili_set_sign）',
+  version: '1.4.0',
+  description: '看别人发的 B 站视频；定时自己刷、评论、回评论；订阅 UP 主动态并私聊推送（可让 AI 先判断要不要、并总结成要点；可给每个号存判定例子；一轮多条可合成一条 digest）；抽帧看画面、发截图；按权限改自己的头像 / 签名（bili_watch / bili_comment / bili_subscribe / bili_unsubscribe / bili_subs / qq_send_shot / bili_set_avatar / bili_set_sign）',
   tab: 'bili',
-  files: ['bili/duty.js', 'bili/api.js', 'bili/vision.js', 'bili/shots.js', 'bili/dynamics.js', 'bili/judge.js'],
+  files: ['bili/duty.js', 'bili/api.js', 'bili/vision.js', 'bili/shots.js', 'bili/dynamics.js', 'bili/judge.js', 'bili/examples.js'],
   setup(api) {
     const { hub } = api.core
     const lastImage = new Map() // chatId → 最近一张图的网址（给 bili_set_avatar 的 last 用）
@@ -162,7 +162,7 @@ export default {
     })
     api.route('/bili/sub/update', async (req) => {
       const b = await api.core.http.body(req)
-      return subs.update(String(b.mid || ''), { prompt: b.prompt, mode: b.mode, minLevel: b.minLevel })
+      return subs.update(String(b.mid || ''), { prompt: b.prompt, mode: b.mode, minLevel: b.minLevel, examples: b.examples })
     })
     api.route('/bili/sub/del', async (req) => {
       const b = await api.core.http.body(req)

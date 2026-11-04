@@ -7,6 +7,7 @@
 // 这里只管「判断 + 摘要」，不认识 B 站接口，也不发消息：方便单测，也避免和 dynamics.js 绕成环。
 
 import { UA, sniffImageType } from './api.js'
+import { exampleLines } from './examples.js'
 
 const TITLE_MAX = 24
 const POINT_MAX = 70
@@ -67,6 +68,13 @@ export function buildJudgeRequest({ globalPrompt = '', sub = {}, items = [], own
   ]
   const extra = String(globalPrompt || '').trim()
   if (extra) system.push('', '## 主人的额外要求（优先遵守）', extra)
+
+  // 例子比规则更直观：同样是「角色介绍」，主人标了不推，模型就知道这个号的口味
+  const examples = exampleLines(sub.examples)
+  if (examples.length) {
+    system.push('', '## 主人给的例子（照这个标准判）', ...examples,
+      '例子只用来对齐标准：不要照抄里面的标题或说法，也不要因为例子提过某样东西就认为新动态也有。')
+  }
 
   const lines = []
   if (who) lines.push(`主人：${who}`)
@@ -142,26 +150,81 @@ export function pickImages(item, verdict = {}) {
   return [...new Set(idx)].sort((a, b) => a - b).map((n) => all[n - 1])
 }
 
+/** 一条动态的摘要正文：模型给了就用模型的，没给就退回原文 / 标题 / 开播状态。 */
+function summaryOf(item, verdict = {}) {
+  const title = String(verdict.title || '').trim()
+  const points = (verdict.points || []).filter(Boolean)
+  if (title || points.length) return { title, points }
+  // 模型只给了个 keep、没给摘要：退回原文，总比推一条空消息强
+  const body = String(item.text || '').trim()
+  if (body) return { title: clip(body, 120), points: [] }
+  if (item.title) return { title: clip(item.title, 120), points: [] }
+  if (item.kind === 'live') return { title: item.live && item.live.status === 1 ? '开播了' : '下播了', points: [] }
+  return { title: '', points: [] }
+}
+
 /** 一条动态 + 判定 → 推给主人的那段话（结论 + 要点 + 图，链接默认不带）。 */
 export function formatSummary(item, sub, verdict = {}, { images: withImages = true, link: withLink = false } = {}) {
   const who = (sub && sub.name) || item.author || 'UP主'
   const lines = [`【B站动态】${who}`]
-  const title = String(verdict.title || '').trim()
-  const points = (verdict.points || []).filter(Boolean)
-  if (title) lines.push(title)
-  for (const p of points) lines.push('· ' + p)
-  if (!title && !points.length) {
-    // 模型只给了个 keep、没给摘要：退回原文，总比推一条空消息强
-    const body = String(item.text || '').trim()
-    if (body) lines.push(clip(body, 120))
-    else if (item.title) lines.push(clip(item.title, 120))
-    else if (item.kind === 'live') lines.push(item.live && item.live.status === 1 ? '开播了' : '下播了')
-  }
+  const s = summaryOf(item, verdict)
+  if (s.title) lines.push(s.title)
+  for (const p of s.points) lines.push('· ' + p)
   // 编号按「真正会发出去的那几张」数，不然说「图2」却没有第二张
   const imgs = withImages ? pickImages(item, verdict) : []
   if (imgs.length) lines.push(imgs.map((_, i) => `图${i + 1}`).join(' '))
   if (withLink && item.url) lines.push(item.url)
   return lines.filter(Boolean).join('\n')
+}
+
+export const DIGEST_IMAGES_MAX = 3
+
+const idKey = (id) => {
+  try { return BigInt(String(id || '0')) } catch (error) { return 0n }
+}
+const compareIds = (a, b) => {
+  const x = idKey(a)
+  const y = idKey(b)
+  return x < y ? -1 : x > y ? 1 : 0
+}
+
+/**
+ * 一轮里同一个号的多条动态合成一条 digest。
+ * 图最多 3 张：按 level 从高到低占名额，同 level 按动态 id 升序；图号按正文顺序编，
+ * 这样第 2 条说「图1」时，下面第一张图就是它，不会跟别的条目串位。
+ */
+export function formatDigest(sub, entries, { images: withImages = true, link = false } = {}) {
+  const list = (entries || []).filter((e) => e && e.item)
+  const who = (sub && sub.name) || list[0]?.item?.author || 'UP主'
+  const levelOf = (e) => Math.max(1, Math.min(3, Math.round(Number(e.verdict && e.verdict.level)) || 2))
+
+  const ranked = [...list].sort((a, b) => levelOf(b) - levelOf(a) || compareIds(a.item.id, b.item.id))
+  const chosen = new Map()
+  let room = withImages ? DIGEST_IMAGES_MAX : 0
+  for (const e of ranked) {
+    if (room <= 0) break
+    const urls = pickImages(e.item, e.verdict || {}).slice(0, room)
+    if (!urls.length) continue
+    chosen.set(e.item.id, urls)
+    room -= urls.length
+  }
+
+  const ordered = []
+  const lines = [`【B站动态】${who} · ${list.length} 条`]
+  for (const [i, e] of list.entries()) {
+    const s = summaryOf(e.item, e.verdict || {})
+    // 没标题但有要点时，把第一条要点提到标题位，别写成「1. （没有摘要）」再跟一遍
+    const head = s.title || s.points[0] || '（没有摘要）'
+    lines.push(`${i + 1}. ${head}`)
+    for (const p of s.title ? s.points : s.points.slice(1)) lines.push(`   · ${p}`)
+    const urls = chosen.get(e.item.id) || []
+    if (urls.length) {
+      const nums = urls.map((url) => { ordered.push(url); return ordered.length })
+      lines.push(`   ${nums.map((n) => `图${n}`).join(' ')}`)
+    }
+    if (link && e.item.url) lines.push(`   ${e.item.url}`)
+  }
+  return { text: lines.join('\n'), images: ordered }
 }
 
 const withTimeout = (p, ms) => new Promise((resolve, reject) => {
