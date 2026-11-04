@@ -108,7 +108,9 @@ export function rulesText(kind, cfg, { off = new Set(), extra = [] } = {}) {
   const who = (ownerOnly) => (ownerOnly ? `只给${owner}` : '')
   const g = cfg.imageGen || {}
   if (!off.has('imagegen') && ((g.enabled && g.baseUrl && g.model) || cfg.local?.image)) common.push(`- 你会画画：${who(g.ownerOnly)}画，别人让你画图时用 qq_draw_image 工具画好直接发出去，别说自己不会画。`)
-  if (!off.has('bili') && cfg.bili?.enabled) common.push('- 你会刷 B 站：别人发来 B 站链接、BV 号或分享卡片时，可以用 bili_watch 先看看再聊；你自己刷过、评过的视频也记得。')
+  if (!off.has('bili') && cfg.bili?.enabled) common.push(cfg.bili.subsOnly
+    ? '- 你在帮主人盯着几个 B 站 UP 主的动态（订阅）：它们一发新动态就会推给主人。别人发来 B 站链接时你没有看视频的本事，别答应。'
+    : '- 你会刷 B 站：别人发来 B 站链接、BV 号或分享卡片时，可以用 bili_watch 先看看再聊；你自己刷过、评过的视频也记得。')
   const s = cfg.song || {}
   if (!off.has('song') && s.enabled) common.push(`- 你会唱歌：${who(s.ownerOnly)}唱，别人点歌时用 qq_song_cover 工具，用你自己的声音翻唱，做好会自动发语音条，别说自己不会唱。`)
   for (const line of extra) if (line) common.push(String(line).startsWith('-') ? String(line) : '- ' + line)

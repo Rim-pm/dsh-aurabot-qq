@@ -128,6 +128,7 @@ export const DEFAULTS = {
   local: { tts: false, image: false, song: false, asr: false },
   bili: {
     enabled: false,
+    subsOnly: false, // 只要订阅：不刷视频、不评论、不回评论、不发截图、不改资料，只查订阅的 UP 主动态
     sessdata: '', // B 站 Cookie 里的 SESSDATA（登录凭证）
     biliJct: '', // B 站 Cookie 里的 bili_jct（发评论要用）。两个都不填也能看视频，只是不能评论
     cookie: '', // 由上面两个拼出来给接口用；老配置的整串会自动拆到上面两个里
@@ -149,6 +150,12 @@ export const DEFAULTS = {
     ffmpegPath: '', // 留空从 PATH 查找
     shotChance: 0.35, // 刷完发截图给主人；0 = 不自动发
     shotLibrary: 300,
+    // 订阅 UP 主动态：定时查订阅列表，有新动态就私聊告诉主人
+    subs: [], // [{mid, name, filters: []}]，filters 见 src/bili/dynamics.js
+    subIntervalMin: 15, // 多久查一轮（B 站对高频读会降级，别调太小）
+    subGapSec: 6, // 号与号之间歇几秒（同一个出口连读容易被 -352）
+    subMaxPerPoll: 3, // 一个号一次最多推几条，防止隔几天没开就刷屏
+    subForwardImages: true, // 图文动态把配图也发过去
   },
   // 刷抖音：专用浏览器（独立登录资料，不碰你平时的浏览器），经 CDP 控制。浏览 / 点赞 / 评论 / 分享各项权限在 profilePerms.douyin*。
   douyin: {
@@ -337,7 +344,7 @@ export function normalize(raw) {
   for (const k of ['tts', 'image', 'song', 'asr']) c.local[k] = bool(c.local[k], false)
   const b = c.bili
   Object.assign(b, splitBiliCookie(b))
-  for (const k of ['enabled', 'autoBrowse', 'comment', 'reply', 'shareToOwner', 'like', 'vision']) b[k] = bool(b[k], DEFAULTS.bili[k])
+  for (const k of ['enabled', 'subsOnly', 'autoBrowse', 'comment', 'reply', 'shareToOwner', 'like', 'vision']) b[k] = bool(b[k], DEFAULTS.bili[k])
   b.visionFrames = Math.round(num(b.visionFrames, 6, 2, 12))
   b.ffmpegPath = String(b.ffmpegPath || '').trim()
   b.shotChance = num(b.shotChance, 0.35, 0, 1)
@@ -350,6 +357,20 @@ export function normalize(raw) {
   b.maxCommentsPerDay = num(b.maxCommentsPerDay, 3, 0, 50)
   b.maxRepliesPerDay = num(b.maxRepliesPerDay, 6, 0, 100)
   b.keywords = (Array.isArray(b.keywords) ? b.keywords : String(b.keywords || '').split(/[\n,，]+/)).map((x) => String(x).trim()).filter(Boolean).slice(0, 30)
+  b.subIntervalMin = num(b.subIntervalMin, 15, 5, 1440)
+  b.subGapSec = num(b.subGapSec, 6, 0, 120)
+  b.subMaxPerPoll = Math.round(num(b.subMaxPerPoll, 3, 1, 10))
+  b.subForwardImages = bool(b.subForwardImages, true)
+  // 订阅列表：只收数字 UID，按 mid 去重（面板 / 工具都可能写进来）
+  b.subs = (Array.isArray(b.subs) ? b.subs : [])
+    .map((x) => ({
+      mid: String(x && x.mid != null ? x.mid : '').trim(),
+      name: String((x && x.name) || '').trim().slice(0, 40),
+      filters: (Array.isArray(x && x.filters) ? x.filters : String((x && x.filters) || '').split(/[\s,，]+/)).map((f) => String(f).trim()).filter(Boolean).slice(0, 12),
+    }))
+    .filter((x) => /^\d{3,}$/.test(x.mid))
+    .filter((x, i, arr) => arr.findIndex((y) => y.mid === x.mid) === i)
+    .slice(0, 50)
   const d = c.douyin
   d.enabled = bool(d.enabled, false)
   d.autoBrowse = bool(d.autoBrowse, true)
@@ -578,6 +599,9 @@ export function mergeFromPanel(current, incoming) {
   next.bridge.token = current.bridge?.token || ''
   // B 站：只改了其中一个值时，另一个保留；整串粘进来的会在 normalize 里拆开
   if (incoming?.bili && (incoming.bili.sessdata || incoming.bili.biliJct)) next.bili.cookie = ''
+  // B 站订阅列表没有可编辑的表单字段（面板上是「添加 / 取消订阅」按钮，直接走接口）：保存时保留当前值，
+  // 否则面板里那份旧草稿会把刚订阅的号又抹掉
+  next.bili.subs = current.bili?.subs || []
   if (incoming?.group?.overrides) next.group.overrides = incoming.group.overrides
   // 按聊天选模型：两张表整张替换（deepMerge 会让删掉的条目又回来）
   if (incoming?.chatModels?.privates) next.chatModels.privates = incoming.chatModels.privates

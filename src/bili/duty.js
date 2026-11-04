@@ -174,6 +174,7 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
   async function run({ force = false } = {}) {
     const c = cfg()
     if (busy) return { ok: false, message: '正在刷' }
+    if (c.subsOnly) return { ok: false, message: '开着「只要订阅」，不刷视频' }
     if (!c.enabled && !force) return { ok: false, message: 'B 站没打开' }
     busy = true
     const s = today(load())
@@ -278,6 +279,7 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
   /** 看别人回她的评论，接着回。 */
   async function checkReplies() {
     const c = cfg()
+    if (c.subsOnly) return { ok: false, message: '开着「只要订阅」，不回评论' }
     if (!c.reply) return { ok: false, message: '回复没打开' }
     const s = today(load())
     s.lastReplyCheck = Date.now()
@@ -370,6 +372,7 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
     const g = getConfig()
     const c = g.bili
     if (!g.enabled || !c.enabled) return
+    if (c.subsOnly) return // 只要订阅：刷视频和回评论整条线都不跑
     const h = new Date().getHours()
     if (h < g.speakUp.awakeFrom || h >= g.speakUp.awakeTo) return
     const s = today(load())

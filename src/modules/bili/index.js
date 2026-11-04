@@ -1,7 +1,9 @@
-// 内置模块：B 站。别人发来链接时她能「看」视频（标题、简介、字幕、热评）；定时自己去刷、评论、回评论，看到好玩的分享给主人。
+// 内置模块：B 站。别人发来链接时她能「看」视频（标题、简介、字幕、热评）；定时自己去刷、评论、回评论，看到好玩的分享给主人；
+// 还能订阅 UP 主动态，官方号一发新动态就私聊告诉主人。
 
 import { readFileSync } from 'node:fs'
 import { createBili } from '../../bili/duty.js'
+import { createSubs } from '../../bili/dynamics.js'
 import { defineTool, str } from '../../tools/tools.js'
 import { profileToolVisible, profilePermits } from '../../chat/access.js'
 import { avatarSource } from '../profile/index.js'
@@ -9,10 +11,10 @@ import { avatarSource } from '../profile/index.js'
 export default {
   id: 'bili',
   name: 'B站',
-  version: '1.1.0',
-  description: '看别人发的 B 站视频；定时自己刷、评论、回评论；抽帧看画面、发截图；按权限改自己的头像 / 签名（bili_watch / bili_comment / qq_send_shot / bili_set_avatar / bili_set_sign）',
+  version: '1.2.0',
+  description: '看别人发的 B 站视频；定时自己刷、评论、回评论；订阅 UP 主动态并私聊推送；抽帧看画面、发截图；按权限改自己的头像 / 签名（bili_watch / bili_comment / bili_subscribe / bili_unsubscribe / bili_subs / qq_send_shot / bili_set_avatar / bili_set_sign）',
   tab: 'bili',
-  files: ['bili/duty.js', 'bili/api.js', 'bili/vision.js', 'bili/shots.js'],
+  files: ['bili/duty.js', 'bili/api.js', 'bili/vision.js', 'bili/shots.js', 'bili/dynamics.js'],
   setup(api) {
     const { hub } = api.core
     const lastImage = new Map() // chatId → 最近一张图的网址（给 bili_set_avatar 的 last 用）
@@ -23,11 +25,16 @@ export default {
     })
     const bili = createBili({ getConfig: api.config, hub, memory: api.lazy('memory'), log: api.log, dsh: api.dsh })
     api.every(60_000, () => bili.tick(), '刷B站')
+    // 订阅 UP 主动态：单独的引擎，不跟「刷视频」抢配额（它自己会按 subIntervalMin 节流）
+    const subs = createSubs({ getConfig: api.config, setConfig: api.setConfig, hub, memory: api.lazy('memory'), log: api.log })
+    api.every(60_000, () => subs.tick(), '订阅B站动态')
 
-    // 看视频谁发的链接都能看，评论要主人开口
+    // 看视频谁发的链接都能看，评论要主人开口；「只要订阅」模式下这几样连同截图都不给她
     api.tool(({ chat, sessionId }) => {
-      if (!api.config().bili.enabled || chat.kind === 'system') return []
-      return [
+      const c = api.config().bili
+      if (!c.enabled || chat.kind === 'system') return []
+      const tools = []
+      if (!c.subsOnly) tools.push(
         defineTool({
           name: 'bili_watch',
           description: '打开一个 B 站视频看看：读标题、简介、字幕和热评，看完再跟大家聊。别人发来 B 站链接、BV 号或分享卡片时用。link 填链接或 BV 号。',
@@ -45,7 +52,47 @@ export default {
             return bili.comment(String(link || ''), String(text || ''))
           },
         }),
-        // 截图：刷 B 站看画面时截下来的那些帧，存在本机，随时能挑一张发出来
+      )
+      // 订阅 UP 主动态：游戏官方号一发公告就私聊告诉主人。改订阅只有主人能改。
+      tools.push(
+        defineTool({
+          name: 'bili_subscribe',
+          description: '订阅一个 B 站 UP 主的动态（比如游戏官方号）：它一发新动态，你就私聊告诉主人。who 可以是 UID、space.bilibili.com/123456 主页链接、一条动态的链接（会反查作者），或者 UP 主的名字；filters 可选，想过滤掉的内容类型：forward 转发 / lottery 抽奖 / video 视频 / article 专栏 / draw 图文 / live 直播 / live_end 下播，别的词当正则过滤正文。',
+          properties: { who: str('UP 主 UID、主页链接、动态链接，或者 UP 主的名字'), filters: str('可选：想过滤掉的类型，空格隔开') },
+          required: ['who'],
+          execute: async ({ who, filters }) => {
+            if (!hub.turnHasOwner(sessionId)) return { ok: false, message: '只有主人能改订阅' }
+            return subs.subscribe(String(who || ''), String(filters || '').split(/[\s,，]+/).filter(Boolean))
+          },
+        }),
+        defineTool({
+          name: 'bili_unsubscribe',
+          description: '取消订阅某个 B 站 UP 主的动态。who 填 UID、名字或主页链接。',
+          properties: { who: str('UP 主 UID、名字或主页链接') },
+          required: ['who'],
+          execute: async ({ who }) => {
+            if (!hub.turnHasOwner(sessionId)) return { ok: false, message: '只有主人能改订阅' }
+            return subs.unsubscribe(String(who || ''))
+          },
+        }),
+        defineTool({
+          name: 'bili_subs',
+          description: '看看现在订阅了哪些 B 站 UP 主，以及最近一次查询有没有失败。',
+          properties: {},
+          required: [],
+          execute: async () => {
+            const items = subs.list()
+            if (!items.length) return { ok: true, list: [], message: '还没订阅任何 UP 主' }
+            return {
+              ok: true,
+              list: items,
+              message: `订阅了 ${items.length} 个：` + items.map((x) => `${x.name || x.mid}${x.fails ? '（最近失败 ' + x.fails + ' 次）' : ''}`).join('、'),
+            }
+          },
+        }),
+      )
+      // 截图：刷 B 站看画面时截下来的那些帧，存在本机，随时能挑一张发出来
+      if (!c.subsOnly) tools.push(
         defineTool({
           name: 'qq_send_shot',
           description: '把你在 B 站视频里截到的画面发到当前聊天。主人说「发张截图」「给我看看你刷到的」「刚才那个视频长啥样」这类话时用。query 填视频标题里的词或想看的内容，不填就挑最近的一张。',
@@ -60,13 +107,14 @@ export default {
           required: [],
           execute: async ({ query }) => bili.listShots(String(query || '')),
         }),
-      ]
+      )
+      return tools
     })
 
     // 改 B 站头像 / 签名：权限在面板「权限」页（关 / 仅主人私聊 / 所有人），默认仅主人私聊
     api.tool(({ chat, sessionId }) => {
       const cfg = api.config()
-      if (!cfg.bili.enabled) return []
+      if (!cfg.bili.enabled || cfg.bili.subsOnly) return []
       const tools = []
       if (profileToolVisible(cfg, 'biliAvatar', chat)) tools.push(defineTool({
         name: 'bili_set_avatar',
@@ -105,6 +153,17 @@ export default {
     })
 
     api.route('/bili/state', async () => ({ ok: true, ...bili.state(), account: await bili.account() }))
+    // 订阅动态（面板「订阅」卡片）
+    api.route('/bili/subs', async () => ({ ok: true, items: subs.list(), ...subs.state() }))
+    api.route('/bili/sub/add', async (req) => {
+      const b = await api.core.http.body(req)
+      return subs.subscribe(String(b.who || b.mid || ''), b.filters)
+    })
+    api.route('/bili/sub/del', async (req) => {
+      const b = await api.core.http.body(req)
+      return subs.unsubscribe(String(b.mid || b.who || ''))
+    })
+    api.route('/bili/subs/check', async () => subs.poll({ force: true }))
     api.route('/bili/account', async () => bili.account(true))
     api.route('/bili/run', async () => bili.run({ force: true }))
     api.route('/bili/replies', async () => bili.checkReplies())

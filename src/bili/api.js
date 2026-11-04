@@ -42,6 +42,56 @@ export function findVideoId(text) {
 
 const stripHtml = (s) => String(s || '').replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#39;/g, "'")
 
+// 动态的类型码 → 订阅里用的短名。认不出的当纯文字。
+const DYNAMIC_KIND = {
+  DYNAMIC_TYPE_DRAW: 'draw',
+  DYNAMIC_TYPE_WORD: 'word',
+  DYNAMIC_TYPE_AV: 'video',
+  DYNAMIC_TYPE_PGC: 'video',
+  DYNAMIC_TYPE_UGC_SEASON: 'video',
+  DYNAMIC_TYPE_ARTICLE: 'article',
+  DYNAMIC_TYPE_FORWARD: 'forward',
+  DYNAMIC_TYPE_LIVE: 'live',
+  DYNAMIC_TYPE_LIVE_RCMD: 'live',
+}
+
+/**
+ * 一条动态 → 订阅推送要用的样子。动态 JSON 的字段散在 modules 里好几层，这里一次摊平。
+ * 拿不到就留空，别抛：一条动态结构怪不该让整轮订阅挂掉。
+ */
+export function parseDynamic(it = {}) {
+  const m = it.modules || {}
+  const author = m.module_author || {}
+  const dyn = m.module_dynamic || {}
+  const major = dyn.major || {}
+  const opus = major.opus || {}
+  const draw = major.draw || {}
+  const archive = major.archive || {}
+  const article = major.article || {}
+  const live = major.live || {}
+  const additional = dyn.additional || {}
+  const id = String(it.id_str || '')
+  const bvid = archive.bvid || ''
+  const kind = DYNAMIC_KIND[it.type] || 'word'
+  const text = stripHtml(dyn.desc?.text || opus.summary?.text || '').trim()
+  return {
+    id,
+    kind,
+    text,
+    author: author.name || '',
+    mid: String(author.mid || ''),
+    pubTs: (Number(author.pub_ts) || 0) * 1000,
+    title: stripHtml(archive.title || article.title || '').trim(),
+    // opus 是新版图文，draw 是老版图片动态，两种都收
+    images: [...(opus.pics || []).map((p) => p && p.url), ...(draw.items || []).map((p) => p && p.src)].filter((u) => typeof u === 'string' && u),
+    bvid,
+    live: kind === 'live' ? { title: stripHtml(live.title || '').trim(), status: Number(live.live_state) || 0 } : null,
+    forward: kind === 'forward',
+    lottery: additional.type === 'ADDITIONAL_TYPE_UPOWER_LOTTERY' || /抽奖/.test(text),
+    url: bvid ? `https://www.bilibili.com/video/${bvid}` : id ? `https://www.bilibili.com/opus/${id}` : '',
+  }
+}
+
 const FACE_MAX = 2 * 1024 * 1024
 
 /** 有的图床（含 QQ multimedia.nt.qq.com）Content-Type 会给 application/octet-stream，按文件头认一下。 */
@@ -231,11 +281,53 @@ export function createBiliApi({ getCookie, log, fetchImpl = fetch }) {
     }))
   }
 
+  /**
+   * 某个 UP 主的动态列表（网页端 feed/space）。游客身份（只有 buvid3）也能读，
+   * 但 B 站会随机给空列表或 -352，所以这里只如实返回，是不是「真的没发」交给上面判断。
+   */
+  async function dynamicFeed(hostMid, { offset = '' } = {}) {
+    await ensureBuvid()
+    const d = await req(await signed('https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space', {
+      host_mid: String(hostMid),
+      offset,
+      timezone_offset: -480,
+      // 网页端现在带的就是这几个；少一个就容易只回老格式或者直接空
+      features: 'itemOpusStyle,listOnlyfans,opusBigCover,onlyfansVote',
+    }))
+    return (d.items || []).map(parseDynamic)
+  }
+
+  /** UP 主名片（订阅列表里显示是谁）。没登录也能查。 */
+  async function card(mid) {
+    const d = await req(`https://api.bilibili.com/x/web-interface/card?mid=${encodeURIComponent(String(mid))}`)
+    return { mid: String(d.card?.mid || mid), name: String(d.card?.name || ''), face: String(d.card?.face || '') }
+  }
+
+  /** 按名字搜 UP 主（订阅时懒得找 UID 用）。搜不到返回空数组。 */
+  async function searchUser(keyword, { limit = 5 } = {}) {
+    await ensureBuvid()
+    const d = await req(await signed('https://api.bilibili.com/x/web-interface/wbi/search/type', { search_type: 'bili_user', keyword: String(keyword), page: 1 }))
+    return (d.result || []).slice(0, limit).map((u) => ({
+      mid: String(u.mid), name: stripHtml(u.uname), fans: Number(u.fans) || 0, sign: stripHtml(u.usign || '').slice(0, 60),
+    }))
+  }
+
+  /** 一条动态的作者（手里只有动态链接时反查 UP 主）。 */
+  async function dynamicAuthor(dynId) {
+    await ensureBuvid()
+    const d = await req(await signed('https://api.bilibili.com/x/polymer/web-dynamic/v1/detail', {
+      id: String(dynId), features: 'itemOpusStyle,opusBigCover',
+    }))
+    const a = d.item?.modules?.module_author || {}
+    if (!a.mid) throw new Error('这条动态里没读到作者')
+    return { mid: String(a.mid), name: String(a.name || '') }
+  }
+
   /** b23.tv 短链跳一下拿到真实地址。 */
   async function resolveShort(url) {
     const r = await fetchImpl(url, { redirect: 'manual', headers: { 'user-agent': UA }, signal: AbortSignal.timeout(10000) })
     return r.headers.get('location') || ''
   }
 
-  return { nav, search, popular, view, playurl, subtitle, comments, postComment, likeVideo, setSign, setFace, replyFeed, resolveShort }
+  return { nav, search, popular, view, playurl, subtitle, comments, postComment, likeVideo, setSign, setFace, replyFeed, dynamicFeed, card, searchUser, dynamicAuthor, resolveShort }
 }
