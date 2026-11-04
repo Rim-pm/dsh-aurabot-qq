@@ -665,11 +665,15 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
       const spoken = items.filter((i) => i.kind === 'text').map((i) => i.value).join('，')
       if (spoken && spoken.length <= 300) items = [{ kind: 'voice', value: spoken }, ...items.filter((i) => i.kind !== 'text')]
     }
-    // 短回复按概率整条变语音
+    // 短回复按概率整条变语音。只在 TTS 现在就能出声时才这么干：
+    // RimTTS 是按需起的，冷着的时候要等 40 秒，与其让人干等不如先发文字（真要听可以说「发语音」）。
     const texts = items.filter((i) => i.kind === 'text')
     if (cfg.voice.enabled && items.length === texts.length && texts.length > 0) {
       const all = texts.map((t) => t.value).join('，')
-      if (all.length <= cfg.voice.autoMaxChars && Math.random() < cfg.voice.autoChance * mood().voice) items = [{ kind: 'voice', value: all }]
+      // 只有「按需起」的引擎（RimTTS）才需要问一句热不热；别的引擎本来就是秒出，
+      // 这里连函数都不调，免得给每次回复多添几毫秒。
+      const ready = cfg.voice.engine === 'rimtts' ? tts.hot?.() !== false : true
+      if (all.length <= cfg.voice.autoMaxChars && ready && Math.random() < cfg.voice.autoChance * mood().voice) items = [{ kind: 'voice', value: all }]
     }
     const inGroup = chatId.startsWith('group:')
     // 群里别刷屏：一段最多 3 条
@@ -1453,6 +1457,12 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     st.lastText = String(opts.queryText ?? content.filter((c) => c.type === 'text').map((c) => c.text).join('\n')).slice(-600)
     st.speakers = opts.speakers || (senderId ? [String(senderId), ...(opts.extraSenders || []).map(String)] : [])
     if (opts.wantVoice) st.wantVoice = true
+    // 对方明确要语音：趁她还在想怎么说，先把 TTS 服务叫起来。
+    // RimTTS 这种按需起的大模型冷启动要 30-40 秒，正好和这一轮的思考并行，藏掉大半等待。
+    if (opts.wantVoice) {
+      const v = getConfig().voice
+      if (v.enabled && v.engine === 'rimtts') tts.prewarm?.()
+    }
     if (!opts.steer) st.autoReply = opts.autoReply || null
     turnState.set(key, st)
     const admitted = await admit(agent, content)

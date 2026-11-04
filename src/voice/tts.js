@@ -6,6 +6,7 @@
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, statSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { buildWav } from './wav.js'
+import { rimttsSynth } from './rimtts.js'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import { randomUUID } from 'node:crypto'
@@ -217,12 +218,15 @@ export async function textToSpeech(text, opt = {}, log) {
   if (!clean) throw new Error('没有要念的文字')
   let file = ''
   let engine = ''
-  const local = { cosyvoice: cosyvoiceSynth, gptsovits: gptsovitsSynth, http: httpSynth }[opt.engine]
+  const local = { cosyvoice: cosyvoiceSynth, gptsovits: gptsovitsSynth, http: httpSynth, rimtts: rimttsSynth }[opt.engine]
   if (local) {
+    const c = opt[opt.engine] || {}
     try {
-      file = await local(clean, opt[opt.engine] || {})
+      file = await local(clean, c, log)
       engine = opt.engine
     } catch (error) {
+      // RimTTS 这类「自己管进程」的引擎：起不来时宁可这条改发文字，也别换成机械音
+      if (c.noFallback) throw error
       log?.warn(`${opt.engine} 失败：${error.message} → 改用 Windows 语音`)
     }
   } else if (opt.engine !== 'windows' && edgeInstalled()) {

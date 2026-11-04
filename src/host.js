@@ -229,6 +229,21 @@ export function apply(ctx) {
       if (!v?.speak) throw new Error('语音模块关着')
       return v.speak(text)
     },
+    // 现在就能出声吗：RimTTS 这种「按需起、空闲关」的大模型冷着的时候是 false，
+    // hub 据此决定「这条回复要不要顺手变成语音」（冷着就先发文字，别让人干等 40 秒）。
+    hot: () => {
+      try {
+        return use('voice')?.hot?.() ?? true
+      } catch (error) {
+        return true
+      }
+    },
+    // 有人明确要语音时，趁模型还在想怎么回，先把推理服务拉起来
+    prewarm: () => {
+      try {
+        use('voice')?.prewarm?.()
+      } catch (error) {}
+    },
   }
 
   hub = createHub({

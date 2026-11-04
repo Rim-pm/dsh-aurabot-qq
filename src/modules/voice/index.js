@@ -4,6 +4,7 @@
 
 import { existsSync, readFileSync } from 'node:fs'
 import { textToSpeech, edgeInstalled, installEdge, voiceConverters } from '../../voice/tts.js'
+import { status as rimttsStatus, stop as rimttsStop, hot as rimttsHot, prewarm as rimttsPrewarm } from '../../voice/rimtts.js'
 import { createSongVoice } from '../../voice/rvc.js'
 import { toMono16k } from '../../voice/wav.js'
 import { fileOf } from '../../local/local.js'
@@ -14,7 +15,7 @@ export default {
   version: '1.0.0',
   description: '发语音条：把她的话念出来（关掉后想发语音时改发文字）',
   tab: 'voice',
-  files: ['voice/tts.js', 'voice/rvc.js'],
+  files: ['voice/tts.js', 'voice/rvc.js', 'voice/rimtts.js'],
   setup(api) {
     const { hub, onebot, local, http } = api.core
 
@@ -28,6 +29,20 @@ export default {
       }
       return textToSpeech(text, api.config().voice, api.log)
     }
+
+    // RimTTS（大模型按需起）：趁模型还在想怎么回，先把推理服务拉起来，冷启动的 37 秒就能藏掉大半。
+    const rimCfg = () => api.config().voice.rimtts || {}
+    const prewarm = () => rimttsPrewarm(rimCfg(), api.log)
+    // 服务热着吗：别的引擎（edge / windows / 在线）本来就是秒出，一律算热
+    const hot = () => (api.config().voice.engine === 'rimtts' ? rimttsHot() : true)
+    api.route('/voice/rimtts', async (req) => {
+      const b = req.method === 'POST' ? await http.body(req) : {}
+      if (b.action === 'stop') {
+        await rimttsStop()
+        return { ok: true, message: 'RimTTS 已经关掉，内存和显存都还回去了' }
+      }
+      return { ok: true, ...rimttsStatus(rimCfg()) }
+    })
 
     // 语音条变声：如果面板里选了「翻唱里导入的音色」，TTS 后再用 RVC 换成她的声音。
     // 挂在 tts.js 的 voiceConverters 上（卸载时摘掉）；变声失败会保留 TTS 原声。
@@ -99,6 +114,6 @@ export default {
       return { ok: Boolean(heard), said: text, heard, ms: Date.now() - t }
     })
 
-    return { speak, edgeInstalled }
+    return { speak, edgeInstalled, prewarm, hot }
   },
 }

@@ -1319,6 +1319,22 @@ h(Card, { title: '群里什么时候必回', desc: '被 @、有人引用回复�
       )
     }
 
+    /** RimTTS 是按需起的：这里显示模型现在在不在、上次冷启动多久，还能手动关掉把内存还回去。 */
+    function RimTtsStatus({ toast }) {
+      const [s, setS] = useState(null)
+      const load = () => get('/voice/rimtts').then(setS).catch(() => setS({ ok: false, configured: false }))
+      useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t) }, [])
+      const txt = !s ? '查询中…'
+        : !s.configured ? '没找到 RimTTS：上面填的目录里要有 tools/GPT-SoVITS/.venv 和配置文件'
+          : s.running ? `模型已加载（pid ${s.pid}，空闲 ${Math.round((s.idleMs || 0) / 1000)} 秒）`
+            : '模型没在跑（要说话时会自动启动）'
+      return h('div', { className: 'ab-flex' },
+        h('span', { className: 'ab-pill' }, h('i', { className: cx('ab-dot', s && s.running ? 'ok' : s && s.configured ? 'warn' : '') }), txt),
+        s && s.coldMs ? h('span', { className: 'ab-muted ab-small' }, `上次冷启动 ${(s.coldMs / 1000).toFixed(1)} 秒`) : null,
+        s && s.running ? h(Btn, { small: true, onClick: async () => { const r = await post('/voice/rimtts', { action: 'stop' }); toast(r.message); load() } }, '立刻关掉') : null,
+        s && s.lastError ? h('span', { className: 'ab-muted ab-small' }, '上次出错：' + String(s.lastError).slice(0, 120)) : null)
+    }
+
     /** 语音条变声：用「翻唱」页导入的 RVC 音色模型（TTS 后接一层 RVC）。 */
     function VoiceSongModel({ draft, setDraft }) {
       const [s, setS] = useState(null)
@@ -1344,6 +1360,7 @@ h(Card, { title: '群里什么时候必回', desc: '被 @、有人引用回复�
             { value: 'edge', label: '微软 edge-tts', desc: st.voice.edgeInstalled ? '在线，音色自然（已装好）' : '在线，音色自然（还没装）' },
             { value: 'cosyvoice', label: '本地 CosyVoice', desc: '自己部署的 CosyVoice 服务，可克隆音色' },
             { value: 'gptsovits', label: '本地 GPT-SoVITS', desc: 'GPT-SoVITS api_v2，用参考音频定音色' },
+            { value: 'rimtts', label: 'RimTTS（Rim 的声音）', desc: 'RimTTS 项目训练好的 Rim 音色；模型大，说话时才起、说完就关' },
             { value: 'http', label: '其他 HTTP 接口', desc: '任意返回音频的地址' },
             { value: 'windows', label: 'Windows 自带', desc: '离线可用，机械感重一些' },
           ])),
@@ -1378,6 +1395,17 @@ h(Card, { title: '群里什么时候必回', desc: '被 @、有人引用回复�
             h(Row, { key: 'p', label: '参考音频的文字' }, f.text('voice.gptsovits.promptText', { size: 'wide' })),
           ] : null,
           draft.voice.engine === 'http' ? h(Row, { label: '地址模板', hint: '{text} 会换成要念的话，返回 wav/mp3' }, f.text('voice.http.urlTemplate', { size: 'wide', placeholder: 'http://127.0.0.1:8000/tts?text={text}' })) : null,
+          draft.voice.engine === 'rimtts' ? [
+            h(Row, { key: 'r', label: 'RimTTS 目录', hint: 'RimTTS 项目的根目录（里面有 tools/GPT-SoVITS 和 pipeline/refs_pool.json）' }, f.text('voice.rimtts.root', { size: 'wide', placeholder: 'D:\\RimTTS' })),
+            h(Row, { key: 'c', label: '配置文件', hint: '相对 tools/GPT-SoVITS。turbo 最快；v5dev 音质更好但慢一倍' }, f.text('voice.rimtts.configYaml', { size: 'wide' })),
+            h(Row, { key: 'p', label: '端口', hint: '端口上已经有服务（比如划词朗读）就直接用它，不重复启动，也不会去关它' }, f.num('voice.rimtts.port', { min: 1024, max: 65535 })),
+            h(Row, { key: 'idle', label: '说完多久关掉', hint: '模型常驻约 4 GB 内存 + 2 GB 显存，所以默认说完就放掉；0 = 每句念完立刻关（每句都要重新冷启动 30-40 秒）' },
+              f.range('voice.rimtts.idleSeconds', 0, 900, 30, (v) => (v === 0 ? '念完立刻关' : v + ' 秒'))),
+            h(Row, { key: 'w', label: '预热', hint: '起来后先合成一句，把 CUDA 预热掉（第一句少等约 5 秒）' }, f.sw('voice.rimtts.warmup')),
+            h(Row, { key: 'pm', label: '预启动', hint: '有人明确要语音时，趁她还在想怎么回先把服务拉起来，冷启动的等待就藏进思考时间里' }, f.sw('voice.rimtts.prewarm')),
+            h(Row, { key: 'nf', label: '起不来时', hint: '开着 = 这条改发文字（推荐）；关掉 = 退回 Windows 机械音' }, f.sw('voice.rimtts.noFallback')),
+            h(RimTtsStatus, { toast }),
+          ] : null,
           h(Row, { label: '短回复变语音的概率' }, f.percent('voice.autoChance')),
           h(Row, { label: '多短算短回复' }, f.range('voice.autoMaxChars', 10, 200, 5, (v) => v + ' 字')),
           h(Row, { label: '试听', hint: '先保存设置再试听' },

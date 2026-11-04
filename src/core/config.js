@@ -71,6 +71,23 @@ export const DEFAULTS = {
     engine: 'auto',
     cosyvoice: { url: 'http://127.0.0.1:50000', mode: 'sft', spkId: '中文女', instruct: '', sampleRate: 22050 },
     gptsovits: { url: 'http://127.0.0.1:9880', refAudio: '', promptText: '', promptLang: 'zh', textLang: 'zh' },
+    // RimTTS：用 RimTTS 项目（GPT-SoVITS api_v2 + 微调权重）念。模型很大（约 4.3 GB 内存 + 2.2 GB 显存），
+    // 所以默认按需起、空闲关：说话前才把 api_v2 拉起来（冷启动约 37 秒），说完 idleSeconds 秒后关掉。
+    rimtts: {
+      root: '', // RimTTS 项目根目录（里面有 tools/GPT-SoVITS 和 pipeline/refs_pool.json）
+      configYaml: 'GPT_SoVITS/configs/tts_infer_rim_turbo.yaml', // 相对 tools/GPT-SoVITS
+      port: 9880,
+      refGroup: 'narration', // 用 refs_pool.json 里哪一组参考音频
+      refAudio: '', // 留空 = 用参考池第一条（轮换参考会让服务端反复重编码 prompt，慢好几倍）
+      promptText: '',
+      promptLang: 'ja',
+      speed: 1,
+      idleSeconds: 180, // 最后一次用完后再留多久；0 = 念完立刻关
+      warmup: true, // 起来后先合成一句，把 CUDA 预热掉
+      prewarm: true, // 有人明确要语音时，趁模型思考先把服务拉起来
+      maxWaitSeconds: 180, // 等就绪的上限
+      noFallback: true, // 起不来就这条改发文字，不要退回 Windows 机械音
+    },
     http: { urlTemplate: '' }, // 通用：GET 这个地址（{text} 会替换成要念的话），返回音频
     voice: 'zh-CN-XiaoyiNeural',
     rate: '+0%',
@@ -380,7 +397,20 @@ export function normalize(raw) {
   c.titleFilter.title = String(c.titleFilter.title ?? '').replace(/[​-‍﻿]/g, '').trim().slice(0, 30) || '大肥鱼'
   g.burstMax = num(g.burstMax, 8, 1, 50)
   g.burstWindowSec = num(g.burstWindowSec, 120, 10, 3600)
-  if (!['auto', 'edge', 'windows', 'cosyvoice', 'gptsovits', 'http'].includes(c.voice.engine)) c.voice.engine = 'auto'
+  if (!['auto', 'edge', 'windows', 'cosyvoice', 'gptsovits', 'http', 'rimtts'].includes(c.voice.engine)) c.voice.engine = 'auto'
+  c.voice.rimtts.root = String(c.voice.rimtts.root || '').trim().slice(0, 400)
+  c.voice.rimtts.configYaml = String(c.voice.rimtts.configYaml || '').trim().slice(0, 200) || 'GPT_SoVITS/configs/tts_infer_rim_turbo.yaml'
+  c.voice.rimtts.port = Math.round(num(c.voice.rimtts.port, 9880, 1024, 65535))
+  c.voice.rimtts.refGroup = String(c.voice.rimtts.refGroup || '').trim().slice(0, 40) || 'narration'
+  c.voice.rimtts.refAudio = String(c.voice.rimtts.refAudio || '').trim().slice(0, 400)
+  c.voice.rimtts.promptText = String(c.voice.rimtts.promptText || '').trim().slice(0, 300)
+  c.voice.rimtts.promptLang = String(c.voice.rimtts.promptLang || '').trim().slice(0, 10) || 'ja'
+  c.voice.rimtts.speed = num(c.voice.rimtts.speed, 1, 0.6, 1.6)
+  c.voice.rimtts.idleSeconds = Math.round(num(c.voice.rimtts.idleSeconds, 180, 0, 3600))
+  c.voice.rimtts.maxWaitSeconds = Math.round(num(c.voice.rimtts.maxWaitSeconds, 180, 30, 600))
+  c.voice.rimtts.warmup = bool(c.voice.rimtts.warmup, true)
+  c.voice.rimtts.prewarm = bool(c.voice.rimtts.prewarm, true)
+  c.voice.rimtts.noFallback = bool(c.voice.rimtts.noFallback, true)
   c.voice.songVoice = String(c.voice.songVoice || '').slice(0, 120)
   c.voice.songPitch = Math.max(-24, Math.min(24, Math.round(Number(c.voice.songPitch) || 0)))
   c.voice.cosyvoice.sampleRate = num(c.voice.cosyvoice.sampleRate, 22050, 8000, 48000)
