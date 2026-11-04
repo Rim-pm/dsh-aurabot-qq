@@ -100,12 +100,35 @@ Invoke-RestMethod "$base/aurabot/api/test-send" -Method Post -ContentType applic
 
 ## 跟上游同步
 
+上游 **1.2.0 起把桌宠 / 抖音 / 小黑盒 / 群管搬出了内核**，改由社区模块库
+（[`aureth-labs/dsh-aurabot-qq-mods`](https://github.com/aureth-labs/dsh-aurabot-qq-mods)）分发：
+插件启动时 `community.migrate()` 会把「原来在用」的自动装回来（配置和登录状态不变），
+其余在面板「模块市场」里按需装。所以同步上游要合 **release 分支**，不是 main：
+
 ```powershell
 git fetch upstream
-git rebase upstream/main      # 本地改动在 main 上，rebase 完再 push origin main
+git merge upstream/release/1.2.0     # 换成当时最新的 release/1.2.x
+# 冲突重点：package.json、src/core/config.js、client/client.js、
+#          src/bili/api.js、src/modules/bili/index.js、src/persona/personas.js
+# 本地要保住：B站订阅（dynamics/judge/examples + subsOnly）、RimTTS、
+#            抖音/B站链接转存扩展、琳的人格卡（personas/）
+npm test                              # 1287 条；e2e 个别用例并发下会抖，单跑能过
 ```
 
-插件本体是纯 ESM、没有 npm 依赖，拉完重启 `dsh web` 即可。
+社区模块索引：
+`https://raw.githubusercontent.com/aureth-labs/dsh-aurabot-qq-mods/registry/index.json`
+
+插件本体是纯 ESM、没有 npm 依赖，拉完重启 `dsh web` 即可（本机 web profile 是
+`link:D:/Nakk/OrcaPJs/RimBot`，改完源码重启就生效）。
+
+## 小黑盒（社区模块 heybox 1.3.1，2026-11-04 装）
+
+- 内核里已经没有 `src/heybox/`；模块装在 `plugins-data\aurabot\modules\heybox\`，
+  带 `.aurabot-source.json`（id / version / sha256），面板「模块市场」能更新。
+- 登录：面板「小黑盒」页**扫码**（`/heybox/qr/start`，用小黑盒 App 确认），或继续粘 Cookie。
+- 自动逛：`tick` 每分钟看一次，遵守总开关 / 试运行 / 醒着时段 / 谷时 / 每日轮数 / 间隔；
+  先拉信息流，再把帖子列表交给**无工具**的后台会话判断「记什么、分享哪条」，结果不发 QQ。
+- 老内置版（1.1.24）的坑（`hasLogin` 未定义、后台会话没工具、不判醒着时段）在这个版本已修。
 
 ## 注意
 
