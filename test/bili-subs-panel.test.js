@@ -1,7 +1,7 @@
 // B站订阅在面板上的接线：接口注册了没、工具是不是只有主人能用、配置项在不在。不访问真实 B 站。
 import { test, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'node:fs'
+import { mkdirSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import biliModule from '../src/modules/bili/index.js'
@@ -28,6 +28,14 @@ function boot({ owner = true, bili = {} } = {}) {
     config: () => cfg,
     setConfig: (fn) => { Object.assign(cfg, typeof fn === 'function' ? fn(cfg) : fn) },
     lazy: () => null,
+    use: () => null,
+    onDispose: () => {},
+    // 模块数据目录（弹幕历史等）：和 core/modules.js 的 dataDir 一样落在模块自己的目录里
+    dataDir: (...parts) => {
+      const d = join(process.env.AURABOT_DATA_DIR, 'modules-data', 'bili')
+      mkdirSync(d, { recursive: true })
+      return join(d, ...parts)
+    },
     log: { info() {}, debug() {}, warn() {} },
     on() {},
     tool: (fn) => builders.push(fn),
