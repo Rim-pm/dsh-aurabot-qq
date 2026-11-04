@@ -110,7 +110,7 @@ test/                  单元测试 + 端到端测试（假 DSH 宿主 + 模拟 
 
 [逛贴吧（只读）](extensions/tieba-reader/README.md) 支持搜索、看帖、首页推荐／热门、配置贴吧定时浏览和给主人分享。以独立用户模块构建安装，自动浏览默认关闭，不提供发帖、回帖或点赞接口。
 
-[抖音链接转存](extensions/douyin-save/README.md) 主人发来抖音链接，她把视频或图集取下来直接发回 QQ（视频走视频消息、图集逐张发图）。解析走本机 [DouYinDownload](https://github.com/Evil0ctal/Douyin_TikTok_Download_API) 的 MCP，只给主人私聊用，自动转发默认关。
+[抖音 / B站链接转存](extensions/douyin-save/README.md) 主人发来抖音或 B站链接，她把视频或图集取下来直接发回 QQ（视频走视频消息、图集逐张发图）；明确要文字稿或评论时还能转写、读热评。解析走本机 [DouYinDownload](https://github.com/Evil0ctal/Douyin_TikTok_Download_API) 的 MCP，只给主人私聊用，自动转发默认关。
 
 ## 测试
 

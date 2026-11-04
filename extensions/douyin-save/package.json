@@ -1,9 +1,9 @@
 {
   "name": "aurabot-douyin-save",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
-  "description": "Aurabot 的抖音链接转存扩展：走本机 DouYinDownload 的 MCP 解析，把视频 / 图集直接发回 QQ",
+  "description": "Aurabot 的抖音 / B站链接转存扩展：走本机 DouYinDownload 的 MCP 解析，把视频 / 图集直接发回 QQ；明确要的时候还能读文字稿、读评论。下载服务按需启动、空闲自动关闭",
   "license": "MIT",
   "engines": {
     "node": ">=22"
