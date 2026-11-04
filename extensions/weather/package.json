@@ -1,0 +1,15 @@
+{
+  "name": "aurabot-weather",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Aurabot 的天气 / 早安扩展：主人说早就顺口报天气、提醒带伞和穿衣；主人没开口，早上也会主动问候一次。数据来自 Open-Meteo",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test index.test.mjs",
+    "install:module": "node scripts/install.mjs"
+  }
+}
