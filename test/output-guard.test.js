@@ -156,7 +156,8 @@ function setup(t, { hooks = {}, brain = async () => '', contextProviders, voice 
     hub.dispose(); fake.dispose()
     if (previous === undefined) delete process.env.AURABOT_DATA_DIR
     else process.env.AURABOT_DATA_DIR = previous
-    rmSync(dir, { recursive: true, force: true })
+    // Windows 上偶尔还有句柄没放（杀毒 / 索引），rm 会 EPERM；清理失败不该让整轮变红
+    try { rmSync(dir, { recursive: true, force: true }) } catch {}
   })
   return { hub, fake, cfg, calls, sent, warnings, activity, spoken, dir }
 }
