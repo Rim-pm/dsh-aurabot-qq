@@ -85,6 +85,8 @@ export function createPurpose({ getConfig, setConfig, hub, log, isMuted, mood, m
   // 下面的 friend 是主动搭话白名单里的 QQ 号，不传就是主人。朋友各有各的状态，素材只看和这个人的私聊、关于这个人的记忆。
   const chatIdOf = (cfg, friend) => `private:${friend || cfg.ownerQQ}`
   const lastPrivateAt = (cfg, friend) => friend ? (hub?.lastPrivateAt?.(friend) || 0) : Math.max(hub?.lastOwnerChatAt || 0, hub?.lastBotToOwner?.at || 0)
+  // 收尾 / 等待的「主动静音」：她刚说过「这段聊完了」的人，12 小时内不主动去找（手动触发不算）
+  const wrapMuted = (chatId) => Boolean(hub?.proactiveMuted?.(chatId))
   const stateFile = (friend) => dataDir('purpose', ...(friend ? ['friends', `${friend}.json`] : ['purpose-state.json']))
   const nudgeFile = () => dataDir('purpose', 'nudge.json')
 
@@ -403,9 +405,9 @@ export function createPurpose({ getConfig, setConfig, hub, log, isMuted, mood, m
     const cfg = getConfig()
     const config = purposeConfig(cfg)
     if (!config.enabled || !cfg.ownerQQ) return
-    if (!isMuted?.(chatIdOf(cfg)) && await tickOne(cfg, config)) return
+    if (!isMuted?.(chatIdOf(cfg)) && !wrapMuted(chatIdOf(cfg)) && await tickOne(cfg, config)) return
     for (const qq of cfg.speakUp?.allow || []) {
-      if (String(qq) === String(cfg.ownerQQ) || isMuted?.(chatIdOf(cfg, qq)) || memoryOf()?.dislikes?.(qq)) continue
+      if (String(qq) === String(cfg.ownerQQ) || isMuted?.(chatIdOf(cfg, qq)) || wrapMuted(chatIdOf(cfg, qq)) || memoryOf()?.dislikes?.(qq)) continue
       if (await tickOne(cfg, config, String(qq))) return
     }
   }

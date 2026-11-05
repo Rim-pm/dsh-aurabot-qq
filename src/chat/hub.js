@@ -12,6 +12,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dataDir, readJson, writeJson } from '../core/store.js'
 import { parseMessageEvent, gifFrames, segmentsOf } from './inbound.js'
 import { parseReply, bubbleDelay, wantsVoice, cleanOutboundText, cleanOutboundSegments } from './reply.js'
+import { parseWrapUp, stripWrapMarkers, createWrapUpState, looksLikeQuestion, looksLikeHelpRequest, DEFAULT_CLOSE_RESUME } from './wrap-up.js'
 import { decideGroupReply, engagedHint, pickAutoReply, policyFor, sameNameNote, topicRelevance } from './group-policy.js'
 import { checkAllowed, levelFor, presetFor, isOwner } from './access.js'
 import { fetchImage, segmentBytes } from '../core/net.js'
@@ -198,6 +199,219 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
   let disposed = false
   const disposedError = () => Object.assign(new Error('Aurabot 插件已卸载'), { code: 'AURABOT_DISPOSED' })
   const assertActive = () => { if (disposed) throw disposedError() }
+
+  // ---------- 收尾 / 等待（私聊 MVP） ----------
+  // 她在回复末尾写 <wait> / <close>，插件记一段会话状态：
+  //   · 等待：默认 5 分钟（waitSec），窗口内对方一开口就马上接上；到点没人说话只留一句兜底摘要，不主动发消息。
+  //   · 收尾：默认保留 12 小时（closeSec），对方再来时带上收尾前的摘要（resume）；这段时间不主动找对方（主动静音）。
+  //   · 问句 / 求助保护：收尾那句是问句、或者对方最后一句在问问题 / 求她帮忙时，<close> 不生效。
+  //   · 只认「她自己这一轮」的标记：系统提醒、主动消息、模块代发只剥标记，不改状态（own 门控）。
+  // 状态落在 dataDir('wrap-up.json')，重启后等待 / 收尾 / 摘要 / 下次怎么接都还在。
+  const WRAP_NOTE_TTL = 12 * 3600_000 // 兜底摘要 / resume 摘要放太久就没意义了
+  const wrapUp = createWrapUpState({ noteTtlMs: WRAP_NOTE_TTL })
+  const wrapTimers = new Map() // chatId → 等待窗口的定时器
+  const wrapFile = () => dataDir('wrap-up.json')
+
+  /** 收尾 / 等待的设置（归一化过的配置；这里再兜一层，面板/测试传进来的半截配置也能用）。 */
+  function wrapCfg() {
+    const w = getConfig().wrapUp || {}
+    const num = (v, d, lo, hi) => {
+      const n = Number(v)
+      return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d
+    }
+    return {
+      enabled: w.enabled !== false,
+      recap: w.recap !== false,
+      questionGuard: w.questionGuard !== false,
+      proactiveMute: w.proactiveMute !== false,
+      waitSec: num(w.waitSec, 300, 1, 600),
+      maxWaitSec: num(w.maxWaitSec, 1800, 1, 3600),
+      closeSec: num(w.closeSec, 43200, 0, 86400),
+      replyDelaySec: num(w.replyDelaySec, 1, 0, 60),
+    }
+  }
+
+  /** 状态变了就落盘：文件很小，写一次比丢状态划算。 */
+  function persistWrap() {
+    try { writeJson(wrapFile(), wrapUp.snapshot()) } catch (error) { log.warn('收尾 / 等待状态存不下来：', error.message) }
+  }
+
+  function clearWrapTimer(chatId) {
+    const timer = wrapTimers.get(chatId)
+    if (timer) clearTimeout(timer)
+    wrapTimers.delete(chatId)
+  }
+
+  /** 记一句「下一轮要告诉她」的话（兜底摘要 / 等待被接上 / 收尾后 resume）。 */
+  function pushWrapNote(chatId, text) {
+    if (!wrapUp.pushNote(chatId, text)) return
+    persistWrap()
+  }
+
+  function takeWrapNotes(chatId) {
+    const list = wrapUp.takeNotes(chatId)
+    if (list.length) persistWrap()
+    return list.join('\n')
+  }
+
+  /** 收尾时留一份「这段最后聊了什么」的摘要：最近几句的原话摘录，不额外调模型。 */
+  function wrapSummaryFor(chatId, closingText = '') {
+    const rows = []
+    for (const day of chatLogDays().slice(-2)) {
+      for (const r of chatLogOf(day)) {
+        if (!r || r.chatId !== chatId || r.who === '系统' || r.forgottenAt || !String(r.text || '').trim()) continue
+        rows.push(r)
+      }
+    }
+    const lines = rows.slice(-7).map((r) => `${r.who === 'bot' ? '你' : '对方'}：${String(r.text).replace(/\s+/g, ' ').trim().slice(0, 60)}`)
+    const tail = String(closingText || '').replace(/\s+/g, ' ').trim().slice(0, 60)
+    if (tail) lines.push(`你：${tail}`)
+    return lines.join('\n')
+  }
+
+  /** 等待窗口到点：对方一直没说话，留一句兜底摘要给她（不主动往 QQ 发消息）。 */
+  function onWaitOver(chatId, plannedMs) {
+    wrapTimers.delete(chatId)
+    if (disposed) return
+    const hit = wrapUp.expire(chatId)
+    if (!hit) return // 对方中途开口，等待已经被消费掉了
+    const planned = hit.plannedMs || plannedMs
+    const mins = Math.round(planned / 60_000)
+    const how = mins >= 1 ? `${mins} 分钟` : `${Math.round(planned / 1000)} 秒`
+    log.info(`${chatId}：等了 ${how}，对方没接着说`)
+    if (!wrapCfg().enabled || !wrapCfg().recap) { persistWrap(); return }
+    pushWrapNote(chatId, hit.reason === 'question'
+      ? `【你刚才问了一句，等了 ${how}，对方没回】`
+      : `【你刚才说了先等一会儿（${how}），这段时间对方没有再说话】`)
+  }
+
+  /** 她写了 <wait>：这段先别散，对方一开口就接着聊。返回真正等多久（0 = 取消）。 */
+  function armWait(chatId, ms, reason = 'wait') {
+    const cfg = wrapCfg()
+    const plan = Math.max(0, Math.min(cfg.maxWaitSec * 1000, ms == null ? cfg.waitSec * 1000 : Number(ms) || 0))
+    clearWrapTimer(chatId)
+    if (!plan) {
+      wrapUp.markWait(chatId, 0)
+      persistWrap()
+      return 0
+    }
+    wrapUp.markWait(chatId, plan, { reason })
+    persistWrap()
+    const timer = setTimeout(() => onWaitOver(chatId, plan), plan)
+    timer.unref?.()
+    wrapTimers.set(chatId, timer)
+    log.debug(`${chatId}：先等 ${Math.round(plan / 1000)} 秒，看对方还说不说`)
+    return plan
+  }
+
+  /** 她写了 <close>：这段收尾了。收尾前的摘要 / 下次怎么接一起存着，对方回来时 resume。 */
+  function armClose(chatId, text = '', wrap = null) {
+    const cfg = wrapCfg()
+    clearWrapTimer(chatId)
+    // 她自己写的「摘要：/下次：」优先；没写就退回最近几句聊天流水 + 一句通用接法
+    const summary = String(wrap?.summary || '').trim() || wrapSummaryFor(chatId, text)
+    const resume = String(wrap?.resume || '').trim() || DEFAULT_CLOSE_RESUME
+    wrapUp.markClose(chatId, cfg.closeSec * 1000, { summary, resume })
+    persistWrap()
+    log.info(`${chatId}：这段她收尾了${summary ? '，留了摘要' : ''}`)
+  }
+
+  /** 对方最后一句是什么（去掉「【私聊】某某(QQ)：」「【群聊 群名】」这种来源前缀）。 */
+  function lastUserSaid(text) {
+    return String(text || '')
+      .replace(/^\s*【(?:私聊|群聊)[^】]*】(?:[^：:\n]*[：:])?\s*/, '')
+      .trim()
+  }
+
+  /** 把这一轮的标记落到会话状态上。群聊暂不接（MVP），标记照样从要发的话里摘掉。 */
+  function applyWrap(chatId, wrap, text = '', { own = false, lastUserText = '' } = {}) {
+    if (!wrap || !wrapCfg().enabled) return
+    if (!String(chatId).startsWith('private:')) return
+    // 系统提醒 / 主动消息 / 模块代发：标记已经剥掉了，但会话状态不能动（不然一条系统消息就把这段收了尾）
+    if (own !== true) return
+    // 主动回合（userText 是「【系统提醒…】」）也一样：她自己主动发的话不改收尾 / 等待状态
+    if (/^\s*【系统提醒/.test(String(lastUserText || ''))) {
+      log.debug(`${chatId}：系统提醒触发的回合，不改收尾状态`)
+      return
+    }
+    if (wrap.close) {
+      const said = lastUserSaid(lastUserText)
+      // 对方在问问题 / 求她帮忙：先接住他的事，别收尾（否则他等你动手，你却说晚安）
+      if (wrapCfg().questionGuard && (looksLikeQuestion(said) || looksLikeHelpRequest(said))) {
+        log.debug(`${chatId}：对方在问问题 / 求她帮忙，这次不收尾`)
+        return
+      }
+      if (wrapCfg().questionGuard && looksLikeQuestion(text)) {
+        log.info(`${chatId}：收尾那句是问句，改成等一会儿`)
+        return armWait(chatId, wrapCfg().waitSec * 1000, 'question')
+      }
+      return armClose(chatId, text, wrap)
+    }
+    if (wrap.waitMs != null) armWait(chatId, wrap.waitMs)
+  }
+
+  /** 对方开口了：这一段是不是她刚才说「等一等 / 收尾了」的那一段。 */
+  function noteWrapArrival(chat, said = '') {
+    if (chat.kind !== 'private' || !wrapCfg().enabled) return false
+    let fast = false
+    const waited = wrapUp.takeWait(chat.chatId)
+    if (waited) {
+      clearWrapTimer(chat.chatId)
+      fast = true
+      if (waited.reason === 'question') {
+        pushWrapNote(chat.chatId, '【你刚才问了他一句；他回你了，接着聊就行】')
+      } else {
+        const mins = Math.round(waited.waitedMs / 60_000)
+        pushWrapNote(chat.chatId, mins >= 1
+          ? `【你刚才说了先等一会儿；过了 ${mins} 分钟对方才接着说】`
+          : '【你刚才说了先等一会儿；对方接着说】')
+      }
+    }
+    const closed = wrapUp.takeClose(chat.chatId)
+    if (closed) {
+      const asked = looksLikeQuestion(said) || looksLikeHelpRequest(said)
+      const parts = [asked
+        ? '【这段你之前收过尾，对方又来了，在问你。正常回答就好，不用复述这段。】'
+        : '【这段你之前收过尾，对方又来了。想接就自然接上，不想接就只回 [沉默]。】']
+      if (closed.summary) parts.push(`【上次收尾前你们最后聊的是：\n${closed.summary}\n（接着聊就行，不用解释为什么又说话了）】`)
+      if (closed.resume) parts.push(`【下次可以这样接：${closed.resume}】`)
+      pushWrapNote(chat.chatId, parts.join('\n'))
+    }
+    return fast
+  }
+
+  /** 收尾后的主动静音：主动搭话 / 目的引擎不来找这个人（对方一开口就解除）。 */
+  function proactiveMuted(chatId) {
+    const cfg = wrapCfg()
+    if (!cfg.enabled || !cfg.proactiveMute) return false
+    return wrapUp.peek(chatId).closed
+  }
+
+  /** 启动时把上次的状态读回来：等满的补一句兜底摘要，还在等的重新挂定时器。 */
+  function loadWrap() {
+    try {
+      const r = wrapUp.restore(readJson(wrapFile(), null))
+      if (r.expiredWaits.length && wrapCfg().recap) {
+        for (const w of r.expiredWaits) {
+          const mins = Math.round(w.plannedMs / 60_000)
+          const how = mins >= 1 ? `${mins} 分钟` : `${Math.round(w.plannedMs / 1000)} 秒`
+          wrapUp.pushNote(w.chatId, w.reason === 'question'
+            ? `【你刚才问了一句，等了 ${how}，对方没回】`
+            : `【你刚才说了先等一会儿（${how}），这段时间对方没有再说话】`)
+        }
+      }
+      for (const w of wrapUp.liveWaits()) {
+        const timer = setTimeout(() => onWaitOver(w.chatId, w.plannedMs), Math.max(0, w.waitLeftMs))
+        timer.unref?.()
+        wrapTimers.set(w.chatId, timer)
+      }
+      if (r.loaded) log.info(`收尾 / 等待：恢复了 ${r.loaded} 个聊天的状态${r.expiredWaits.length ? `（${r.expiredWaits.length} 个等满的补了摘要）` : ''}`)
+      persistWrap()
+    } catch (error) {
+      log.warn('收尾 / 等待状态读不出来，从空的开始：', error.message)
+    }
+  }
+  loadWrap()
 
   // 拆条间隔可在卸载时立即结束，后面的消息不再投递。
   function pause(ms) {
@@ -666,7 +880,8 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
 
   async function sendText(chatId, text, replyId, missed, userId, opts = {}) {
     // 先清洗，避免调用参数或提示词里的 @ / 表情变成真正的消息段。
-    text = cleanOutboundText(text, cleaningFor(chatId))
+    // 收尾 / 等待的标记也在这里兜一层：工具、模块、扩展代发的消息都不该把它漏到 QQ 上。
+    text = stripWrapMarkers(cleanOutboundText(text, cleaningFor(chatId)))
     if (!text.trim()) return null
     // 文字里的 <face:名字> 换成 QQ 系统表情，和文字在同一条消息里；系统表情关着就去掉标签
     let segs = getConfig().stickers.faces ? textToSegments(text, faces.idOf) : [{ type: 'text', data: { text: stripFaceTags(text) } }]
@@ -677,7 +892,7 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
   }
 
   async function sendVoice(chatId, text, replyId, userId) {
-    text = cleanOutboundText(text, cleaningFor(chatId))
+    text = stripWrapMarkers(cleanOutboundText(text, cleaningFor(chatId)))
     if (!text.trim()) return false
     let b64, engine, extras
     try {
@@ -950,8 +1165,17 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     }
     if (disposed) return
     text = cleanOutboundText(text, { ...cleaningFor(chatId), onPromptDecision: (allow) => { outputScope.getStore().allowPromptEcho = allow } })
+    // 收尾 / 等待：把标记从要发的话里摘掉，只留意图（标记本身永远发不出去）
+    const wrap = parseWrapUp(text, { waitSec: wrapCfg().waitSec, maxWaitSec: wrapCfg().maxWaitSec })
+    text = wrap.text
+    // 只有她自己这一轮（own）才写状态；系统提醒 / 主动消息只剥标记
+    const wrapOpts = { own: opts.own === true, lastUserText: opts.userText || '' }
     const r = parseReply(text, cleaningFor(chatId))
-    if (r.silent) return silenceTurn(chatId)
+    if (r.silent) {
+      // 整轮只写了个 <wait> / <close>：不说，但状态照记
+      applyWrap(chatId, wrap, text, wrapOpts)
+      return silenceTurn(chatId)
+    }
     let items = r.items
     // 对方明确要语音、她却只打了字：整段改成语音发（模型偶尔会忘，这里兜底）
     if (opts.wantVoice && cfg.voice.enabled && !items.some((i) => i.kind === 'voice')) {
@@ -991,7 +1215,10 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
       data: { text: item.value }, item,
     })), { ...cleaningFor(chatId), allowPromptEcho: false, onPromptDecision: (allow) => { outputScope.getStore().allowPromptEcho = allow } })
       .map((seg) => seg.type === 'text' ? { ...seg.item, value: seg.data.text } : seg.item)
-    if (!items.length) return silenceTurn(chatId)
+    if (!items.length) {
+      applyWrap(chatId, wrap, text, wrapOpts)
+      return silenceTurn(chatId)
+    }
     // 一段只有一个人明确 @ / 引用她时，第一条回复引用并 @ 那个人；多人同时叫她不猜。
     // 模型明确选了引用编号时尊重它，不再自动引用另一条。
     const refs = inGroup ? groupRefs.get(chatId.slice(6)) || {} : {}
@@ -1023,9 +1250,14 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     })
     if (disposed) return
     if (outputScope.getStore().blocked && !outputScope.getStore().sent) return silenceTurn(chatId)
-    if (opts.simulate) return items
+    if (opts.simulate) {
+      applyWrap(chatId, wrap, text, wrapOpts)
+      return items
+    }
     // 一条都没发出去：不记流水，她没说出口的话不能算说过
     if (failures.length && failures.length >= items.filter((i) => i.kind !== 'poke').length) return { missedAt, failed: failures.length, errors: failures }
+    // 话真的发出去了，才把「等一等 / 收尾」记到会话状态上
+    applyWrap(chatId, wrap, text, wrapOpts)
     if (inGroup) {
       const gid = chatId.slice(6)
       const said = (groupSaid.get(gid) || []).filter((t) => Date.now() - t < 3600_000)
@@ -1747,6 +1979,9 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     if (extra.stickerPick) p.stickerPick = (p.stickerPick || 0) + extra.stickerPick
     if (senderId) p.senders.add(String(senderId))
     p.wantVoice = p.wantVoice || wantVoice
+    // 她刚才说了「先等一会儿」：这一句就是接着说的，别让连发合并再压几秒
+    const said = content.filter((c) => c.type === 'text').map((c) => c.text).join('\n')
+    if (noteWrapArrival(chat, said)) p.wrapFast = true
     pending.set(chat.chatId, p)
     clearTimeout(p.timer)
     if (!m.enabled) return flush(chat.chatId)
@@ -1755,7 +1990,8 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     const wait = (group ? m.groupWaitSec : m.waitSec) * 1000
     const max = (group ? m.groupMaxSec : m.maxSec) * 1000
     const left = Math.max(0, max - (Date.now() - p.firstAt))
-    p.timer = setTimeout(() => flush(chat.chatId), Math.min(wait, left))
+    const delay = p.wrapFast ? Math.min(wait, wrapCfg().replyDelaySec * 1000) : wait
+    p.timer = setTimeout(() => flush(chat.chatId), Math.min(delay, left))
     p.timer.unref?.()
   }
 
@@ -1930,6 +2166,12 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
 
   async function pushToSession(chat, content, senderId, opts = {}) {
     assertActive()
+    // 收尾后的主动静音：没人开口、是模块主动推的（主动搭话 / 目的引擎 / 扩展的早安问候），这段时间先不打扰。
+    // 对方一开口，收尾状态就被消费掉，这里自然放行。
+    if (!senderId && !opts.steer && proactiveMuted(chat.chatId)) {
+      log.info(`${chat.chatId}：这段她收过尾（主动静音中），这次主动推送先不发`)
+      return
+    }
     const { agent, sessionId } = await agentFor(chat)
     assertActive()
     const key = sessionKey(sessionId)
@@ -1967,6 +2209,9 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
       const lines = earlier.map((x) => `${new Date(x.at).toTimeString().slice(0, 5)} 你：${x.text}`)
       content = [{ type: 'text', text: `【你之前在这个聊天里主动说过（是在别处安排下发的，这里的人都看到了）】\n${lines.join('\n')}\n` }, ...content]
     }
+    // 收尾 / 等待：这段是不是接着刚才那一段（等她等到了 / 她刚收过尾），先跟她说一句再给消息
+    const wrapNote = takeWrapNotes(chat.chatId)
+    if (wrapNote) content = [{ type: 'text', text: wrapNote }, ...content]
     content = cleanContent(content)
     // 这一轮还在跑、这句是排队给下一轮的：额外记到 pendingSenders，等上一轮 turn/end 时接过去（#90）
     // ⚠ 不能用 busy：flush 一开始就把 busy 置上了，否则会把这一批自己的说话人塞进下一轮，
@@ -2192,6 +2437,9 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     sessionToChat.delete(sessionKey(e.sessionId))
     turnState.delete(sessionKey(e.sessionId))
     outputSources.delete(chatId)
+    clearWrapTimer(chatId)
+    wrapUp.clear(chatId)
+    persistWrap()
     delete m.chats[chatId]
     saveMap(m)
     log.info(`${chatId} 重新开始`)
@@ -2213,9 +2461,12 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
       sessionToChat.delete(sessionKey(e.sessionId))
       turnState.delete(sessionKey(e.sessionId))
       outputSources.delete(chatId)
+      clearWrapTimer(chatId)
+      wrapUp.clear(chatId)
       delete m.chats[chatId]
       n++
     }
+    persistWrap()
     // 专用工作区里其他零散的会话（比如手动点「新会话」留下的空白会话）也一起归档
     try {
       const norm = (p) => String(p || '').replace(/[\\/]+$/, '').toLowerCase()
@@ -2366,6 +2617,10 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     subagentParentAgent = null
     for (const p of pending.values()) clearTimeout(p.timer)
     pending.clear()
+    for (const timer of wrapTimers.values()) clearTimeout(timer)
+    wrapTimers.clear()
+    persistWrap() // 先落盘再清内存：重启后等待 / 收尾 / 摘要还能接上
+    wrapUp.clearAll()
     for (const key of [...typing.keys()]) stopTyping(key)
     for (const done of [...pauses]) done()
     for (const wait of [...replyWaits]) {
@@ -2434,6 +2689,10 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     isOwnedSession,
     canSeeImages: canSeeFor,
     resetSessions,
+    /** 这个聊天的收尾 / 等待状态（面板和测试用）：{ waiting, plannedMs, waitLeftMs, waitReason, closed, closeLeftMs, summary } */
+    wrapStateOf: (chatId) => wrapUp.peek(chatId),
+    /** 收尾后的主动静音：主动搭话 / 目的引擎该不该跳过这个聊天 */
+    proactiveMuted,
     lastTextOf: (sessionId) => turnState.get(sessionKey(sessionId))?.lastText || '',
     prevTextOf: (sessionId) => turnState.get(sessionKey(sessionId))?.prevText || '',
     speakersOf: (sessionId) => turnState.get(sessionKey(sessionId))?.speakers || [],

@@ -58,6 +58,17 @@ test('她问了一句你没回：追问一次，不会反复追', async () => {
   }
 })
 
+test('她刚收过尾（主动静音）：到点也不主动来找', async () => {
+  const { s, pushed } = setup({ lastOwnerChatAt: Date.now() - 120 * min, lastBotToOwner: { at: Date.now() - 120 * min, text: '晚安' }, proactiveMuted: () => true })
+  await s.tick() // 第一次只排时间
+  const st = s.state()
+  st.nextAt = Date.now() - 1
+  const { writeFileSync } = await import('node:fs')
+  writeFileSync(join(process.env.AURABOT_DATA_DIR, 'speakup.json'), JSON.stringify(st))
+  await s.tick()
+  assert.equal(pushed.length, 0, '收尾后的 12 小时里不主动找对方')
+})
+
 test('她最后一句不是问题，就不追问', async () => {
   const { s, pushed } = setup({ lastOwnerChatAt: Date.now() - 25 * min, lastChatAt: 0, lastBotToOwner: { at: Date.now() - 20 * min, text: '好哦' } }, { idleMinutes: 600 })
   await s.tick()

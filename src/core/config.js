@@ -274,6 +274,15 @@ export const DEFAULTS = {
   },
   mood: { enabled: true, halfLifeHours: 3, judge: false, base: 60 }, // base：心情基线（0~100 里算「平常」的那个值）；judge：每轮聊完用模型判一次心情（更准，每轮多一次很短的调用）；关着用关键词
   chat: { seedHistory: false, seedHistoryCount: 20 }, // seedHistory：新会话第一次说话时先补最近几条历史（默认关）
+  // 收尾 / 等待（私聊 MVP）：她在回复末尾写 <wait> / <close>，插件按「标记 + 定时器 + 会话状态」处理，
+  // 状态落盘（wrap-up.json），重启后等待 / 收尾 / 摘要都还在。
+  //   waitSec：<wait> 不带数字时等多久（默认 5 分钟）；maxWaitSec：<wait:9999> 这种最多等多久；
+  //   closeSec：<close> 之后多久内算「这段已收尾」（默认 12 小时）；
+  //   replyDelaySec：等待中收到消息时，连发合并缩短到这么久；
+  //   recap：等满没等到人说话时，给她记一句兜底摘要（下一轮带给她）；
+  //   questionGuard：收尾那句是问句时，<close> 不生效，改成等一会儿（对方回的是答案，不是新话题）；
+  //   proactiveMute：收尾后到对方再开口之前，主动搭话 / 目的引擎不来找这个人
+  wrapUp: { enabled: true, waitSec: 300, maxWaitSec: 1800, closeSec: 43200, replyDelaySec: 1, recap: true, questionGuard: true, proactiveMute: true },
   memory: {
     enabled: true, recallCount: 6, recallMode: 'always', recallTriggers: ['上次', '上回', '之前', '以前', '那天', '那次', '还记得', '记不记得', '说过', '提过', '答应', '约好', '那时候'],
     dailyConsolidate: true, consolidateTimes: ['04:00', '16:00'], keepChatlogDays: 7, keepChatlogSet: false, mergeGroups: false, compress: true, compressAfterDays: 14, instantCommands: true, groupMemory: true, searchRrf: true,
@@ -593,6 +602,16 @@ export function normalize(raw) {
   c.chat = c.chat || {}
   c.chat.seedHistory = bool(c.chat.seedHistory, false)
   c.chat.seedHistoryCount = num(c.chat.seedHistoryCount, 20, 1, BIG)
+  // 收尾 / 等待：默认开；数值都夹回合理范围（手改配置文件写歪了也不会等一小时或永远在等）
+  if (!isObj(c.wrapUp)) c.wrapUp = { ...DEFAULTS.wrapUp }
+  c.wrapUp.enabled = bool(c.wrapUp.enabled, true)
+  c.wrapUp.recap = bool(c.wrapUp.recap, true)
+  c.wrapUp.questionGuard = bool(c.wrapUp.questionGuard, true)
+  c.wrapUp.proactiveMute = bool(c.wrapUp.proactiveMute, true)
+  c.wrapUp.waitSec = num(c.wrapUp.waitSec, 300, 1, 600)
+  c.wrapUp.maxWaitSec = Math.max(c.wrapUp.waitSec, num(c.wrapUp.maxWaitSec, 1800, 1, 3600))
+  c.wrapUp.closeSec = num(c.wrapUp.closeSec, 43200, 0, 86400)
+  c.wrapUp.replyDelaySec = num(c.wrapUp.replyDelaySec, 1, 0, 60)
   c.memory.recallCount = num(c.memory.recallCount, 6, 0, BIG)
   c.memory.recallMode = c.memory.recallMode === 'trigger' ? 'trigger' : 'always'
   c.memory.recallTriggers = [...new Set((Array.isArray(c.memory.recallTriggers) ? c.memory.recallTriggers : String(c.memory.recallTriggers || '').split(/[\n,，;；]+/)).filter((x) => typeof x === 'string').map((x) => x.trim().slice(0, 40)).filter(Boolean))].slice(0, 100)

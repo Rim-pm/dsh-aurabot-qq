@@ -137,6 +137,17 @@ test('闸门：总开关关掉后 tick 完全静默', async () => {
   assert.ok(!existsSync(stateFile()), '关掉后不写目的状态')
 })
 
+test('闸门：她刚收过尾（主动静音）时到点也不发，连素材都不跑', async () => {
+  const hub = makeHub()
+  const { p } = makePurpose(hub)
+  await p.tick() // 首次只排程（这时还没收尾）
+  hub.proactiveMuted = () => true
+  dueNow()
+  await p.tick()
+  assert.equal(hub.delivered.length, 0)
+  assert.equal(hub.turns.length, 0)
+})
+
 test('闸门：与旧「主动搭话」互不影响——speakUp 关着不影响 purpose 开着跑', async () => {
   const hub = makeHub()
   const { p } = makePurpose(hub) // makePurpose 默认 speakUp.enabled=false、ext.purpose.enabled=true

@@ -6,10 +6,12 @@
 //   - `<sticker:标签>` 发一张表情（可写 `<sticker:标签></sticker>`）
 //   - `<poke>` = 戳一戳对方
 //   - `<reply:编号>` 写在某句前面 = 这句以「引用回复」发出（群聊里引用提示词中带编号的那条消息）
+//   - `<wait>` / `<wait:30>` / `<close>` = 收尾 / 等待（见 wrap-up.js）：只说意图，不是要发出去的字
 //   - 整轮只输出 `[沉默]`（或空）= 这次不说话（群聊插话用）
 // 另外顺手把模型偶尔漏出来的 Markdown 洗掉——QQ 不渲染 Markdown。
 
 import { currentPromptSources, promptFingerprint, promptTextRanges } from '../security/leak-guard.js'
+import { stripWrapMarkers } from './wrap-up.js'
 
 export const SILENCE = '[沉默]'
 
@@ -258,7 +260,7 @@ export function stripToolText(text) {
 
 function visibleContent(text) {
   const content = stripMarkdown(text)
-    .replace(/<\/?(?:voice|reply|at|poke|sticker|face)\b[^>]*>/gi, '')
+    .replace(/<\/?(?:voice|reply|at|poke|sticker|face|wait|close)\b[^>]*>/gi, '')
     .replace(/[@＠][^\s@＠<>|｜]+/g, '')
     .replace(/\|\|\|/g, '')
     .trim()
@@ -323,7 +325,8 @@ export function cleanOutboundSegments(message, options) {
 /** 解析一轮回复；在拆气泡/语音前清洗，避免协议里的竖线被误作气泡分隔符。 */
 export function parseReply(text, options) {
   // 模型偶尔把换行写成 HTML `<br>`：当真正的换行处理；代码示例里的字面量保留。
-  const cleaned = cleanOutboundText(text, options)
+  // 收尾 / 等待的标记先摘掉：它是给插件看的，不是要发出去的字（调用方通常已经摘过一次，这里兜底）。
+  const cleaned = stripWrapMarkers(cleanOutboundText(text, options))
   const code = codeRanges(cleaned)
   const raw = cleaned.replace(/<br\s*\/?>/gi, (tag, offset) => insideCode(code, offset, offset + tag.length) ? tag : '\n').trim()
   if (isSilence(raw)) return { silent: true, items: [] }

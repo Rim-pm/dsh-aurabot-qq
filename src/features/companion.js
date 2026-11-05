@@ -176,6 +176,9 @@ export function createSpeakUp({ getConfig, hub, log, isMuted, memory }) {
   // 私聊里的「最近一次来往」：只看和主人的私聊，群里再热闹也不影响她想你
   const lastPrivateAt = () => Math.max(hub.lastOwnerChatAt || 0, hub.lastBotToOwner?.at || 0)
 
+  // 收尾 / 等待的「主动静音」：她刚说过「这段聊完了」的人，12 小时内不主动去找（对方一开口就解除）
+  const wrapMuted = (chatId) => Boolean(hub.proactiveMuted?.(chatId))
+
   // 每次换个由头，免得句句都是「在干嘛」
   const ANGLES = [
     '分享一件你今天遇到的小事或想到的东西',
@@ -216,7 +219,7 @@ export function createSpeakUp({ getConfig, hub, log, isMuted, memory }) {
     const today = new Date().toDateString()
     s.friends = s.friends || {}
     for (const qq of c.allow || []) {
-      if (String(qq) === String(cfg.ownerQQ) || isMuted?.(`private:${qq}`) || memory?.()?.dislikes?.(qq)) continue
+      if (String(qq) === String(cfg.ownerQQ) || isMuted?.(`private:${qq}`) || wrapMuted(`private:${qq}`) || memory?.()?.dislikes?.(qq)) continue
       const f = s.friends[qq] || (s.friends[qq] = {})
       if (f.day !== today) Object.assign(f, { day: today, count: 0 })
       if (!f.nextAt) schedule(f, c)
@@ -236,7 +239,7 @@ export function createSpeakUp({ getConfig, hub, log, isMuted, memory }) {
     const c = cfg.speakUp
     if (!cfg.enabled || !c.enabled) return
     if (cfg.ext?.purpose?.enabled === true) return // 目的引擎开着时由它主动找人，两套都跑同一个人会被找两次
-    if (isMuted?.(`private:${cfg.ownerQQ}`)) { // 主人在私聊里让她闭嘴了：只管主人这边，白名单照旧
+    if (isMuted?.(`private:${cfg.ownerQQ}`) || wrapMuted(`private:${cfg.ownerQQ}`)) { // 主人在私聊里让她闭嘴了 / 她刚收过尾：只管主人这边，白名单照旧
       const s = load()
       if (!(await tickFriends(cfg, s))) save(s)
       return
