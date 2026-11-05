@@ -32,6 +32,10 @@ const BRACKET = /^[[【]\s*(等待|等|收尾|结束)\s*(\d+(?:\.\d+)?)?\s*(秒|
 // 整行就是一个括号标记（[等待] / [等30秒] / 【收尾】…）：句子里提到的词不动。
 const BRACKET_LINE = /^[ \t]*[[【]\s*(等待|等|收尾|结束)\s*(\d+(?:\.\d+)?)?\s*(秒|s|分钟|分|m)?\s*[\]】][ \t]*$/i
 const CLOSE_PAYLOAD = /^\s*(摘要|下次)\s*[:：]\s*(.*)$/
+// 一整行就是收尾标记：`<close>` 或 `[收尾]` / `【结束】`（括号写法要整行才算）
+const CLOSE_MARK_LINE = /^[ \t]*(?:<\s*\/?\s*close\b[^<>]*>|[[【]\s*(?:收尾|结束)\s*[\]】])[ \t]*$/i
+// 行内出现 `<close>`（`晚安<close>` 这种）；`</close>` 不算
+const CLOSE_TAG = /<\s*close\b[^<>]*>/i
 // 行尾标记前面是「：」或者「比如 / 例如 / 写法 / 格式」，多半是在解释语法，不当意图
 const EXAMPLE_TAIL = /[：:]\s*$|(?:比如|例如|写法|格式|这样)\s*$/
 
@@ -83,33 +87,56 @@ function splitTrailingTags(line) {
 }
 
 /**
- * `<close>` 后面跟的「摘要：…」「下次：…」块：只认紧跟 `<close>`、后面全是这两行的写法，
- * 中间夹了别的话就整段当正文（不猜）。返回去掉 payload 的正文。
+ * `<close>` 前后的「摘要：…」「下次：…」块：只认紧挨着标记（中间可以有空行）的那几行，
+ * 夹了别的话就不往下吃了。返回去掉 payload 的正文。
+ *
+ * 两种情况都认，因为模型两种都写：payload 在标记后面（提示词教的写法），
+ * 或者先写摘要再收尾（常见偏差）。**只要认出来了就一定从正文里摘掉**——
+ * 摘要 / 下次是给插件看的，漏到 QQ 上比少一条摘要严重得多。
  */
 function closePayloadOf(raw) {
-  const lines = String(raw ?? '').split('\n')
+  const text = String(raw ?? '')
+  const lines = text.split('\n')
+  // 从后往前找最后一条收尾标记（整行标记，或者行内 <close>）
   let idx = -1
   for (let i = lines.length - 1; i >= 0; i--) {
-    if (/<\s*close\b[^<>]*>/i.test(lines[i]) && !/<\s*\/\s*close\b/i.test(lines[i])) { idx = i; break }
+    if (CLOSE_MARK_LINE.test(lines[i]) || CLOSE_TAG.test(lines[i])) { idx = i; break }
   }
-  if (idx < 0) return { text: raw, summary: '', resume: '' }
-  const rest = lines.slice(0, idx + 1)
-  const head = rest[idx]
-  const tag = /<\s*close\b[^<>]*>/i.exec(head)
-  // <close> 同一行后面直接跟「摘要：」也算
-  const inline = tag ? CLOSE_PAYLOAD.exec(head.slice(tag.index + tag[0].length)) : null
-  if (inline && tag) rest[idx] = head.slice(0, tag.index + tag[0].length)
-  const nonBlank = lines.slice(idx + 1).filter((l) => l.trim())
-  if (nonBlank.some((l) => !CLOSE_PAYLOAD.test(l))) return { text: raw, summary: '', resume: '' }
-  if (!inline && !nonBlank.length) return { text: raw, summary: '', resume: '' }
-  let summary = inline && inline[1] === '摘要' ? inline[2].trim() : ''
-  let resume = inline && inline[1] === '下次' ? inline[2].trim() : ''
-  for (const line of nonBlank) {
-    const p = CLOSE_PAYLOAD.exec(line)
+  if (idx < 0) return { text, summary: '', resume: '' }
+
+  const drop = new Set()
+  let summary = ''
+  let resume = ''
+  // `<close>` 同一行后面直接跟「摘要：」也算
+  const tag = CLOSE_TAG.exec(lines[idx])
+  if (tag) {
+    const inline = CLOSE_PAYLOAD.exec(lines[idx].slice(tag.index + tag[0].length))
+    if (inline) {
+      if (inline[1] === '摘要') summary = inline[2].trim()
+      else resume = inline[2].trim()
+      lines[idx] = lines[idx].slice(0, tag.index + tag[0].length)
+    }
+  }
+  const eat = (i) => {
+    const p = CLOSE_PAYLOAD.exec(lines[i])
     if (p[1] === '摘要') summary = summary || p[2].trim()
     else resume = resume || p[2].trim()
+    drop.add(i)
   }
-  return { text: rest.join('\n'), summary, resume }
+  // 标记前面紧挨着的那几行
+  for (let i = idx - 1; i >= 0; i--) {
+    if (!lines[i].trim()) continue
+    if (!CLOSE_PAYLOAD.test(lines[i])) break
+    eat(i)
+  }
+  // 标记后面紧挨着的那几行（后面还接着正文也照样摘掉，不能让摘要漏出去）
+  for (let i = idx + 1; i < lines.length; i++) {
+    if (!lines[i].trim()) continue
+    if (!CLOSE_PAYLOAD.test(lines[i])) break
+    eat(i)
+  }
+  if (!drop.size && !summary && !resume) return { text, summary: '', resume: '' }
+  return { text: lines.filter((_, i) => !drop.has(i)).join('\n'), summary, resume }
 }
 
 /**

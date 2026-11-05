@@ -113,11 +113,44 @@ test('收尾 / 等待：<close> 后面可以写「摘要 / 下次」，解析出
   const plain = parseWrapUp('晚安<close>', {})
   assert.equal(plain.summary, '')
   assert.equal(plain.resume, '', '没写就留空，交给 hub 回退')
-  // <close> 后面还有正文：不算收尾（只认末尾），也不当 payload
+  // <close> 后面还有正文：不算收尾（只认末尾），但摘要行照样得摘掉，不能漏出去
   const messy = parseWrapUp('晚安\n<close>\n摘要：这句\n接着说别的', {})
   assert.equal(messy.close, false, '后面还有正文就不算收尾')
-  assert.equal(messy.summary, '')
+  assert.doesNotMatch(messy.text, /摘要/, '摘要行不能漏到 QQ 上')
   assert.match(messy.text, /接着说别的/)
+})
+
+test('收尾 / 等待：摘要写在 <close> 前面也不漏出去，照样能收尾', () => {
+  const r = parseWrapUp('晚安啦\n摘要：他明天上午面试\n下次：问面试顺不顺利\n<close>', {})
+  assert.equal(r.close, true, '摘要写在前面不影响收尾')
+  assert.equal(r.text, '晚安啦', '摘要 / 下次 不能漏到 QQ 上')
+  assert.equal(r.summary, '他明天上午面试')
+  assert.equal(r.resume, '问面试顺不顺利')
+
+  // 中间夹空行也认
+  const spaced = parseWrapUp('晚安\n\n摘要：夹了空行\n\n<close>', {})
+  assert.equal(spaced.close, true)
+  assert.equal(spaced.text, '晚安')
+  assert.equal(spaced.summary, '夹了空行')
+
+  // 括号写法后面跟摘要：同样摘掉，不能因为「不是尖括号」就漏
+  const bracket = parseWrapUp('晚安啦\n[收尾]\n摘要：括号写法\n下次：明天见', {})
+  assert.equal(bracket.close, true)
+  assert.equal(bracket.text, '晚安啦')
+  assert.equal(bracket.summary, '括号写法')
+  assert.equal(bracket.resume, '明天见')
+
+  // 行内 <close>（`晚安<close>`）后面跟摘要：照旧摘掉
+  const inline = parseWrapUp('晚安啦<close>\n摘要：行内写法\n下次：明天见', {})
+  assert.equal(inline.close, true)
+  assert.equal(inline.text, '晚安啦')
+  assert.equal(inline.summary, '行内写法')
+  assert.equal(inline.resume, '明天见')
+
+  // 没有收尾标记时，「摘要：」只是普通正文，一个字都不能动
+  const plainText = parseWrapUp('摘要：今天做了这些\n下次：再说吧', {})
+  assert.equal(plainText.text, '摘要：今天做了这些\n下次：再说吧')
+  assert.equal(plainText.summary, '')
 })
 
 test('收尾 / 等待：普通回复不受影响，别的协议标签照旧保留', () => {
@@ -317,6 +350,8 @@ async function brain({ text }) {
   if (text.includes('在吗')) return '在<close>'
   if (text.includes('面试')) return '晚安 明天见\n<close>\n摘要：他明天上午面试，情绪有点低\n下次：问面试顺不顺利，别再提加班'
   if (text.includes('今天好累')) return '那你早点睡 明天几点起？<close>'
+  // 模型写歪了：摘要写在 <close> 前面（老代码会把摘要整行发出去）
+  if (text.includes('写歪了')) return '晚安啦\n摘要：他明天要早起\n下次：问一句几点起\n<close>'
   if (text.includes('群里等待测试')) return '好<wait>'
   return '嗯'
 }
@@ -580,6 +615,15 @@ test('私聊：她自己收尾那句是问句时，照旧改成等一会儿（�
   assert.equal(st.closed, false, '问了人就不收尾')
   assert.equal(st.waiting, true, '改成等对方回答')
   assert.equal(st.waitReason, 'question')
+})
+
+test('私聊：模型把摘要写在 <close> 前面（写歪了）也不会漏到 QQ，收尾照样生效', async () => {
+  await say('写歪了试试')
+  assert.equal(textOfMsg(sentPriv().at(-1)), '晚安啦', '摘要 / 下次 一行都不能发出去')
+  const st = hub.wrapStateOf(PRIV)
+  assert.equal(st.closed, true, '摘要写在前面不影响收尾')
+  assert.equal(st.summary, '他明天要早起')
+  assert.equal(st.resume, '问一句几点起')
 })
 
 test('提示词：开着时教她用标记，关掉就不教', async () => {
