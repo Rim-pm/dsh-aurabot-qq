@@ -10,14 +10,20 @@ import { createFakeDsh } from './helpers/fake-dsh.js'
 const OWNER = '10000001'
 const BOT = '20000002'
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-async function until(fn, ms = 8000) {
+// 全量跑时几十个测试文件并行，定时器和 IO 都会被拖慢：固定等待统一乘一个系数，
+// 别让「等消息落地」这类用例在机器忙的时候假红。AURABOT_TEST_SETTLE 可以按需覆盖。
+const SETTLE_SCALE = Math.max(1, Number(process.env.AURABOT_TEST_SETTLE) || 1.5)
+const settle = (ms) => sleep(Math.round(ms * SETTLE_SCALE))
+async function until(fn, ms = 16_000) {
+  // 显式给的超时也一起放宽：机器忙的时候「等消息落地」比平时慢一倍很常见
+  const budget = Math.round(ms * SETTLE_SCALE)
   const t = Date.now()
-  while (Date.now() - t < ms) {
+  while (Date.now() - t < budget) {
     const v = await fn()
     if (v) return v
-    await sleep(50)
+    await new Promise((r) => setTimeout(r, 50))
   }
-  throw new Error('等不到条件成立')
+  throw new Error(`等不到条件成立（等了 ${budget}ms）`)
 }
 
 function fakePng(w, h, salt = 0) {
@@ -34,7 +40,7 @@ async function brain({ preset, text, images, callTool }) {
   if (text.includes('热重载探针')) { const r = await callTool('probe73', {}); return r ? '探针:' + r.message : '没有探针工具' }
   if (text.includes('慢工具测试')) { const r = await callTool('slow74', {}); return r ? '慢工具好了' : '没有慢工具' }
   if (text.includes('排队权限测试0') || text.includes('排队权限测试2')) { const r = await callTool('permprobe90', {}); return r ? String(r.message || '') : '没有探针' }
-  if (text.includes('排队权限测试1')) { await sleep(1200); return '第一轮好了' }
+  if (text.includes('排队权限测试1')) { await settle(1200); return '第一轮好了' }
   if (text.includes('【空间互动')) { qzonePrompts.push(text); return '哈哈好看' }
   if (/^【(私聊|群聊)/.test(text) && text.includes('戳了戳你')) return '干嘛戳我<poke>'
   if (/^【私聊/.test(text) && text.includes('表情改名测试')) { const m = text.match(/把「(.+?)」/); const r = await callTool('qq_edit_sticker', { sticker: m[1], new_name: '改过的名字', tags: ['开心'] }); return r.message }
@@ -48,7 +54,7 @@ async function brain({ preset, text, images, callTool }) {
   if (text.includes('存画作表情测试')) { const r = await callTool('qq_save_sticker', { painting: '#1', name: '自画像' }); return r ? r.message : '没这个工具' }
   if (text.includes('换头像测试')) { const r = await callTool('qq_set_avatar', { image: 'https://example.com/a.png' }); return r ? r.message : '没这个工具' }
   if (text.includes('本地头像测试')) { const r = await callTool('qq_set_avatar', { image: 'C:/Users/a/secret.png' }); return r ? r.message : '没这个工具' }
-  if (text.includes('慢慢想') && !text.includes('补充')) { await sleep(2500); return '想好了' }
+  if (text.includes('慢慢想') && !text.includes('补充')) { await settle(2500); return '想好了' }
   if (text.includes('引用测试') && text.includes('【群聊')) { const n = (text.match(/\[(\d+)\][^\n]*引用测试/) || [])[1]; return n ? `<reply:${n}>收到这条啦\n别的我就不挨个回了` : '没看到编号' }
   if (text.includes('第一句') && text.includes('第二句')) return '两句我都看到啦'
   if (text.includes('画一只')) { const r = await callTool('qq_draw_image', { prompt: '一只蓝色小鲸鱼' }); return r && r.ok ? '画好啦' : '画不了' }
@@ -198,7 +204,7 @@ test('系统会话超时会及时返回，晚到的回复不会发到 QQ', async
   const keyed = await api.hub.runSystemTurn('timeout-test', '另一种用途', '三', { timeoutMs: 4000, key: 'behavior' })
   assert.equal(typeof keyed, 'string', '带 key 的后台回合要能独立跑完')
   assert.equal(fake.workspaces[0].sessionIds.length, before + 1, '带 key 的后台回合应该单独开一条会话')
-  await sleep(2800)
+  await settle(2800)
   // 只看这次迟到的回复有没有被发出去：别的用例可能刚好在这 2.8 秒里发消息，用全局条数判断会误报
   const late = mock.sent('send_private_msg').filter((c) => JSON.stringify(c.params || {}).includes('想好了'))
   assert.deepEqual(late, [], '超时后晚到的回复不能发到 QQ')
@@ -207,7 +213,7 @@ test('系统会话超时会及时返回，晚到的回复不会发到 QQ', async
 test('不在白名单的私聊：不理', async () => {
   const before = fake.turns.length
   mock.push(priv('123456', text('在吗')))
-  await sleep(400)
+  await settle(400)
   assert.equal(fake.turns.length, before)
   assert.equal(sentTo('private', '123456').length, 0)
 })
@@ -215,7 +221,7 @@ test('不在白名单的私聊：不理', async () => {
 test('群聊：没叫她不回；@她必回（群聊 preset，只有主人那一轮能发文件）', async () => {
   const before = fake.turns.length
   mock.push(grp('555', '777', text('今天天气不错')))
-  await sleep(400)
+  await settle(400)
   assert.equal(fake.turns.length, before, '插话概率 0 时普通消息不回')
   mock.push(grp('555', '777', [{ type: 'at', data: { qq: BOT } }, { type: 'text', data: { text: ' 在吗' } }]))
   await until(() => sentTo('group', '555').length >= 1)
@@ -243,7 +249,7 @@ test('群聊插话：她可以选择不说话', async () => {
   mock.push(grp('557', '777', text('随便聊聊')))
   await until(() => fake.turns.length > before)
   assert.match(fake.turns.at(-1).userText, /没人叫你/)
-  await sleep(300)
+  await settle(300)
   assert.equal(sentTo('group', '557').length, 0, '回了 [沉默] 就不发')
 })
 
@@ -290,7 +296,7 @@ test('按头衔不理：勾选的群里头衔是「大肥鱼」的成员 @ 她�
   const turns = fake.turns.length
   mock.push(titled('880', '你好呀'))
   mock.push({ post_type: 'notice', notice_type: 'notify', sub_type: 'poke', group_id: 556, user_id: 880, target_id: Number(BOT), self_id: Number(BOT) })
-  await sleep(1500)
+  await settle(1500)
   assert.equal(fake.turns.length, turns, '机器人的消息和戳一戳都没交给她')
   mock.push(grp('556', '881', at('在吗'), '普通群友'))
   await until(() => fake.turns.length > turns)
@@ -302,14 +308,14 @@ test('QQ 命令：主人 /silent 后群里 @ 她也不回，/active 恢复；群
   const at = (t) => [{ type: 'at', data: { qq: BOT } }, { type: 'text', data: { text: ' ' + t } }]
   let n = sentTo('group', '555').length
   mock.push(grp('555', '777', text('/silent')))
-  await sleep(500)
+  await settle(500)
   mock.push(grp('555', OWNER, text('/silent'), 'xiaoming'))
   // 群友那句会交给模型，回复可能晚到、排在后面，所以等「不说话」那条出现，别只看最后一条
   await until(() => sentTo('group', '555').slice(n).some((m) => /不说话/.test(JSON.stringify(m))))
   const turns = fake.turns.length
   n = sentTo('group', '555').length
   mock.push(grp('555', '778', at('在吗')))
-  await sleep(800)
+  await settle(800)
   assert.equal(fake.turns.length, turns, '闭嘴时 @ 她也不交给模型')
   assert.equal(sentTo('group', '555').length, n)
   mock.push(grp('555', OWNER, text('/active'), 'xiaoming'))
@@ -326,7 +332,7 @@ test('群聊一段一回：好几个人连着 @ 她，她看完整段只回一�
   mock.push(grp('558', '703', text('第三个人没叫她'), '丙'))
   mock.push(grp('558', '704', at('第四个人说话'), '丁'))
   await until(() => fake.turns.length > before)
-  await sleep(1500)
+  await settle(1500)
   const mine = fake.turns.slice(before).filter((t) => t.userText.includes('群聊'))
   assert.equal(mine.length, 1, '只交给她一次')
   for (const w of ['第一个人', '第二个人', '第三个人', '第四个人']) assert.ok(mine[0].userText.includes(w), w)
@@ -344,12 +350,12 @@ test('群聊：她还在回上一段时新来的消息先攒着，回完再一�
   const at = (t) => [{ type: 'at', data: { qq: BOT } }, { type: 'text', data: { text: ' ' + t } }]
   const before = fake.turns.length
   mock.push(grp('558', '720', at('慢慢想一下这个问题'), '戊'))
-  await sleep(1200) // 已经交给她了，她正在想
+  await settle(1200) // 已经交给她了，她正在想
   mock.push(grp('558', '721', at('补充一句A'), '己'))
   mock.push(grp('558', '722', at('补充一句B'), '庚'))
   mock.push(grp('558', '723', at('补充一句C'), '辛'))
   await until(() => fake.turns.length >= before + 2, 12000)
-  await sleep(1500)
+  await settle(1500)
   const mine = fake.turns.slice(before).filter((t) => t.userText.includes('群聊'))
   assert.equal(mine.length, 2, '第一段一轮，她想的时候来的三条合成第二轮')
   assert.ok(['补充一句A', '补充一句B', '补充一句C'].every((w) => mine[1].userText.includes(w)))
@@ -434,11 +440,11 @@ test('戳一戳：主人戳她，她会回话，还会戳回去；20 秒内重�
   assert.equal(mock.sent('send_poke')[0].params.user_id, Number(OWNER))
   assert.equal(sentTo('private', OWNER).at(-1).params.message[0].data.text, '干嘛戳我')
   mock.push(poke)
-  await sleep(1200)
+  await settle(1200)
   assert.equal(fake.turns.length, turns + 1, '连着戳只算一次')
   // 戳的不是她就不管
   mock.push({ ...poke, target_id: 12345 })
-  await sleep(800)
+  await settle(800)
   assert.equal(fake.turns.length, turns + 1)
 })
 
@@ -462,11 +468,11 @@ test('群聊刹车：主动接话才歇着，群友 @ / 叫名字 / 追问都能
     const n = sentTo('group', '559').length
     mock.push(grp('559', '710', at('在吗' + i)))
     await until(() => sentTo('group', '559').length > n)
-    await sleep(600)
+    await settle(600)
   }
   let turns = fake.turns.length
   mock.push(grp('559', '711', text('今天天气不错')))
-  await sleep(1200)
+  await settle(1200)
   assert.equal(fake.turns.length, turns, '说够 2 次了，没叫她的消息先不回')
   mock.push(grp('559', '711', at('在吗 再来')))
   await until(() => fake.turns.length > turns)
@@ -478,11 +484,11 @@ test('群聊刹车：主动接话才歇着，群友 @ / 叫名字 / 追问都能
   await until(() => sentTo('group', '559').length > sends, 5000)
   // 等这一轮的发送彻底安静下来：她要先说完，「最近一条是不是她说的」才稳定
   let quiet = -1
-  for (let i = 0; i < 20 && quiet !== mock.calls.length; i++) { quiet = mock.calls.length; await sleep(200) }
+  for (let i = 0; i < 20 && quiet !== mock.calls.length; i++) { quiet = mock.calls.length; await settle(200) }
   // 刚说完被人追问「人呢」：也算在叫
   turns = fake.turns.length
   mock.push(grp('559', '713', text('你们先聊')))
-  await sleep(1200)
+  await settle(1200)
   assert.equal(fake.turns.length, turns, '没人叫她的普通消息不回')
   mock.push(grp('559', '714', text('人呢')))
   await until(() => fake.turns.length > turns, 5000)
@@ -509,7 +515,7 @@ test('普通照片不收进表情库', async () => {
   const photo = fakePng(1080, 720, 2)
   mock.push(priv(OWNER, [{ type: 'image', data: { sub_type: 0, file: 'base64://' + photo.toString('base64') } }]))
   await until(() => fake.turns.at(-1)?.images === 1 && fake.turns.length > 0)
-  await sleep(300)
+  await settle(300)
   assert.equal(mock.sent('add_custom_face').length, 1, '数量没变')
 })
 
@@ -780,10 +786,10 @@ test('明确要语音但她只打了字：插件强制转成语音', { skip: pro
 test('连发合并：一口气发两句，她只回一次', async () => {
   const before = fake.turns.length
   mock.push(priv(OWNER, text('第一句')))
-  await sleep(150)
+  await settle(150)
   mock.push(priv(OWNER, text('第二句')))
   await until(() => fake.turns.length > before)
-  await sleep(800)
+  await settle(800)
   assert.equal(fake.turns.length, before + 1, '两句合成了一轮')
   assert.match(fake.turns.at(-1).userText, /第一句[\s\S]*第二句/)
 })
@@ -1240,20 +1246,20 @@ test('DSH 要授权时只通知 Aurabot · QQ 会话，别的项目不转到 QQ�
     sid = api.hub.sessions()['private:10000001']?.sessionId
   }
   assert.ok(sid, '主人私聊会话已建好')
-  await sleep(300)
+  await settle(300)
   const before = mock.calls.length
   const ask = { type: 'approval/asked', data: { id: 'approval-1', toolName: 'pwsh', reason: '要跑命令' } }
   fake.emit('session/event', { id: sid, title: '测试会话' }, ask)
   fake.emit('session/event', { id: sid, title: '测试会话' }, ask)
   await until(() => mock.calls.slice(before).some((c) => c.action === 'send_private_msg'))
-  await sleep(100)
+  await settle(100)
   const sent = mock.calls.slice(before).filter((c) => c.action === 'send_private_msg' && String(c.params.user_id) === OWNER)
   assert.equal(sent.length, 1)
   assert.match(JSON.stringify(sent[0].params.message), /要授权.*pwsh.*DSH 界面/)
 
   const afterFirst = mock.calls.length
   fake.emit('session/event', { id: 'external-workspace-session', title: '另一个项目' }, { type: 'approval/asked', data: { id: 'approval-external', toolName: 'pwsh', reason: '别的项目' } })
-  await sleep(150)
+  await settle(150)
   assert.equal(mock.calls.slice(afterFirst).filter((c) => c.action === 'send_private_msg').length, 0, '非 Aurabot 工作区不能发 QQ 通知')
 })
 
@@ -1300,7 +1306,7 @@ test('上一轮还在跑时排队的新消息，不会让下一轮的「仅主�
   // 上一轮还在跑（brain sleep 1200ms）时来下一条消息，两条都在 557 群里
   const before = fake.turns.length
   mock.push(grp('557', OWNER, text('排队权限测试1'), '主人'))
-  await sleep(800)
+  await settle(800)
   mock.push(grp('557', OWNER, text('排队权限测试2'), '主人'))
   const second = await until(() => fake.turns.slice(before).find((t) => /allOwner=/.test(String(t.reply))), 20000)
   assert.match(String(second.reply), /allOwner=true/, '排队轮次也要认出主人：' + second.reply)
@@ -1327,11 +1333,11 @@ test('语音里的表情和语音分开发：表情单独补一条文字气泡�
     const m2 = sentTo('private', OWNER).length
     mock.push(priv(OWNER, text('表情语音测试')))
     await until(() => sentTo('private', OWNER).slice(m2).some((c) => (c.params.message || []).some((s) => s.type === 'record')), 20000)
-    await sleep(800)
+    await settle(800)
     assert.equal(sentTo('private', OWNER).slice(m2).filter((c) => (c.params.message || []).some((s) => s.type === 'face')).length, 0, '关掉补发后不该多出表情消息')
     // 等这一轮的发消息彻底安静下来，别让残留的发送算进后面用例的统计
     let last = -1
-    for (let i = 0; i < 24 && last !== mock.calls.length; i++) { last = mock.calls.length; await sleep(250) }
+    for (let i = 0; i < 24 && last !== mock.calls.length; i++) { last = mock.calls.length; await settle(250) }
   } finally {
     srv.close()
     await fake.call('/save', { voice: { engine: 'windows', emojiSeparate: true } })
@@ -1371,22 +1377,21 @@ test('群聊：同一段里群友发的图也能看到（限 5 分钟、最多 2
   const img = (salt) => [{ type: 'image', data: { sub_type: 0, file: 'base64://' + fakePng(200, 200, salt).toString('base64') } }]
   // 三张图先进群：不会触发回复，但应该留在这一段里给她看
   for (let i = 0; i < 3; i++) mock.push(grp('555', String(810 + i), img(21 + i), '发图' + i))
-  await sleep(800)
+  await settle(800)
   let turns = fake.turns.length
   mock.push(grp('555', '820', text('肥鱼 看看刚才的图')))
-  await until(() => fake.turns.length > turns)
-  const t = fake.turns.at(-1)
+  // 认准这一轮：别被上一条用例还在飞的回合抢走 at(-1)
+  const t = await until(() => fake.turns.slice(turns).find((x) => String(x.userText).includes('看看刚才的图')))
   assert.equal(t.images, 2, '同一段里的群图最多带 2 张：' + t.userText)
   assert.match(t.userText, /\[图片\]/, '文字里的图片占位还在，但图这次真给她了')
   // 模型看不了图：换成一句明确的提示，不让她照着占位编
   await fake.call('/save', { model: { vision: 'off' } })
   try {
     mock.push(grp('555', '821', img(31), '发图4'))
-    await sleep(800)
+    await settle(800)
     turns = fake.turns.length
     mock.push(grp('555', '822', text('肥鱼 这张是啥')))
-    await until(() => fake.turns.length > turns)
-    const t2 = fake.turns.at(-1)
+    const t2 = await until(() => fake.turns.slice(turns).find((x) => String(x.userText).includes('这张是啥')))
     assert.equal(t2.images, 0, '看不了图的模型不塞图片块')
     assert.match(t2.userText, /对方一共发了 1 张图/)
     assert.match(t2.userText, /看不了图/)
