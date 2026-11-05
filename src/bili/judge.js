@@ -27,6 +27,40 @@ const clip = (s, n) => {
   return t.length > n ? t.slice(0, n) + '…' : t
 }
 
+/** 只留能比较的字：标点、空白、符号都去掉。 */
+const normText = (s) => String(s || '').toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '')
+
+/** 一串二元组（中文没有空格，按两字一段切最稳）。 */
+const bigramsOf = (s) => {
+  const set = new Set()
+  for (let i = 0; i < s.length - 1; i++) set.add(s.slice(i, i + 2))
+  return set
+}
+
+/**
+ * 这句是不是把 title 又说了一遍：互相包含，或者大半的字都重合。
+ * 模型经常把同一句话换个语序写进 points，推过去就成了「一件事说两遍」。
+ */
+function repeatsTitle(point, title) {
+  const p = normText(point)
+  const t = normText(title)
+  if (!p || !t) return false
+  if (p === t || t.includes(p) || p.includes(t)) return true
+  const gp = bigramsOf(p)
+  const gt = bigramsOf(t)
+  if (!gp.size || !gt.size) return false
+  let hit = 0
+  for (const g of gp) if (gt.has(g)) hit++
+  return hit / gp.size >= 0.6
+}
+
+/** 摘掉复述 title 的要点：title 已经说过的别再占一行。 */
+function freshPoints(points, title) {
+  const list = (points || []).filter(Boolean)
+  if (!title) return list
+  return list.filter((p) => !repeatsTitle(p, title))
+}
+
 /**
  * 现在几点，给模型算「今天 / 明天」用。
  * 公告写的都是绝对日期，不告诉它今天几号，它就只能照抄「2026/11/5 10:00」。
@@ -56,6 +90,10 @@ export function buildJudgeRequest({ globalPrompt = '', sub = {}, items = [], own
     '写摘要：',
     '- 像在微信上随口跟主人说一声：先说最要紧的那句，别用「更新时间：」「补偿内容：」这种小标题',
     `- title 一句话说清是什么（不超过 ${TITLE_MAX} 字）；points 最多 ${POINTS_MAX} 条，每条一句话、不超过 ${POINT_MAX} 字`,
+    '- points 只补 title 里没有的细节（几点开始、怎么领、什么时候截止）；title 说过的别再换个说法抄一遍，没有新细节就给空数组',
+    '- 公告就一两句话、title 已经说全了，points 直接给空数组 []——同一件事说两遍，主人会以为你发了两条通知',
+    '- 反例（别这么写）：title「维护已结束，900水晶叶已发到邮箱」+ points「今天上午10点开始的停服维护已经结束，可以上线了」。这句只是把 title 换了个说法，points 应该是空的',
+    '- 正例：title「维护已结束，900水晶叶已发到邮箱」+ points「补偿只发到今天 24 点，过期不补」——这才是 title 里没有的新细节',
     '- 时间一律换成相对说法：今天 / 明天 / 后天 / 周X，括号里可以带日期。比如公告写「2026/11/5 10:00」而现在是 11/4 晚上，就写「明天（11月5日）上午10点」',
     '- 公告只给了「预计 X 小时」时，把结束时间也算出来：明天10点开始、预计9小时 → 大约到明天19点',
     '- 已经开始或正在进行的，写「现在」「已经开始了」，别再说「即将」',
@@ -163,16 +201,21 @@ function summaryOf(item, verdict = {}) {
   return { title: '', points: [] }
 }
 
-/** 一条动态 + 判定 → 推给主人的那段话（结论 + 要点 + 图，链接默认不带）。 */
-export function formatSummary(item, sub, verdict = {}, { images: withImages = true, link: withLink = false } = {}) {
+/**
+ * 一条动态 + 判定 → 推给主人的那段话（结论 + 要点 + 图，链接默认不带）。
+ * count：真正发出去的图有几张（取图可能失败）。给了就按这个数标图号，
+ * 免得文字里说「图1 图2」、下面只有一张。只有一张图时不标号——紧接着就是那张图，标了反而像多余的尾巴。
+ */
+export function formatSummary(item, sub, verdict = {}, { images: withImages = true, link: withLink = false, count = null } = {}) {
   const who = (sub && sub.name) || item.author || 'UP主'
   const lines = [`【B站动态】${who}`]
   const s = summaryOf(item, verdict)
   if (s.title) lines.push(s.title)
-  for (const p of s.points) lines.push('· ' + p)
+  for (const p of freshPoints(s.points, s.title)) lines.push('· ' + p)
   // 编号按「真正会发出去的那几张」数，不然说「图2」却没有第二张
   const imgs = withImages ? pickImages(item, verdict) : []
-  if (imgs.length) lines.push(imgs.map((_, i) => `图${i + 1}`).join(' '))
+  const shown = Number.isFinite(count) ? Math.max(0, Math.min(imgs.length, count)) : imgs.length
+  if (shown > 1) lines.push(imgs.slice(0, shown).map((_, i) => `图${i + 1}`).join(' '))
   if (withLink && item.url) lines.push(item.url)
   return lines.filter(Boolean).join('\n')
 }
@@ -216,7 +259,8 @@ export function formatDigest(sub, entries, { images: withImages = true, link = f
     // 没标题但有要点时，把第一条要点提到标题位，别写成「1. （没有摘要）」再跟一遍
     const head = s.title || s.points[0] || '（没有摘要）'
     lines.push(`${i + 1}. ${head}`)
-    for (const p of s.title ? s.points : s.points.slice(1)) lines.push(`   · ${p}`)
+    // 标题说过的要点别再抄一遍（同一条消息里说两遍，看着像两条通知）
+    for (const p of s.title ? freshPoints(s.points, s.title) : s.points.slice(1)) lines.push(`   · ${p}`)
     const urls = chosen.get(e.item.id) || []
     if (urls.length) {
       const nums = urls.map((url) => { ordered.push(url); return ordered.length })

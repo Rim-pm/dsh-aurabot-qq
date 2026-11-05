@@ -123,7 +123,17 @@ test('摘要：结论 + 要点 + 图号；链接默认不带，开了才带', ()
   assert.match(text, /【B站动态】明日方舟/)
   assert.match(text, /「波朗」意念体即将登场/)
   assert.match(text, /· ★5 可召唤/)
-  assert.match(text, /图1/, '只发一张就只标图1，不能出现图3')
+  assert.doesNotMatch(text, /图[1-9]/, '只发一张就不标图号：紧接着就是那张图，标号反而像多余的尾巴')
+  assert.doesNotMatch(text, /图3/, '模型只点了第 3 张，不能出现图3')
+
+  // 两张以上才编号，号按「真正会发出去的那几张」数
+  const two = judge.formatSummary(it, { name: 'A' }, { title: 'T', points: [], images: [1, 3], by: 'ai' })
+  assert.match(two, /图1 图2/, '两张以上才标号')
+  // 取图失败时按真正发出去的张数标：count 传进来就不该说「图2」
+  const oneLeft = judge.formatSummary(it, { name: 'A' }, { title: 'T', points: [], images: [1, 3], by: 'ai' }, { count: 1 })
+  assert.doesNotMatch(oneLeft, /图[1-9]/, '只取回一张就不标号')
+  const noneLeft = judge.formatSummary(it, { name: 'A' }, { title: 'T', points: [], images: [1, 3], by: 'ai' }, { count: 0 })
+  assert.doesNotMatch(noneLeft, /图[1-9]/, '一张都没取回来就不能提图')
   assert.doesNotMatch(text, /opus\/1/, '默认不带链接')
 
   const linked = judge.formatSummary(it, { name: 'A' }, { title: 'T', by: 'ai' }, { link: true })
@@ -134,6 +144,28 @@ test('摘要：结论 + 要点 + 图号；链接默认不带，开了才带', ()
 
   const noImg = judge.formatSummary(it, { name: 'A' }, { title: 'T', by: 'ai' }, { images: false })
   assert.doesNotMatch(noImg, /图1/, '不发图时不能在文字里说图')
+})
+
+test('摘要：要点复述 title 的会被摘掉，同一件事不说两遍', () => {
+  const it = item('1', '维护结束通知\n11/5 10:00开始的停服维护已结束\n维护补偿【水晶叶*900】将发到您的邮箱中')
+  const text = judge.formatSummary(it, { name: '嘟嘟脸恶作剧' }, {
+    title: '维护已结束，900水晶叶已发到邮箱',
+    points: [
+      '维护已结束，900水晶叶已发到邮箱', // 原样重复
+      '维护已结束，900水晶叶已发到邮箱了', // 换个结尾的重复
+      '补偿明天 12 点前发到邮箱，记得去领', // 真新细节，要留
+    ],
+    by: 'ai',
+  })
+  assert.equal((text.match(/维护已结束/g) || []).length, 1, '标题说过的不许换个说法再说一遍')
+  assert.match(text, /补偿明天 12 点前发到邮箱/, 'title 里没有的细节要留下')
+})
+
+test('提示词：告诉模型 points 别复述 title', () => {
+  const req = judge.buildJudgeRequest({ items: [item('1', '维护已结束')] })
+  assert.match(req.system, /points 只补 title 里没有的细节/)
+  assert.match(req.system, /别再换个说法抄一遍/)
+  assert.match(req.system, /points 直接给空数组/, '一句话的公告，标题说全了就别再抄一遍')
 })
 
 test('提示词：告诉模型「现在几点」，并要求把绝对时间换成相对说法', () => {
@@ -423,9 +455,28 @@ test('订阅 + AI 过滤：摘要和图放在同一条消息里，只发模型�
   assert.equal(r.pushed, 1)
   assert.equal(sent.length, 1, '文字和图要一条发完，不能刷屏')
   assert.equal(sent[0].segs[0].type, 'text')
-  assert.match(sent[0].segs[0].data.text, /图1/)
+  assert.match(sent[0].segs[0].data.text, /新活动/)
+  assert.doesNotMatch(sent[0].segs[0].data.text, /图[1-9]/, '只发一张图就不标号')
   assert.equal(sent[0].segs[1].type, 'image')
   assert.equal(sent[0].segs.length, 2, '模型只点了第 2 张，就只发一张')
+})
+
+test('订阅 + AI 过滤：图一张都没取回来，文字里不能留着「图1 图2」', async () => {
+  reset()
+  let items = [item('100')]
+  const { engine, sent } = makeEngine({
+    cfg: { bili: { enabled: true, aiFilter: true, subForwardImages: true, subs: [{ mid: '161775300', name: 'A' }], subGapSec: 0 } },
+    feed: async () => items,
+    ask: async () => '[{"i":1,"keep":true,"level":3,"title":"新活动","points":["送十连"],"images":[1,2],"why":"你在玩"}]',
+    fetchImpl: async () => { throw new Error('图挂了') },
+    segments: true,
+  })
+  await engine.poll({ force: true })
+  items = [item('101', '活动开了', { images: ['a.jpg', 'b.jpg'] }), item('100')]
+  const r = await engine.poll({ force: true })
+  assert.equal(r.pushed, 1, '图挂了文字也要推出去')
+  assert.match(sent[0].text, /新活动/)
+  assert.doesNotMatch(sent[0].text, /图[1-9]/, '图没取回来就别让主人对着空气找图')
 })
 
 test('订阅 + AI 过滤：判定失败原样转，并告诉主人是没判成', async () => {

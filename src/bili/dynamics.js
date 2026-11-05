@@ -166,6 +166,8 @@ export function createSubs({ getConfig, setConfig, hub, memory, log, api: inject
     if (ai && withImages && typeof hub.sendSegments === 'function') {
       const urls = pickImages(item, verdict).slice(0, 9)
       const bufs = urls.length ? (await Promise.all(urls.map((url) => grabImage(url, fetchImpl)))).filter(Boolean) : []
+      // 图号按「真正取回来的那几张」重算：图挂了就别在文字里提它，主人不用对着空气找图
+      if (urls.length) text = formatSummary(item, sub, verdict, { images: true, link: g.bili.aiFilterLink, count: bufs.length })
       if (bufs.length) {
         const segs = [
           { type: 'text', data: { text } },
