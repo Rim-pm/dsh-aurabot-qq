@@ -283,10 +283,11 @@ const withTimeout = (p, ms) => new Promise((resolve, reject) => {
  * @param {object} o
  * @param {Function} o.getConfig
  * @param {Function} [o.ask]      api.ask（一次性问模型，不进会话）；没有就整段跳过
+ * @param {Function} [o.canSee]   选定的模型能不能看图（返回 true / false / null 不知道）；不给就不检查
  * @param {object} o.log
  * @param {Function} [o.fetchImpl] 测试用
  */
-export function createJudge({ getConfig, ask, log, fetchImpl = fetch } = {}) {
+export function createJudge({ getConfig, ask, canSee, log, fetchImpl = fetch } = {}) {
   const cfg = () => getConfig().bili || {}
 
   /** 这个号走不走 AI：全局开关关着 = 一律原样；号上写了 raw = 原样；其余（auto / ai）跟着开关走。 */
@@ -301,11 +302,27 @@ export function createJudge({ getConfig, ask, log, fetchImpl = fetch } = {}) {
     return Math.max(1, Math.min(3, own || Number(cfg().aiFilterMinLevel) || 2))
   }
 
-  function modelOpts() {
+  /** 判定用的模型：面板上单独选了就覆盖，没选就跟随聊天模型（askModel 的 o.model）。 */
+  function targetModel() {
     const m = cfg().aiFilterModel || {}
     const provider = String(m.provider || '').trim()
     const model = String(m.model || '').trim()
-    return provider && model ? { cfg: { model: { provider, model } } } : {}
+    return provider && model ? { provider, model } : null
+  }
+
+  function modelOpts() {
+    const t = targetModel()
+    return t ? { model: t } : {}
+  }
+
+  /** 选定的模型能看图吗：true / false / null（不知道，按现状照发）。 */
+  async function visionOk() {
+    if (typeof canSee !== 'function') return null
+    try {
+      return await canSee(targetModel())
+    } catch (error) {
+      return null
+    }
   }
 
   /** B 站图床要 Referer；取不到就当没有，不影响判定。 */
@@ -330,6 +347,8 @@ export function createJudge({ getConfig, ask, log, fetchImpl = fetch } = {}) {
   async function judgeBlind(sub, item) {
     const c = cfg()
     if (!c.aiFilterVision || !(item.images || []).length) return blank(item, 'skip', '没有正文，照转')
+    // 明确看不了图就别把图硬塞过去：整轮会被拒，白花一次请求；模型要是静默忽略图，还会编出一个判定
+    if (await visionOk() === false) return blank(item, 'skip', '这个模型看不了图，照转')
     const images = []
     for (const url of item.images.slice(0, 2)) {
       const g = await grab(url)

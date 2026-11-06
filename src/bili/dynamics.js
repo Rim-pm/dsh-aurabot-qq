@@ -126,14 +126,15 @@ async function grabImage(url, fetchImpl = fetch) {
  * @param {object} o.log
  * @param {object} [o.api]        注入假的 B 站（测试用）
  * @param {Function} [o.ask]      api.ask：AI 过滤用（一次性问模型，不进会话）；不给就整段跳过
+ * @param {Function} [o.canSee]   判定模型能不能看图（看纯图动态前先问一句）
  * @param {Function} [o.sleep]
  */
-export function createSubs({ getConfig, setConfig, hub, memory, log, api: injected, ask, sleep, fetchImpl = fetch }) {
+export function createSubs({ getConfig, setConfig, hub, memory, log, api: injected, ask, canSee, sleep, fetchImpl = fetch }) {
   const api = injected || createBiliApi({ getCookie: () => getConfig().bili.cookie, log })
   const wait = sleep || ((ms) => new Promise((r) => setTimeout(r, ms)))
   const load = () => readJson(FILE(), () => ({ cursors: {}, lastPoll: 0, judged: [] }))
   const save = (s) => writeJson(FILE(), s)
-  const judge = createJudge({ getConfig, ask, log, fetchImpl })
+  const judge = createJudge({ getConfig, ask, canSee, log, fetchImpl })
   let busy = false
 
   const cfg = () => getConfig().bili

@@ -3501,11 +3501,31 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const [exWhy, setExWhy] = useState({}) // mid → 正在填的例子原因
       const [exKeep, setExKeep] = useState({}) // mid → 这条例子是「推」还是「不推」
       const [busy, setBusy] = useState('')
+      // 判定用哪个模型：列 DSH 里已经接好的模型，能看图的标出来（开了「纯图动态也看图」才用得上）
+      // AI 过滤关着就不查，省一次请求
+      const [models, setModels] = useState(null)
+      const [modelsErr, setModelsErr] = useState('')
+      const aiOn = !!(draft.bili && draft.bili.aiFilter)
+      useEffect(() => {
+        if (!aiOn || models !== null) return
+        get('/models')
+          .then((r) => { setModels(r.list || []); setModelsErr('') })
+          .catch((e) => { setModels([]); setModelsErr(e.message || '查不到模型列表') })
+      }, [aiOn])
       const load = () => get('/bili/subs')
         .then((r) => { setItems(r.items || []); setJudged(r.judged || []) })
         .catch((e) => { setItems([]); setJudged([]); toast(e.message, 'err') })
       useEffect(() => { load() }, [])
-      const aiOn = !!(draft.bili && draft.bili.aiFilter)
+      const fm = (draft.bili && draft.bili.aiFilterModel) || {}
+      const fmKey = fm.provider && fm.model ? fm.provider + '::' + fm.model : ''
+      const fmHit = fmKey && models ? models.find((m) => m.provider + '::' + m.model === fmKey) : null
+      // 存过的模型已经不在列表里（删了 provider / 改名）：判定仍按配置走，得让主人知道不是「跟随聊天模型」
+      const fmGone = !!(fmKey && models && !modelsErr && !fmHit)
+      // 必须两个字段一起写：只有一个非空时判定那边会当没设，静默退回聊天模型
+      const pickFilterModel = (v) => {
+        const [p, ...rest] = String(v || '').split('::')
+        setDraft(setPath(setPath(draft, 'bili.aiFilterModel.provider', v ? p : ''), 'bili.aiFilterModel.model', v ? rest.join('::') : ''))
+      }
       const editOf = (it) => ({ prompt: it.prompt || '', mode: it.mode || 'auto', examples: it.examples || [], ...(edits[it.mid] || {}) })
       const setEdit = (mid, patch) => setEdits((e) => ({ ...e, [mid]: { ...(e[mid] || {}), ...patch } }))
       const dirty = (it) => {
@@ -3613,6 +3633,22 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         h('div', { style: { marginTop: 14, borderTop: '1px solid var(--ab-line-2)', paddingTop: 12 } },
           h(Row, { label: '先让 AI 看一眼再推', hint: '开着时新动态先问一次模型：要不要推、压成一句话 + 要点。只有新动态才花 token，一轮一批一次调用；关着就是原样转，不花钱' }, f.sw('bili.aiFilter')),
           ...[
+            aiOn ? h(Row, { key: 'mdl', label: '判定用的模型', hint: '判定和写摘要都走这个模型；留空就用「模型」页那个聊天模型。挑个便宜的能省 token，开了「纯图动态也看图」的话得选能看图的。' },
+              h(Select, {
+                value: fmKey, width: 320,
+                options: [{ value: '', label: '跟随聊天模型', desc: '和「模型」页选的一样' }].concat((models || []).map((m) => ({
+                  value: m.provider + '::' + m.model,
+                  label: m.name + (m.vision === true ? '（能看图）' : m.vision === false ? '（不看图）' : ''),
+                  desc: m.provider,
+                  group: m.provider,
+                }))),
+                onChange: pickFilterModel,
+              }),
+              models === null ? h('span', { className: 'ab-muted ab-small' }, ' 正在查模型…') : null,
+              modelsErr ? h('span', { className: 'ab-small', style: { color: 'var(--ab-warn)' } }, ' 查不到模型列表：' + modelsErr) : null,
+              fmGone ? h('span', { className: 'ab-small', style: { color: 'var(--ab-warn)' } }, ` 存的 ${fm.provider}::${fm.model} 已经不在列表里了，判定仍按它走；要换就在上面挑一个`) : null,
+              fmHit && fmHit.vision === false && draft.bili.aiFilterVision
+                ? h('span', { className: 'ab-small', style: { color: 'var(--ab-warn)' } }, ' 这个模型看不了图，纯图动态会跳过看图照转') : null) : null,
             aiOn ? h(Row, { key: 'lvl', label: '判到多重要才推', hint: '号上还能单独设；调高就只收重要的，调低就都收' }, f.range('bili.aiFilterMinLevel', 1, 3, 1, (v) => ['', '都推', '值得说一声', '很重要'][v])) : null,
             aiOn ? h(Row, { key: 'vis', label: '没有正文的纯图动态也看图', hint: '会多花 token（一张图按 token 算）；不开就照转' }, f.sw('bili.aiFilterVision')) : null,
             aiOn ? h(Row, { key: 'link', label: '摘要末尾带原动态链接', hint: '默认不带，看着清爽；想回溯点进去就打开' }, f.sw('bili.aiFilterLink')) : null,

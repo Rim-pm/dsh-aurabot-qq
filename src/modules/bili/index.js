@@ -5,6 +5,7 @@
 import { readFileSync, existsSync } from 'node:fs'
 import { createBili } from '../../bili/duty.js'
 import { createSubs } from '../../bili/dynamics.js'
+import { canSeeImages } from '../../core/llm.js'
 import { defineTool, str } from '../../tools/tools.js'
 import { writeJson } from '../../core/store.js'
 
@@ -34,7 +35,11 @@ export default {
     const bili = createBili({ getConfig: api.config, hub, memory: api.lazy('memory'), log: api.log, dsh: api.dsh, local: api.core.local })
     api.every(60_000, () => bili.tick(), '刷B站')
     // 订阅 UP 主动态：单独的引擎，不跟「刷视频」抢配额（它自己会按 subIntervalMin 节流）
-    const subs = createSubs({ getConfig: api.config, setConfig: api.setConfig, hub, memory: api.lazy('memory'), log: api.log, ask: api.ask })
+    const subs = createSubs({
+      getConfig: api.config, setConfig: api.setConfig, hub, memory: api.lazy('memory'), log: api.log, ask: api.ask,
+      // 判定用哪个模型由面板单独选；问图之前先确认它真的能看图（模型自己说了算，主人的手动声明不管这个）
+      canSee: (target) => canSeeImages(api.dsh, api.config(), target),
+    })
     api.every(60_000, () => subs.tick(), '订阅B站动态')
 
     // 看视频谁发的链接都能看；「只要订阅」模式下这几样连同截图都不给她

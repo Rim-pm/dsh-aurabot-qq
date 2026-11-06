@@ -1,7 +1,7 @@
 // B站订阅在面板上的接线：接口注册了没、工具是不是只有主人能用、配置项在不在。不访问真实 B 站。
 import { test, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import biliModule from '../src/modules/bili/index.js'
@@ -228,6 +228,29 @@ test('只要订阅：刷视频那条线整个不跑', async () => {
   })
   await bili.tick()
   assert.deepEqual(calls, [], 'subsOnly 下不该向 B 站发任何请求')
+})
+
+test('面板：判定用的模型能在 UI 上选，不用去手改 config.json', () => {
+  const client = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  const start = client.indexOf('function BiliSubs(')
+  const end = client.indexOf('function LocalApi(')
+  assert.ok(start >= 0 && end > start, '找不到 BiliSubs 组件')
+  const subs = client.slice(start, end)
+  assert.ok(subs.includes('判定用的模型'), '订阅页缺「判定用的模型」这一行')
+  assert.ok(subs.includes('bili.aiFilterModel'), '这一行没接到 bili.aiFilterModel')
+  assert.ok(subs.includes("get('/models')"), '模型列表要从 /models 读，不然选不出东西')
+  // 判定那边两个字段都非空才生效（只填一半会静默退回聊天模型），所以面板必须一起写、一起清
+  assert.match(subs, /setPath\(setPath\(draft, 'bili\.aiFilterModel\.provider'/, '选模型时要一起写 provider')
+  assert.ok(subs.includes("'bili.aiFilterModel.model'"), '选模型时要一起写 model')
+  // 存的模型被删了 / 列表拉不到，都不能装作「跟随聊天模型」
+  assert.ok(subs.includes('fmGone'), '存过的模型不在列表里要提示')
+  assert.ok(subs.includes('modelsErr'), '拉不到模型列表要提示，不能只显示「跟随聊天模型」')
+})
+
+test('面板：判定模型能不能看图由宿主模型元数据说了算，接进判定引擎', () => {
+  const src = readFileSync(new URL('../src/modules/bili/index.js', import.meta.url), 'utf8')
+  assert.ok(src.includes('canSeeImages'), '模块要把 canSeeImages 接进去')
+  assert.match(src, /canSee:[\s\S]*canSeeImages/, 'createSubs 要拿到 canSee')
 })
 
 test('只要订阅：手动「刷一轮」的接口也拒绝（面板藏了按钮，接口还在）', async () => {

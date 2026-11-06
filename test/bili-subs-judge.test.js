@@ -32,7 +32,7 @@ const item = (id, text = '正文', extra = {}) => ({
 
 const silent = { info() {}, warn() {}, debug() {} }
 
-function makeEngine({ cfg = {}, feed, ask, extraApi = {}, fetchImpl, segments = false } = {}) {
+function makeEngine({ cfg = {}, feed, ask, canSee, extraApi = {}, fetchImpl, segments = false } = {}) {
   const state = { cfg: normalize({ enabled: true, dryRun: false, ownerQQ: '10000001', ...cfg }) }
   const sent = []
   const events = []
@@ -55,6 +55,7 @@ function makeEngine({ cfg = {}, feed, ask, extraApi = {}, fetchImpl, segments = 
       ...extraApi,
     },
     ask: ask ? (opts) => { calls.push(opts); return ask(opts) } : undefined,
+    canSee,
     fetchImpl,
     sleep: async () => {},
   })
@@ -348,6 +349,26 @@ test('判定：一批一次调用，判出来的对齐回每一条', async () =>
   assert.equal(v[1].why, '生日祝福')
 })
 
+test('判定：面板上选了「判定用的模型」就真的用它，没选就跟聊天模型', async () => {
+  const verdict = '[{"i":1,"keep":true,"level":3,"title":"新卡池","points":["限定"]}]'
+  const pick = async (bili) => {
+    const cfg = normalize({ bili: { enabled: true, aiFilter: true, ...bili } })
+    const calls = []
+    const j = judge.createJudge({ getConfig: () => cfg, log: silent, ask: async (o) => { calls.push(o); return verdict } })
+    await j.judge({ mid: '1', name: 'A' }, [item('1', '卡池')])
+    return calls[0]
+  }
+  const hit = await pick({ aiFilterModel: { provider: 'magpie', model: 'trae-cn/deepseek-v4.1-flash' } })
+  assert.deepEqual(hit.model, { provider: 'magpie', model: 'trae-cn/deepseek-v4.1-flash' }, '选了就带过去')
+  // 用 o.model 而不是 o.cfg：o.cfg 会把宿主那份完整配置整个换掉（视觉 / 思考强度那些都没了）
+  assert.equal(hit.cfg, undefined, '不能拿 cfg 覆盖')
+  // 只填一半等于没填：判定那边会静默退回聊天模型，面板也是两个一起写，这里锁住这个约定
+  const half = await pick({ aiFilterModel: { provider: 'magpie', model: '' } })
+  assert.equal(half.model, undefined, '只填一半不能当覆盖')
+  const none = await pick({})
+  assert.equal(none.model, undefined, '没选就不带，走聊天模型')
+})
+
 test('判定：模型漏了某条 → 那条按「没判成」照转，不能吞', async () => {
   const cfg = normalize({ bili: { enabled: true, aiFilter: true } })
   const j = judge.createJudge({ getConfig: () => cfg, ask: async () => '[{"i":1,"keep":false,"level":1}]', log: silent })
@@ -399,6 +420,55 @@ test('判定：开了视觉且只有一条纯图动态，才把图交给模型',
   assert.equal(calls[0].images[0].mediaType, 'image/jpeg')
   assert.equal(v[0].by, 'ai')
   assert.equal(v[0].title, '新角色立绘')
+})
+
+test('判定：选的模型看不了图，纯图动态就不硬塞图，也不白问一次', async () => {
+  const cfg = normalize({ bili: { enabled: true, aiFilter: true, aiFilterVision: true, aiFilterModel: { provider: 'p', model: 'text-only' } } })
+  let asked = 0
+  let grabbed = 0
+  const j = judge.createJudge({
+    getConfig: () => cfg,
+    log: silent,
+    canSee: async (t) => (t && t.model === 'text-only' ? false : true),
+    fetchImpl: async () => { grabbed++; return { ok: true, arrayBuffer: async () => new Uint8Array([0xff, 0xd8, 0xff, 0x00]).buffer } },
+    ask: async () => { asked++; return '[{"i":1,"keep":true,"level":2,"title":"编的"}]' },
+  })
+  const v = await j.judge({ mid: '1', name: 'A' }, [item('1', '', { images: ['a.jpg'] })])
+  assert.equal(asked, 0, '看不了图就别问，免得模型编一个判定')
+  assert.equal(grabbed, 0, '图都不用下载')
+  assert.equal(v[0].by, 'skip')
+  assert.equal(v[0].keep, true, '照转')
+})
+
+test('判定：能看图 / 能力未知（null）都照旧把图交给模型', async () => {
+  const fakeFetch = async () => ({ ok: true, arrayBuffer: async () => new Uint8Array([0xff, 0xd8, 0xff, 0x00]).buffer })
+  for (const sees of [true, null]) {
+    const cfg = normalize({ bili: { enabled: true, aiFilter: true, aiFilterVision: true } })
+    const calls = []
+    const j = judge.createJudge({
+      getConfig: () => cfg,
+      log: silent,
+      canSee: async () => sees,
+      fetchImpl: fakeFetch,
+      ask: async (o) => { calls.push(o); return '[{"i":1,"keep":true,"level":2,"title":"T"}]' },
+    })
+    const v = await j.judge({ mid: '1', name: 'A' }, [item('1', '', { images: ['a.jpg'] })])
+    assert.equal(calls.length, 1, `canSee=${sees} 时仍要问模型`)
+    assert.equal(v[0].by, 'ai')
+  }
+})
+
+test('判定：canSee 抛错也不影响判定（按不知道处理）', async () => {
+  const cfg = normalize({ bili: { enabled: true, aiFilter: true, aiFilterVision: true } })
+  const j = judge.createJudge({
+    getConfig: () => cfg,
+    log: silent,
+    canSee: async () => { throw new Error('宿主没这个服务') },
+    fetchImpl: async () => ({ ok: true, arrayBuffer: async () => new Uint8Array([0xff, 0xd8, 0xff, 0x00]).buffer }),
+    ask: async () => '[{"i":1,"keep":true,"level":2,"title":"T"}]',
+  })
+  const v = await j.judge({ mid: '1', name: 'A' }, [item('1', '', { images: ['a.jpg'] })])
+  assert.equal(v[0].by, 'ai')
 })
 
 test('订阅 + AI 过滤：判成不重要就不推，游标照样推进', async () => {
