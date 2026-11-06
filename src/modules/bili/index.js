@@ -27,7 +27,7 @@ export default {
   version: '1.6.0',
   description: '看别人发的 B 站视频（标题、简介、字幕、热评、弹幕）；定时刷推荐流，只点赞和收藏、私聊分享给主人；订阅 UP 主动态并私聊推送（可让 AI 先判断要不要、并总结成要点；可给每个号存判定例子；一轮多条可合成一条 digest）；抽帧看画面、发截图（bili_watch / bili_subscribe / bili_unsubscribe / bili_subs / qq_send_shot / qq_list_shots）',
   tab: 'bili',
-  files: ['bili/duty.js', 'bili/api.js', 'bili/vision.js', 'bili/shots.js', 'bili/dynamics.js', 'bili/judge.js', 'bili/examples.js', 'bili/login-pause.js'],
+  files: ['bili/duty.js', 'bili/api.js', 'bili/vision.js', 'bili/shots.js', 'bili/dynamics.js', 'bili/judge.js', 'bili/examples.js', 'bili/login-pause.js', 'bili/seen.js', 'bili/report.js'],
   setup(api) {
     const { hub } = api.core
     announcePosture(api)

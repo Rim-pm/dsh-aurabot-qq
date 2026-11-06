@@ -1,7 +1,7 @@
 // B站订阅在面板上的接线：接口注册了没、工具是不是只有主人能用、配置项在不在。不访问真实 B 站。
 import { test, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import biliModule from '../src/modules/bili/index.js'
@@ -205,6 +205,11 @@ test('只要订阅：只剩三个订阅工具，看视频 / 截图 / 改资料�
   const names = builders[0]({ chat, sessionId: 's1' }).map((t) => t.name).sort()
   assert.deepEqual(names, ['bili_subs', 'bili_subscribe', 'bili_unsubscribe'])
   assert.equal(builders.length, 1, '改头像 / 签名的那个工具块整个删掉了')
+})
+
+test('内置模块：files 登记了 seen / report，而且每个路径都真实存在', () => {
+  for (const f of ['bili/seen.js', 'bili/report.js']) assert.ok(biliModule.files.includes(f), `files 缺 ${f}`)
+  for (const f of biliModule.files) assert.ok(existsSync(join(process.cwd(), 'src', f)), `files 里的 ${f} 在 src/ 下不存在`)
 })
 
 test('只要订阅：刷视频那条线整个不跑', async () => {
