@@ -6,6 +6,7 @@
 // 直接返回 { ok: false, blocked: 'observer' }，一个网络请求都不发——策略不依赖面板有没有点错。
 
 import { createHash } from 'node:crypto'
+import { inflateRawSync, inflateSync } from 'node:zlib'
 import { cleanOutboundText } from '../chat/reply.js'
 
 export const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36'
@@ -111,6 +112,58 @@ export function sniffImageType(buf) {
 /** 写操作分类：observer 下只有 like / fav 放行，其余一律在发请求前拒绝。 */
 export const WRITE_KINDS = ['comment', 'danmaku', 'profile', 'like', 'fav']
 
+/** 解压弹幕 XML：B 站不同 CDN 会给 deflate raw / zlib / 明文三种，三种都试。 */
+export function inflateDanmaku(buf) {
+  const b = Buffer.isBuffer(buf) ? buf : Buffer.from(buf || [])
+  for (const fn of [inflateRawSync, inflateSync]) {
+    try { return fn(b).toString('utf8') } catch (error) {}
+  }
+  return b.toString('utf8')
+}
+
+const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' }
+
+/** 弹幕文本里的 HTML 实体：命名实体和 &#123; / &#x1F600; 都还原。 */
+export function decodeEntities(s) {
+  return String(s || '').replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z]+);/g, (m, code) => {
+    if (code[0] === '#') {
+      const n = code[1] === 'x' || code[1] === 'X' ? parseInt(code.slice(2), 16) : parseInt(code.slice(1), 10)
+      return Number.isFinite(n) && n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : m
+    }
+    return Object.hasOwn(ENTITIES, code) ? ENTITIES[code] : m
+  })
+}
+
+/** 弹幕 XML → 原始文本数组。返回 HTML 错误页时没有 <d>，自然是空数组。 */
+export function parseDanmakuXml(buf) {
+  const xml = inflateDanmaku(buf)
+  return [...xml.matchAll(/<d p="[^"]*">([^<]*)<\/d>/g)].map((m) => decodeEntities(m[1]).trim())
+}
+
+/**
+ * 从一堆弹幕里挑几条给人看：去掉太短 / 太长 / 纯数字 / 纯符号 / 重复的，
+ * 再按时间顺序均匀采样（不是取最新 30 条，避免全是「打卡」）。
+ */
+export function pickDanmaku(list, limit = 30) {
+  const out = []
+  const seen = new Set()
+  for (const raw of list || []) {
+    const t = String(raw ?? '').replace(/\s+/g, ' ').trim()
+    if (!t) continue
+    const len = [...t].length
+    if (len < 2 || len > 30) continue
+    if (!/[\p{L}\p{N}]/u.test(t)) continue // 纯符号
+    if (/^[\d\s.。,，:：;；%+\-—=~～!！?？]+$/.test(t)) continue // 纯数字 / 纯符号
+    if (seen.has(t)) continue
+    seen.add(t)
+    out.push(t)
+  }
+  const n = Math.max(1, Math.round(Number(limit) || 30))
+  if (out.length <= n) return out
+  const step = out.length / n
+  return Array.from({ length: n }, (_, i) => out[Math.floor(i * step)])
+}
+
 export function createBiliApi({ getCookie, log, fetchImpl = fetch, allowWrite = () => true }) {
   let wbi = null // { img, sub, at }
   let buvid = ''
@@ -189,6 +242,23 @@ export function createBiliApi({ getCookie, log, fetchImpl = fetch, allowWrite = 
     return (d.list || []).map((v) => ({ bvid: v.bvid, aid: v.aid, title: v.title, author: v.owner?.name, play: v.stat?.view || 0, pubdate: (v.pubdate || 0) * 1000, desc: String(v.desc || '').slice(0, 200) }))
   }
 
+  /** 首页推荐流（按账号画像）。没登录也能返回，但内容偏泛；只认 goto=av 的普通视频。 */
+  async function recommend({ ps = 30 } = {}) {
+    await ensureBuvid()
+    const d = await req(await signed('https://api.bilibili.com/x/web-interface/wbi/index/top/feed/rcmd', {
+      web_location: 1430654, y_num: 5, fresh_type: 4, feed_version: 'V8',
+      fresh_idx: 1, fresh_idx_1h: 1, brush: 0, homepage_ver: 1, ps,
+    }))
+    return (d.item || [])
+      .filter((v) => v.goto === 'av' && v.bvid)
+      .map((v) => ({
+        bvid: v.bvid, aid: v.id,
+        title: stripHtml(v.title), author: v.owner?.name,
+        play: v.stat?.view || 0, pubdate: (v.pubdate || 0) * 1000,
+        duration: v.duration, desc: stripHtml(v.desc || '').slice(0, 200),
+      }))
+  }
+
   /** 视频信息。 */
   async function view({ bvid, aid }) {
     await ensureBuvid()
@@ -240,6 +310,26 @@ export function createBiliApi({ getCookie, log, fetchImpl = fetch, allowWrite = 
   async function comments(aid, { limit = 12 } = {}) {
     const d = await req(await signed('https://api.bilibili.com/x/v2/reply/wbi/main', { type: 1, oid: aid, mode: 3, plat: 1, web_location: 1315875 }))
     return (d.replies || []).slice(0, limit).map((r) => ({ rpid: r.rpid, name: r.member?.uname, mid: r.mid, text: String(r.content?.message || '').slice(0, 200), like: r.like, replies: r.rcount || 0 }))
+  }
+
+  /**
+   * 读一个 cid 的弹幕（前 limit 条，按时间均匀采样）。只读接口，失败返回 []，不抛：
+   * 弹幕挂了不该让整轮刷视频失败。
+   */
+  async function danmakuText(cid, { limit = 30 } = {}) {
+    if (!cid) return []
+    try {
+      const r = await fetchImpl(`https://api.bilibili.com/x/v1/dm/list.so?oid=${encodeURIComponent(cid)}`, {
+        headers: { 'user-agent': UA, referer: 'https://www.bilibili.com/' },
+        signal: AbortSignal.timeout(15000),
+      })
+      if (r.ok === false) return []
+      const buf = Buffer.from(await r.arrayBuffer())
+      return pickDanmaku(parseDanmakuXml(buf), limit)
+    } catch (error) {
+      log?.debug?.('读弹幕失败：', error.message)
+      return []
+    }
   }
 
   /** 按昵称精确找用户，找不到返回 0。 */
@@ -379,5 +469,5 @@ export function createBiliApi({ getCookie, log, fetchImpl = fetch, allowWrite = 
   // 发弹幕的接口（x/v2/dm/post）连同分P / 番剧元数据一起删掉了：观察者不产生任何公开内容。
   // 闸门里仍然留着 danmaku 这个分类，以后谁再写弹幕写入必须先过 deny('danmaku')。
 
-  return { nav, search, popular, view, playurl, subtitle, comments, postComment, likeVideo, setSign, setFace, replyFeed, dynamicFeed, card, searchUser, dynamicAuthor, resolveShort }
+  return { nav, search, popular, recommend, view, playurl, subtitle, comments, danmakuText, postComment, likeVideo, setSign, setFace, replyFeed, dynamicFeed, card, searchUser, dynamicAuthor, resolveShort }
 }

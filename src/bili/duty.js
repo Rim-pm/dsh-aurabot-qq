@@ -2,8 +2,10 @@
 // 只点赞和收藏，不评论、不发弹幕、不改资料。你在 QQ 里发链接，她也能点进去看完再聊。
 // 看过的都记成她的经历，每天写一份日报，晚上推一条摘要给主人。
 
+import { existsSync } from 'node:fs'
 import { dataDir, readJson, writeJson } from '../core/store.js'
 import { createBiliApi, findVideoId, parseCookie } from './api.js'
+import { loadSeen, migrateSeen, pushSeen, seenSet, saveSeen, seenFile, TIERS } from './seen.js'
 import { loginSessionKey, recoverLoginPause } from './login-pause.js'
 import { lookWithVision, visionState } from './vision.js'
 import { createShotStore, shotPath, clockOf } from './shots.js'
@@ -29,16 +31,26 @@ export function filterVideos(list, { minViews = 0, maxAgeDays = 0, seen = new Se
 }
 
 /** 一个视频交给她看的样子（标题、UP 主、简介、字幕节选、弹幕节选、画面描述、热评）。 */
-export function digestOf(v, { subtitle = '', comments = [], vision = '' } = {}) {
+export function digestOf(v, { subtitle = '', comments = [], vision = '', danmaku = [] } = {}) {
   return [
     `《${v.title}》 UP主：${v.author || '?'}  播放 ${v.play || 0}${v.tname ? '  分区：' + v.tname : ''}  ${v.bvid}`,
     v.desc ? `简介：${v.desc.slice(0, 300)}` : '',
     subtitle
       ? `字幕（节选）：${subtitle.slice(0, 2500)}`
       : `（没有字幕${vision ? '，只看了画面' : '，只能看标题、简介和评论'}）`,
+    danmaku.length ? `弹幕（节选）：${danmaku.slice(0, 30).join(' / ')}` : '',
     vision ? `画面（抽帧）：${vision.slice(0, 900)}` : '',
     comments.length ? '热评：\n' + comments.slice(0, 8).map((c) => `  ${c.name}：${c.text}`).join('\n') : '',
   ].filter(Boolean).join('\n')
+}
+
+/**
+ * 档位兜底（不信任模型）：非法值一律当 ok；worth 必须有字幕或画面证据，
+ * 手里只有标题 / 时长 / 简介这类表层信息时最多给 ok。
+ */
+export function tierOf(decision, hasEvidence = false) {
+  const tier = TIERS.includes(decision?.tier) ? decision.tier : 'ok'
+  return tier === 'worth' && !hasEvidence ? 'ok' : tier
 }
 
 export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vision: see = lookWithVision }) {
@@ -66,6 +78,15 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
     log.warn(`今天先不在 B 站点赞 / 收藏了：${why}`)
   }
   const record = (s, item) => { s.history.unshift({ at: Date.now(), ...item }); s.history = s.history.slice(0, 40) }
+
+  /** 判重表：文件不在就用 bili.json 里的老 seen 数组迁移一次，之后都读 bili-seen.json。 */
+  function ensureSeen(s) {
+    const file = seenFile()
+    if (existsSync(file)) return loadSeen()
+    const state = migrateSeen(s.seen)
+    try { saveSeen(state) } catch (error) { log.debug('判重表写入失败：', error.message) }
+    return state
+  }
 
   async function account(force = false) {
     const key = loginSessionKey(cfg().cookie)
@@ -112,7 +133,8 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
       title: cleanOutboundText(rawInfo.title, { warn: (message) => log.warn(`B 站标题：${message}`) }).trim(),
       author: cleanOutboundText(rawInfo.author, { warn: (message) => log.warn(`B 站作者：${message}`) }).trim(),
     }
-    const [subtitle, comments] = await Promise.all([api.subtitle(info).catch(() => ''), api.comments(info.aid).catch(() => [])])
+    const readDanmaku = typeof api.danmakuText === 'function' ? api.danmakuText(info.cid).catch(() => []) : Promise.resolve([])
+    const [subtitle, comments, danmaku] = await Promise.all([api.subtitle(info).catch(() => ''), api.comments(info.aid).catch(() => []), readDanmaku])
     // 开着「看画面」才抽帧：失败一律只记 debug，退回纯文本，不影响这一轮
     let vision = ''
     let shotIds = []
@@ -131,7 +153,7 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
         log.debug(`看画面失败（${info.bvid}）：`, error.message)
       }
     }
-    return { info, subtitle, comments, vision, shotIds, digest: digestOf(info, { subtitle, comments, vision }) }
+    return { info, subtitle, comments, danmaku, vision, shotIds, digest: digestOf(info, { subtitle, comments, vision, danmaku }) }
   }
 
   /** 挑一张存下来的截图发到指定会话（主人让她发 / 她刷完顺手发）。 */
@@ -197,16 +219,29 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
     busy = true
     const s = today(load())
     try {
-      const seen = new Set(s.seen)
-      const kws = await chooseKeywords()
+      let seenState = ensureSeen(s)
+      const seen = seenSet(seenState)
+      const kws = (c.keywords || []).filter(Boolean)
       let pool = []
-      for (const kw of kws) {
-        try { pool.push(...filterVideos(await api.search(kw), { minViews: c.minViews, maxAgeDays: c.maxAgeDays, seen }).slice(0, 4).map((v) => ({ ...v, kw }))) } catch (error) { log.debug(`搜「${kw}」失败：`, error.message) }
+      if (!kws.length) {
+        // 关键词留空 = 刷账号推荐流；推荐流本来就是老新混合，不过滤播放量和发布时间
+        try {
+          pool = filterVideos(await api.recommend({ ps: 30 }), { seen }).map((v) => ({ ...v, kw: '推荐' }))
+        } catch (error) {
+          log.debug('推荐流失败：', error.message)
+        }
+        if (!pool.length) {
+          try { pool = filterVideos(await api.popular({ ps: 20 }), { seen }).map((v) => ({ ...v, kw: '热门' })) } catch (error) { log.debug('热门兜底失败：', error.message) }
+        }
+      } else {
+        for (const kw of await chooseKeywords()) {
+          try { pool.push(...filterVideos(await api.search(kw), { minViews: c.minViews, maxAgeDays: c.maxAgeDays, seen }).slice(0, 4).map((v) => ({ ...v, kw }))) } catch (error) { log.debug(`搜「${kw}」失败：`, error.message) }
+        }
+        if (pool.length < c.perRun) {
+          try { pool.push(...filterVideos(await api.popular({ ps: 20 }), { seen }).slice(0, c.perRun).map((v) => ({ ...v, kw: '热门' }))) } catch (error) {}
+        }
       }
-      if (pool.length < c.perRun) {
-        try { pool.push(...filterVideos(await api.popular({ ps: 20 }), { seen }).slice(0, c.perRun).map((v) => ({ ...v, kw: '热门' }))) } catch (error) {}
-      }
-      // 每个关键词轮着取，避免一轮全是同一类
+      // 每个来源轮着取，避免一轮全是同一类
       const picked = []
       const byKw = new Map()
       for (const v of pool) { if (!byKw.has(v.kw)) byKw.set(v.kw, []); byKw.get(v.kw).push(v) }
@@ -217,11 +252,14 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
         try { looked.push(await lookAt(v)) } catch (error) { log.debug(`看 ${v.bvid} 失败：`, error.message) }
         seen.add(v.bvid)
       }
-      s.seen = [...seen].slice(-500)
       if (!looked.length) return { ok: false, message: '视频都打不开' }
       const out = await think(`你在 B 站刷到了这几个视频：\n\n${looked.map((x, i) => `【${i + 1}】${x.digest}`).join('\n\n')}\n\n` +
-        `看完说说你的想法。对每个视频给一个对象：{"i":序号, "feeling":"一句你的真实感受", "share":"想私聊分享给${owner()}的话（觉得${owner()}会喜欢才写，不然空字符串）", "remember":"值得记住的一件事（没有就空字符串）"}。` +
-        `只输出 JSON 数组。`)
+        `看完说说你的想法。对每个视频给一个对象：{"i":序号, "tier":"worth|ok|skip", "why":"为什么值得（两三句，具体到内容，别说套话）", "feeling":"一句你的真实感受", "share":"想私聊分享给${owner()}的话（觉得${owner()}会喜欢才写，不然空字符串）", "remember":"值得记住的一件事（没有就空字符串）"}。\n` +
+        `档位判据：\n` +
+        `- worth = 你真心希望他花这十几分钟；必须读过字幕或看过画面才能给\n` +
+        `- ok = 有信息，但不看也不亏\n` +
+        `- skip = 标题党 / 复读 / 水分大；不进日报\n` +
+        `手里只有标题、时长、简介这类表层信息时，最多给 ok。\n只输出 JSON 数组。`)
       const decisions = pickJson(out, [])
       let shared = 0
       const felt = new Map() // bvid → 她自己的一句感受，发截图时配着用
@@ -231,16 +269,26 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
         const v = x.info
         const feeling = cleanOutboundText(d.feeling, { warn: (message) => log.warn(`B 站感受：${message}`) }).trim()
         const remember = cleanOutboundText(d.remember, { warn: (message) => log.warn(`B 站见闻：${message}`) }).trim()
+        const why = cleanOutboundText(d.why, { warn: (message) => log.warn(`B 站理由：${message}`) }).trim()
+        const hasEvidence = Boolean(x.subtitle) || Boolean(x.vision)
+        const tier = tierOf(d, hasEvidence)
         if (feeling) felt.set(v.bvid, feeling)
         memory?.addEvent?.({ kind: 'seen', meta: { title: v.title, author: v.author, url: link(v.bvid), platform: 'bili', id: v.bvid }, text: [feeling, !isSilence(remember) ? remember : ''].filter(Boolean).join('；') || v.title, tags: ['B站'], importance: 0.4 })
+        // 判重表：skip 也要记，只是不进日报、不点赞、不收藏
+        seenState = pushSeen(seenState, { bvid: v.bvid, title: v.title, up: v.author, tier, why, at: Date.now(), status: 'seen' })
+        if (tier === 'skip') {
+          record(s, { kind: 'skip', title: v.title, bvid: v.bvid, text: why || feeling })
+          continue
+        }
         const share = cleanOutboundText(d.share, { warn: (message) => log.warn(`B 站分享：${message}`) }).trim()
-        if (share && !isSilence(share) && c.shareToOwner && getConfig().ownerQQ) {
+        if (tier === 'worth' && share && !isSilence(share) && c.shareToOwner && getConfig().ownerQQ) {
           await hub.sendText(`private:${getConfig().ownerQQ}`, `${share}\n${link(v.bvid)}`)
           shared++
           record(s, { kind: 'share', title: v.title, bvid: v.bvid, text: share })
         }
         record(s, { kind: 'watch', title: v.title, bvid: v.bvid, text: feeling })
       }
+      try { saveSeen(seenState) } catch (error) { log.debug('判重表写入失败：', error.message) }
       // 刷完按概率顺手甩一张截图给主人：默认概率和发一张表情包一样，0 = 从不
       let shotSent = 0
       const shotTo = getConfig().ownerQQ ? `private:${getConfig().ownerQQ}` : ''
