@@ -106,7 +106,9 @@ export function parseReport(markdown) {
 export function digestMessage({ items = [], skipped = 0, noSubtitle = 0 } = {}) {
   const worth = items.filter((x) => x.tier === 'worth')
   const ok = items.filter((x) => x.tier === 'ok')
-  const head = `今天刷了 ${items.length} 条，${worth.length} 条值得看：`
+  const head = worth.length
+    ? `今天刷了 ${items.length} 条，${worth.length} 条值得看：`
+    : `今天刷了 ${items.length} 条，没有特别值得看的：`
   const lines = worth.slice(0, 5).map((x) => `· 《${x.title || x.bvid}》 ${x.bvid}`)
   const tail = []
   if (skipped) tail.push(`跳过 ${skipped} 条`)

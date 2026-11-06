@@ -2,13 +2,15 @@
 // 只点赞和收藏，不评论、不发弹幕、不改资料。你在 QQ 里发链接，她也能点进去看完再聊。
 // 看过的都记成她的经历，每天写一份日报，晚上推一条摘要给主人。
 
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { dirname } from 'node:path'
 import { dataDir, readJson, writeJson } from '../core/store.js'
-import { createBiliApi, findVideoId, parseCookie } from './api.js'
+import { createBiliApi, findVideoId, parseCookie, UA } from './api.js'
 import { loadSeen, migrateSeen, pushSeen, markSeen, seenSet, saveSeen, seenFile, TIERS } from './seen.js'
 import { appendDigest, appendReport, dateKey, digestMessage, parseReport, readReport, reportDates, countPicked, lastNoSubtitle } from './report.js'
 import { loginSessionKey, recoverLoginPause } from './login-pause.js'
-import { lookWithVision, visionState } from './vision.js'
+import { lookWithVision, visionState, findFfmpeg } from './vision.js'
 import { createShotStore, shotPath, clockOf } from './shots.js'
 import { isSilence, cleanOutboundText } from '../chat/reply.js'
 
@@ -54,7 +56,30 @@ export function tierOf(decision, hasEvidence = false) {
   return tier === 'worth' && !hasEvidence ? 'ok' : tier
 }
 
-export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vision: see = lookWithVision }) {
+/** ffmpeg 把音频流抽成 16k 单声道 wav。成功 true，失败 false（不抛、不留半截文件）。 */
+export function extractAudio(ffmpeg, url, file, { timeoutMs = 120_000 } = {}) {
+  return new Promise((resolve) => {
+    let done = false
+    let proc
+    let timer
+    const finish = (v) => { if (done) return; done = true; clearTimeout(timer); resolve(v) }
+    timer = setTimeout(() => { try { proc?.kill() } catch (error) {} finish(false) }, timeoutMs)
+    try {
+      proc = spawn(ffmpeg, [
+        '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+        // B 站 CDN 要 Referer，否则 403
+        '-headers', `Referer: https://www.bilibili.com/\r\nUser-Agent: ${UA}\r\n`,
+        '-i', url, '-vn', '-ac', '1', '-ar', '16000', '-f', 'wav', file,
+      ], { windowsHide: true })
+    } catch (error) {
+      return finish(false)
+    }
+    proc.on('error', () => finish(false))
+    proc.on('close', (code) => finish(code === 0))
+  })
+}
+
+export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vision: see = lookWithVision, local }) {
   const cfg = () => getConfig().bili
   // 写闸门：observer 下只有点赞和收藏放行；social 全放行（工具和路由已经删掉，这里是兜底）
   const allowWrite = (kind) => cfg().posture === 'social' || kind === 'like' || kind === 'fav'
@@ -198,6 +223,35 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
     return interests.sort(() => Math.random() - 0.5).slice(0, 3)
   }
 
+  /**
+   * 转写兜底（可选）：没有字幕、开着 transcribe、本机有 ffmpeg、local.asr 也开着时才走。
+   * 任何一步失败都静默跳过（返回 ''），不影响这一轮；日报会记「因无字幕跳过 N 条」。
+   */
+  async function transcribeAudio(info) {
+    const c = cfg()
+    if (!c.transcribe || !local || typeof local.call !== 'function' || typeof api.playurl !== 'function') return ''
+    const ffmpeg = findFfmpeg(c.ffmpegPath)
+    if (!ffmpeg) return ''
+    let file = ''
+    try {
+      const stream = await api.playurl({ bvid: info.bvid, aid: info.aid, cid: info.cid })
+      const url = stream?.audio?.[0]?.baseUrl || stream?.durl?.[0]?.url || ''
+      if (!url) return ''
+      file = dataDir('bili-audio', `${info.bvid || 'video'}-${Date.now()}.wav`)
+      mkdirSync(dirname(file), { recursive: true })
+      if (!(await extractAudio(ffmpeg, url, file))) return ''
+      const r = await local.call('asr', { file })
+      const text = String(typeof r === 'string' ? r : r?.text || '').trim()
+      if (text) log.debug(`《${info.title}》没有字幕，转写到了 ${text.length} 字`)
+      return text
+    } catch (error) {
+      log.debug(`转写《${info.title}》失败：`, error.message)
+      return ''
+    } finally {
+      if (file) { try { rmSync(file, { force: true }) } catch (error) {} }
+    }
+  }
+
   async function lookAt(v) {
     const rawInfo = await api.view({ bvid: v.bvid })
     const info = {
@@ -208,7 +262,8 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
     const c = cfg()
     const readDanmaku = typeof api.danmakuText === 'function' ? api.danmakuText(info.cid).catch(() => []) : Promise.resolve([])
     const [rawSubtitle, comments, danmaku] = await Promise.all([api.subtitle(info).catch(() => ''), api.comments(info.aid).catch(() => []), readDanmaku])
-    const subtitle = rawSubtitle
+    // 没有字幕时可选走本地 ASR 转写；失败就空着，不影响后面
+    const subtitle = rawSubtitle || (c.transcribe ? await transcribeAudio(info) : '')
     // 开着「看画面」才抽帧：失败一律只记 debug，退回纯文本，不影响这一轮
     let vision = ''
     let shotIds = []

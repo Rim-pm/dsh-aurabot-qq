@@ -55,6 +55,29 @@ test('刷一轮：模型给 worth 但没有证据时降级 ok，不分享', asyn
   assert.equal(sent.length, 0, '降级成 ok 就不该按 worth 分享')
 })
 
+test('转写兜底：没有 ASR 服务 / 没 ffmpeg 时静默跳过，整轮照常', async () => {
+  const cfg = normalize({ enabled: true, dryRun: false, ownerQQ: '10000001', bili: { enabled: true, keywords: [], perRun: 1, transcribe: true } })
+  const bili = duty.createBili({
+    getConfig: () => cfg,
+    log: { info() {}, warn() {}, debug() {} },
+    hub: { runSystemTurn: async () => JSON.stringify([{ i: 1, tier: 'ok', why: '表层信息', feeling: '嗯' }]), sendText: async () => ({}) },
+    api: {
+      nav: async () => ({ isLogin: true }),
+      recommend: async () => [{ bvid: 'BV1ggggggggg', aid: 1, title: '没字幕', author: 'UP', play: 1, pubdate: Date.now() }],
+      view: async ({ bvid }) => ({ bvid, aid: 1, cid: 9, title: '没字幕', author: 'UP', play: 1, desc: '' }),
+      subtitle: async () => '',
+      comments: async () => [],
+      danmakuText: async () => [],
+      // 没有 playurl，也没有 local.asr：转写应当安静地跳过
+    },
+    // local 不传
+  })
+  const r = await bili.run({ force: true })
+  assert.equal(r.ok, true, r.message)
+  assert.equal(r.watched, 1)
+  assert.ok(bili.state().noSubtitle >= 1, '日报里记了因无字幕跳过')
+})
+
 test('刷一轮：有字幕的 worth 会分享给主人', async () => {
   const cfg = normalize({ enabled: true, dryRun: false, ownerQQ: '10000001', bili: { enabled: true, keywords: [], perRun: 1 } })
   const sent = []
