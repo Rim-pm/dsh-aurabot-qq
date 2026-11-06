@@ -396,10 +396,13 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
       const felt = new Map() // bvid → 她自己的一句感受，发截图时配着用
       const pickedEntries = [] // 进日报（worth / ok）
       const archiveEntries = [] // 进归档（挑中的和跳过的都记）
+      const done = new Set() // 模型偶尔会把同一个视频写两遍，别让日报多算一条
       for (const d of Array.isArray(decisions) ? decisions : []) {
         const x = looked[(Number(d.i) || 0) - 1]
         if (!x) continue
         const v = x.info
+        if (done.has(v.bvid)) continue
+        done.add(v.bvid)
         const feeling = cleanOutboundText(d.feeling, { warn: (message) => log.warn(`B 站感受：${message}`) }).trim()
         const remember = cleanOutboundText(d.remember, { warn: (message) => log.warn(`B 站见闻：${message}`) }).trim()
         const why = cleanOutboundText(d.why, { warn: (message) => log.warn(`B 站理由：${message}`) }).trim()
