@@ -106,8 +106,32 @@ test('工具：B站没打开时一个工具都不给', () => {
   assert.deepEqual(builders[0]({ chat, sessionId: 's1' }), [])
 })
 
-test('面板要读的配置项都在（默认值）', () => {
-  const c = normalize({})
+test('升级提示：首次启动打一条观察者日志，第二次不再打', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'aurabot-bili-posture-'))
+  const infos = []
+  const bootOnce = () => biliModule.setup({
+    config: () => normalize({ enabled: true, bili: { enabled: true } }),
+    setConfig: () => {},
+    lazy: () => null,
+    use: () => null,
+    onDispose: () => {},
+    dataDir: (...parts) => join(dir, ...parts),
+    log: { info: (m) => infos.push(m), debug() {}, warn() {} },
+    on() {},
+    tool() {},
+    every() {},
+    route() {},
+    core: { hub: { turnHasOwner: () => true, turnSendersAllOwner: () => true }, http: { body: async () => ({}), query: () => ({}) } },
+  })
+  const count = () => infos.filter((m) => /观察者模式/.test(m)).length
+  bootOnce()
+  assert.equal(count(), 1, '第一次启动提示一次')
+  assert.match(infos.find((m) => /观察者模式/.test(m)), /不再评论\/发弹幕\/改资料，只保留点赞和收藏/)
+  bootOnce()
+  assert.equal(count(), 1, '第二次不再打')
+})
+
+test('面板要读的配置项都在（默认值）', () => {  const c = normalize({})
   assert.deepEqual(c.bili.subs, [])
   assert.equal(c.bili.subIntervalMin, 15)
   assert.equal(c.bili.subGapSec, 6)
