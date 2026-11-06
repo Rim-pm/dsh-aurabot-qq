@@ -54,6 +54,8 @@ test('面板接线：订阅的五个接口和定时任务都注册上了', () =>
   }
   assert.ok(timers.includes('订阅B站动态'), '每分钟要有一次订阅 tick')
   assert.ok(timers.includes('刷B站'), '原来的刷视频 tick 不能被挤掉')
+  // 观察者新增：刷过的视频 / 当天日报 / 收藏夹下拉
+  for (const p of ['/bili/seen', '/bili/report', '/bili/fav/folders']) assert.ok(routes.has(p), `缺接口 ${p}`)
   // 观察者：评论 / 弹幕的路由已经删掉，面板点不到也不该有接口
   for (const p of ['/bili/replies', '/bili/danmaku/state', '/bili/danmaku/inspect', '/bili/danmaku/send']) {
     assert.equal(routes.has(p), false, `不该再有接口 ${p}`)

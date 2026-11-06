@@ -70,6 +70,20 @@ test('observer 下点赞放行：只发一条 like 请求', async () => {
   assert.equal(new URLSearchParams(calls[0].body).get('aid'), '123')
 })
 
+test('observer 下收藏放行：只发一条 resource/deal，夹子和 csrf 都对', async () => {
+  const { calls, fetchImpl } = recorder()
+  const api = createBiliApi({ getCookie: () => 'SESSDATA=a; bili_jct=tok', log, fetchImpl, allowWrite: (kind) => kind === 'like' || kind === 'fav' })
+  const r = await api.favVideo(123, 456)
+  assert.equal(r.ok, true)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].url, 'https://api.bilibili.com/x/v3/fav/resource/deal')
+  const form = new URLSearchParams(calls[0].body)
+  assert.equal(form.get('rid'), '123')
+  assert.equal(form.get('type'), '2')
+  assert.equal(form.get('add_media_ids'), '456')
+  assert.equal(form.get('csrf'), 'tok')
+})
+
 test('social 下闸门放开：评论照常发出去', async () => {
   const { calls, fetchImpl } = recorder()
   const api = createBiliApi({ getCookie: () => 'SESSDATA=a; bili_jct=tok', log, fetchImpl, allowWrite: () => true })

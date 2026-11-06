@@ -86,6 +86,8 @@ function fakes({ decisions, cfgOver = {} } = {}) {
     subtitle: async () => '大家好今天做饭',
     comments: async () => [{ name: '网友', text: '好香' }],
     danmakuText: async () => [],
+    likeVideo: async () => ({ ok: true }),
+    favVideo: async () => ({ ok: true }),
     resolveShort: async () => 'https://www.bilibili.com/video/BV1bbbbbbbbb',
   }
   const hub = {

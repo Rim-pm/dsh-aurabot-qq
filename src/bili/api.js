@@ -376,6 +376,27 @@ export function createBiliApi({ getCookie, log, fetchImpl = fetch, allowWrite = 
     return { ok: true }
   }
 
+  /** 收藏夹列表：[{id, title, count}]。面板下拉用。没登录读不到。 */
+  async function favFolders() {
+    const { mid } = await nav()
+    if (!mid) throw new Error('没登录 B 站，读不到收藏夹')
+    const d = await req(`https://api.bilibili.com/x/v3/fav/folder/created/list-all?up_mid=${encodeURIComponent(String(mid))}`)
+    return (d.list || []).map((f) => ({ id: f.id, title: f.title, count: f.media_count }))
+  }
+
+  /** 收藏一个视频到指定收藏夹。要 bili_jct。observer 下放行（kind = fav）。 */
+  async function favVideo(aid, folderId) {
+    const blocked = deny('fav')
+    if (blocked) return blocked
+    const csrf = parseCookie(getCookie()).bili_jct
+    if (!csrf) throw new Error('没登录 B 站（Cookie 里要有 bili_jct）')
+    await req('https://api.bilibili.com/x/v3/fav/resource/deal', {
+      method: 'POST',
+      form: { rid: aid, type: 2, add_media_ids: folderId, csrf },
+    })
+    return { ok: true }
+  }
+
   /** 改自己的个性签名（B 站上限 70 字）。要登录。observer 下恒拒绝。 */
   async function setSign(sign) {
     const blocked = deny('profile')
@@ -469,5 +490,5 @@ export function createBiliApi({ getCookie, log, fetchImpl = fetch, allowWrite = 
   // 发弹幕的接口（x/v2/dm/post）连同分P / 番剧元数据一起删掉了：观察者不产生任何公开内容。
   // 闸门里仍然留着 danmaku 这个分类，以后谁再写弹幕写入必须先过 deny('danmaku')。
 
-  return { nav, search, popular, recommend, view, playurl, subtitle, comments, danmakuText, postComment, likeVideo, setSign, setFace, replyFeed, dynamicFeed, card, searchUser, dynamicAuthor, resolveShort }
+  return { nav, search, popular, recommend, view, playurl, subtitle, comments, danmakuText, favFolders, favVideo, postComment, likeVideo, setSign, setFace, replyFeed, dynamicFeed, card, searchUser, dynamicAuthor, resolveShort }
 }

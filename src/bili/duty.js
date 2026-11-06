@@ -5,7 +5,8 @@
 import { existsSync } from 'node:fs'
 import { dataDir, readJson, writeJson } from '../core/store.js'
 import { createBiliApi, findVideoId, parseCookie } from './api.js'
-import { loadSeen, migrateSeen, pushSeen, seenSet, saveSeen, seenFile, TIERS } from './seen.js'
+import { loadSeen, migrateSeen, pushSeen, markSeen, seenSet, saveSeen, seenFile, TIERS } from './seen.js'
+import { appendDigest, appendReport, dateKey, digestMessage, parseReport, readReport, reportDates, countPicked, lastNoSubtitle } from './report.js'
 import { loginSessionKey, recoverLoginPause } from './login-pause.js'
 import { lookWithVision, visionState } from './vision.js'
 import { createShotStore, shotPath, clockOf } from './shots.js'
@@ -60,9 +61,9 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
   const api = injected || createBiliApi({ getCookie: () => cfg().cookie, log, allowWrite })
   const shots = createShotStore({ max: () => getConfig().bili.shotLibrary })
   const file = () => dataDir('bili.json')
-  const load = () => readJson(file(), () => ({ day: '', runs: 0, comments: 0, replies: 0, likes: 0, favs: 0, lastRun: 0, seen: [], history: [] }))
+  const load = () => readJson(file(), () => ({ day: '', runs: 0, comments: 0, replies: 0, likes: 0, favs: 0, skipped: 0, noSubtitle: 0, lastRun: 0, seen: [], history: [] }))
   const save = (s) => writeJson(file(), s)
-  const today = (s) => { if (s.day !== dayKey()) Object.assign(s, { day: dayKey(), runs: 0, comments: 0, replies: 0, likes: 0, favs: 0 }) ; return s }
+  const today = (s) => { if (s.day !== dayKey()) Object.assign(s, { day: dayKey(), runs: 0, comments: 0, replies: 0, likes: 0, favs: 0, skipped: 0, noSubtitle: 0 }) ; return s }
   let busy = false
   let stopped = false
   let login = { at: 0, key: '', value: { isLogin: false, uname: '' } }
@@ -86,6 +87,77 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
     const state = migrateSeen(s.seen)
     try { saveSeen(state) } catch (error) { log.debug('判重表写入失败：', error.message) }
     return state
+  }
+
+  /** 点赞：只给「值得看」，每天最多 maxLikesPerDay 条；到上限就不再发请求。 */
+  async function likeOne(v, s) {
+    const c = cfg()
+    if (!c.like || !(Number(c.maxLikesPerDay) > 0) || (s.likes || 0) >= Number(c.maxLikesPerDay)) return false
+    if (!canPost(s)) return false
+    if (getConfig().dryRun) { log.info(`试运行：本来要给《${v.title}》点赞`); return false }
+    try {
+      const r = await api.likeVideo(v.aid)
+      if (r && r.blocked) return false
+      s.likes = (s.likes || 0) + 1
+      record(s, { kind: 'like', title: v.title, bvid: v.bvid, text: '' })
+      return true
+    } catch (error) {
+      log.debug(`点赞《${v.title}》失败：`, error.message)
+      pauseIf(s, error)
+      return false
+    }
+  }
+
+  /** 收藏：worth → 夹 A，ok → 夹 B；没配夹子 / 没有 bili_jct / 到上限都跳过，不阻塞整轮。 */
+  async function favOne(v, tier, s) {
+    const c = cfg()
+    const folderId = tier === 'worth' ? Number(c.favWorthFolderId) || 0 : tier === 'ok' ? Number(c.favOkFolderId) || 0 : 0
+    if (!folderId) return false
+    if ((s.favs || 0) >= (Number(c.maxFavsPerDay) || 0)) return false
+    if (!canPost(s)) { log.debug('没有 bili_jct，跳过收藏'); return false }
+    if (getConfig().dryRun) { log.info(`试运行：本来要把《${v.title}》收藏到夹 ${folderId}`); return false }
+    try {
+      const r = await api.favVideo(v.aid, folderId)
+      if (r && r.blocked) return false
+      s.favs = (s.favs || 0) + 1
+      record(s, { kind: 'fav', title: v.title, bvid: v.bvid, text: tier === 'worth' ? '值得看' : '可以看' })
+      return true
+    } catch (error) {
+      log.debug(`收藏《${v.title}》失败：`, error.message)
+      pauseIf(s, error)
+      return false
+    }
+  }
+
+  /** 每天到点推一条日报摘要：当天 0 条不发，推过就不再推（重启也不重推）。 */
+  async function maybeDigest(s) {
+    const c = cfg()
+    if (!c.dailyDigest) return false
+    if (s.digestDay === dayKey()) return false
+    if (new Date().getHours() < Number(c.dailyDigestHour)) return false
+    const md = readReport(dayKey())
+    const items = parseReport(md)
+    if (!items.length) return false
+    const ownerQQ = getConfig().ownerQQ
+    if (!ownerQQ) return false
+    const text = digestMessage({ items, skipped: s.skipped || 0, noSubtitle: lastNoSubtitle(md) || s.noSubtitle || 0 })
+    s.digestDay = dayKey()
+    if (getConfig().dryRun) {
+      log.info(`试运行：本来要推今天的 B 站日报摘要：\n${text}`)
+      save(s)
+      return true
+    }
+    try {
+      await hub.sendText(`private:${ownerQQ}`, text)
+      record(s, { kind: 'digest', title: '日报摘要', text: `${countPicked(md)} 条` })
+      log.info(`推了今天的 B 站日报摘要：${countPicked(md)} 条`)
+      save(s)
+      return true
+    } catch (error) {
+      s.digestDay = '' // 没发出去，下一分钟再试
+      log.warn('日报摘要没发出去：', error.message)
+      return false
+    }
   }
 
   async function account(force = false) {
@@ -133,12 +205,13 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
       title: cleanOutboundText(rawInfo.title, { warn: (message) => log.warn(`B 站标题：${message}`) }).trim(),
       author: cleanOutboundText(rawInfo.author, { warn: (message) => log.warn(`B 站作者：${message}`) }).trim(),
     }
+    const c = cfg()
     const readDanmaku = typeof api.danmakuText === 'function' ? api.danmakuText(info.cid).catch(() => []) : Promise.resolve([])
-    const [subtitle, comments, danmaku] = await Promise.all([api.subtitle(info).catch(() => ''), api.comments(info.aid).catch(() => []), readDanmaku])
+    const [rawSubtitle, comments, danmaku] = await Promise.all([api.subtitle(info).catch(() => ''), api.comments(info.aid).catch(() => []), readDanmaku])
+    const subtitle = rawSubtitle
     // 开着「看画面」才抽帧：失败一律只记 debug，退回纯文本，不影响这一轮
     let vision = ''
     let shotIds = []
-    const c = cfg()
     if (c.vision) {
       try {
         const r = await see({ dsh, api, info, getConfig, log })
@@ -262,7 +335,12 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
         `手里只有标题、时长、简介这类表层信息时，最多给 ok。\n只输出 JSON 数组。`)
       const decisions = pickJson(out, [])
       let shared = 0
+      let skipped = 0
+      let liked = 0
+      let faved = 0
       const felt = new Map() // bvid → 她自己的一句感受，发截图时配着用
+      const pickedEntries = [] // 进日报（worth / ok）
+      const archiveEntries = [] // 进归档（挑中的和跳过的都记）
       for (const d of Array.isArray(decisions) ? decisions : []) {
         const x = looked[(Number(d.i) || 0) - 1]
         if (!x) continue
@@ -275,11 +353,19 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
         if (feeling) felt.set(v.bvid, feeling)
         memory?.addEvent?.({ kind: 'seen', meta: { title: v.title, author: v.author, url: link(v.bvid), platform: 'bili', id: v.bvid }, text: [feeling, !isSilence(remember) ? remember : ''].filter(Boolean).join('；') || v.title, tags: ['B站'], importance: 0.4 })
         // 判重表：skip 也要记，只是不进日报、不点赞、不收藏
-        seenState = pushSeen(seenState, { bvid: v.bvid, title: v.title, up: v.author, tier, why, at: Date.now(), status: 'seen' })
+        const entry = { bvid: v.bvid, title: v.title, up: v.author, play: v.play, tier, why, feeling, at: Date.now() }
+        seenState = pushSeen(seenState, { ...entry, status: 'seen' })
+        archiveEntries.push(entry)
         if (tier === 'skip') {
+          skipped++
           record(s, { kind: 'skip', title: v.title, bvid: v.bvid, text: why || feeling })
           continue
         }
+        pickedEntries.push(entry)
+        if (tier === 'worth') {
+          if (await likeOne(v, s)) { liked++; seenState = markSeen(seenState, v.bvid, 'liked') }
+        }
+        if (await favOne(v, tier, s)) { faved++; seenState = markSeen(seenState, v.bvid, 'faved') }
         const share = cleanOutboundText(d.share, { warn: (message) => log.warn(`B 站分享：${message}`) }).trim()
         if (tier === 'worth' && share && !isSilence(share) && c.shareToOwner && getConfig().ownerQQ) {
           await hub.sendText(`private:${getConfig().ownerQQ}`, `${share}\n${link(v.bvid)}`)
@@ -289,6 +375,14 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
         record(s, { kind: 'watch', title: v.title, bvid: v.bvid, text: feeling })
       }
       try { saveSeen(seenState) } catch (error) { log.debug('判重表写入失败：', error.message) }
+      // 记账：日报只写挑中的；归档挑中的和跳过的都写。因无字幕跳过按「没有任何深读证据」算。
+      const noSubtitle = looked.filter((x) => !x.subtitle && !x.vision).length
+      if (pickedEntries.length || noSubtitle) {
+        try { appendReport(dayKey(), pickedEntries, { noSubtitle }) } catch (error) { log.debug('日报写入失败：', error.message) }
+      }
+      try { appendDigest(dayKey(), archiveEntries) } catch (error) { log.debug('归档写入失败：', error.message) }
+      s.skipped = (s.skipped || 0) + skipped
+      s.noSubtitle = (s.noSubtitle || 0) + noSubtitle
       // 刷完按概率顺手甩一张截图给主人：默认概率和发一张表情包一样，0 = 从不
       let shotSent = 0
       const shotTo = getConfig().ownerQQ ? `private:${getConfig().ownerQQ}` : ''
@@ -313,8 +407,8 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
       }
       if (!force) s.runs++
       s.lastRun = Date.now()
-      log.info(`刷了一轮 B 站：看了 ${looked.length} 个，分享 ${shared} 个，截图 ${shotSent} 张`)
-      return { ok: true, message: `看了 ${looked.length} 个视频，分享给你 ${shared} 个${shotSent ? '，还发了张截图' : ''}`, watched: looked.length, shared, shots: shotSent }
+      log.info(`刷了一轮 B 站：看了 ${looked.length} 个，点赞 ${liked} 条，收藏 ${faved} 条，分享 ${shared} 个，截图 ${shotSent} 张`)
+      return { ok: true, message: `看了 ${looked.length} 个视频，点赞 ${liked} 条、收藏 ${faved} 条，分享给你 ${shared} 个${shotSent ? '，还发了张截图' : ''}`, watched: looked.length, shared, likes: liked, favs: faved, skipped, shots: shotSent }
     } catch (error) {
       log.warn('刷 B 站出错：', error.message)
       return { ok: false, message: error.message }
@@ -338,7 +432,7 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
     return { ok: true, message: x.digest, bvid: x.info.bvid, aid: x.info.aid, title: x.info.title }
   }
 
-  /** 每分钟调一次：醒着的时候按间隔刷。 */
+  /** 每分钟调一次：醒着的时候按间隔刷；到点推日报摘要。 */
   async function tick() {
     const g = getConfig()
     const c = g.bili
@@ -347,19 +441,47 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
     const h = new Date().getHours()
     if (h < g.speakUp.awakeFrom || h >= g.speakUp.awakeTo) return
     const s = today(load())
+    await maybeDigest(s)
     if (c.autoBrowse && s.runs < c.maxRunsPerDay && Date.now() - (s.lastRun || 0) > c.intervalHours * 3600_000) await run()
   }
 
+  /** 面板用：刷过的视频（可按档位筛、分页）。 */
+  function seenList({ tier = '', offset = 0, limit = 20 } = {}) {
+    const all = loadSeen().items
+    const picked = TIERS.includes(tier) ? all.filter((x) => x.tier === tier) : all
+    const start = Math.max(0, Math.round(Number(offset) || 0))
+    const size = Math.max(1, Math.min(100, Math.round(Number(limit) || 20)))
+    return { ok: true, items: picked.slice(start, start + size), total: picked.length, offset: start, limit: size, tier: TIERS.includes(tier) ? tier : '', count: all.length }
+  }
+
+  /** 面板用：某天的日报（默认今天），顺带给出有日报的日期。 */
+  function reportOf(date = '') {
+    const d = /^\d{4}-\d{2}-\d{2}$/.test(String(date)) ? String(date) : dateKey()
+    const markdown = readReport(d)
+    return { ok: true, date: d, markdown, dates: reportDates(), count: countPicked(markdown) }
+  }
+
+  /** 面板用：收藏夹列表（读不到就如实说，下拉留空）。 */
+  async function favFolders() {
+    try {
+      return { ok: true, folders: await api.favFolders() }
+    } catch (error) {
+      return { ok: false, folders: [], message: error.message }
+    }
+  }
+
   return {
-    run, watch, tick, account, sendShot, listShots,
+    run, watch, tick, account, sendShot, listShots, seenList, reportOf, favFolders,
     libraryShots, shotFileOf, deleteShot,
     dispose() { stopped = true },
     state: () => {
       const s = today(load())
       return {
-        runs: s.runs, likes: s.likes || 0, favs: s.favs || 0, comments: s.comments, replies: s.replies,
+        runs: s.runs, likes: s.likes || 0, favs: s.favs || 0, skipped: s.skipped || 0, noSubtitle: s.noSubtitle || 0,
+        comments: s.comments, replies: s.replies,
         lastRun: s.lastRun, history: s.history.slice(0, 20), canPost: canPost(s),
         pauseReason: s.pauseDay === dayKey() ? s.pauseReason : '', posture: cfg().posture,
+        digestDay: s.digestDay || '', seenTotal: loadSeen().items.length,
         vision: visionState(cfg()), shots: { count: shots.count() },
       }
     },

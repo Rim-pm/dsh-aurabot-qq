@@ -3980,7 +3980,9 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         m.panel ? h(ExtPanel, { m, settings, draftSettings, setSettings, toast, reload }) : null)
     }
 
-    const BILI_KIND = { watch: '看了', share: '分享给你', shot: '发你截图', like: '点赞', fav: '收藏', error: '没成功' }
+    const BILI_KIND = { watch: '看了', share: '分享给你', shot: '发你截图', like: '点赞', fav: '收藏', skip: '跳过', digest: '日报摘要', error: '没成功' }
+    const BILI_TIER = { worth: '值得看', ok: '可以看', skip: '跳过' }
+    const BILI_TIER_SEG = [{ value: '', label: '全部' }, { value: 'worth', label: '值得看' }, { value: 'ok', label: '可以看' }, { value: 'skip', label: '跳过' }]
 
     /** B 站（观察者）：登录、定时刷、点赞 / 收藏、分享给主人，以及她刷过什么。 */
     function Bili({ draft, setDraft, toast }) {
@@ -3988,14 +3990,32 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const [s, setS] = useState(null)
       const [busy, setBusy] = useState('')
       const [shots, setShots] = useState(null)
+      const [seen, setSeen] = useState(null)
+      const [seenTier, setSeenTier] = useState('')
+      const [seenOffset, setSeenOffset] = useState(0)
+      const [report, setReport] = useState(null)
+      const [folders, setFolders] = useState([])
+      const [folderErr, setFolderErr] = useState('')
       const load = () => get('/bili/state').then(setS).catch((e) => toast(e.message, 'err'))
       const loadShots = () => get('/bili/shots').then((r) => setShots(r.items || [])).catch((e) => { setShots([]); toast(e.message, 'err') })
-      useEffect(() => { load(); loadShots() }, [])
-      const act = (path, label) => async () => { setBusy(label); const r = await post(path); setBusy(''); toast(r.message, r.ok ? 'ok' : 'err'); load(); loadShots() }
+      const loadSeen = (tier = '', offset = 0) => get('/bili/seen?tier=' + encodeURIComponent(tier) + '&offset=' + offset + '&limit=20')
+        .then((r) => { setSeen(r); setSeenTier(tier); setSeenOffset(offset) })
+        .catch(() => setSeen({ ok: false, items: [], total: 0 }))
+      const loadReport = (date = '') => get('/bili/report' + (date ? '?date=' + encodeURIComponent(date) : ''))
+        .then(setReport)
+        .catch(() => setReport({ ok: false, markdown: '', dates: [] }))
+      const loadFolders = () => get('/bili/fav/folders')
+        .then((r) => { setFolders(r.folders || []); setFolderErr(r.ok ? '' : (r.message || '读不到收藏夹')) })
+        .catch((e) => setFolderErr(e.message))
+      useEffect(() => { load(); loadShots(); loadSeen('', 0); loadReport(); loadFolders() }, [])
+      const act = (path, label) => async () => { setBusy(label); const r = await post(path); setBusy(''); toast(r.message, r.ok ? 'ok' : 'err'); load(); loadShots(); loadSeen(seenTier, 0); loadReport() }
       const acct = s && s.account
       // 「只要订阅」：别的 B 站卡片直接不渲染，面板跟实际行为保持一致
       const onlySubs = !!(draft.bili && draft.bili.subsOnly)
       const observer = (draft.bili && draft.bili.posture) !== 'social'
+      const favOptions = [{ value: '0', label: '不收藏' }, ...folders.map((x) => ({ value: String(x.id), label: x.title + '（' + x.count + '）' }))]
+      const favRow = (path, label) => h(Row, { label, hint: folderErr || '0 = 不收藏' },
+        h(Select, { value: String(getPath(draft, path) ?? 0), options: favOptions, onChange: (v) => setDraft(setPath(draft, path, Number(v))), width: 240 }))
       return h('div', { className: 'ab-grid' },
         h(Card, { title: onlySubs ? 'B 站（只订阅）' : '刷 B 站', right: f.sw('bili.enabled'), desc: onlySubs ? '开着「只要订阅」，ta只会定时查你订阅的 UP 主动态并私聊推给你；不刷视频、不点赞不收藏、不发截图。下面填的 Cookie 订阅也会用（只读填 SESSDATA 就够）。' : '观察者模式：ta会定时去 B 站看视频（关键词留空就刷账号推荐流），读简介、字幕、热评和弹幕，判断值不值得看。只点赞和收藏，不评论、不发弹幕、不改资料；值得看的会私聊分享给你，每天还有一条日报摘要。你在 QQ 里发 B 站链接或分享卡片，ta也能点进去看完再聊。' },
           h(Row, { label: '姿态', hint: observer ? '只看只记：不评论、不发弹幕、不改资料，只保留点赞和收藏' : '社交模式：放开写闸门（评论 / 弹幕 / 改资料的工具和路由已下线，闸门留着兜底）' },
@@ -4026,9 +4046,14 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           h(Row, { label: '播放量门槛', hint: '只对搜索 / 热门生效，推荐流不过滤' }, f.num('bili.minViews', { min: 0 }), h('span', { className: 'ab-muted' }, '次以上')),
           h(Row, { label: '只看最近', hint: '只对搜索 / 热门生效，推荐流不过滤' }, f.num('bili.maxAgeDays', { min: 0 }), h('span', { className: 'ab-muted' }, '天内发的（0 = 不限）')),
         ),
-        h(Card, { title: '分享、点赞和收藏', desc: '点赞和收藏要登录，并且 Cookie 里要有 bili_jct；试运行开着时只记日志不写。' },
+        h(Card, { title: '分享、点赞和日报', desc: '点赞和收藏要登录，并且 Cookie 里要有 bili_jct；试运行开着时只记日志不写。' },
           h(Row, { label: '看到值得看的分享给你', hint: '私聊发给主人，带视频链接；只发「值得看」那一档' }, f.sw('bili.shareToOwner')),
           h(Row, { label: '顺手点赞（只给值得看）', hint: '每天最多 N 条，第 N+1 条不再发请求' }, f.sw('bili.like'), h('span', { className: 'ab-muted' }, '每天最多'), f.num('bili.maxLikesPerDay', { min: 0, max: 50 }), h('span', { className: 'ab-muted' }, '条')),
+          h(Row, { label: '每天推一条日报摘要', hint: '汇总当天值得看的，私聊发给你；当天没刷就不发' }, f.sw('bili.dailyDigest'), h('span', { className: 'ab-muted' }, '几点'), f.num('bili.dailyDigestHour', { min: 0, max: 23 }), h('span', { className: 'ab-muted' }, '点')),
+        ),
+        h(Card, { title: '收藏夹', desc: '按档位收藏到两个夹子：值得看 → 夹 A，可以看 → 夹 B。注意：B 站收藏夹默认是公开的，别人点进主页能看到。想「不参与互动」就把这两个夹设成私密——插件只能选夹子，改不了可见性。' },
+          favRow('bili.favWorthFolderId', '值得看 → 收藏夹'),
+          favRow('bili.favOkFolderId', '可以看 → 收藏夹'),
           h(Row, { label: '每天最多收藏' }, f.num('bili.maxFavsPerDay', { min: 0, max: 100 }), h('span', { className: 'ab-muted' }, '条')),
         ),
         onlySubs ? null : h(Card, { title: '看画面（抽帧 + 视觉）', desc: '默认只读标题、简介、字幕、热评和弹幕。打开后用 ffmpeg 抽帧交给视觉模型，截图保存到本机，可以在 QQ 聊天里让ta挑一张发送。没有 ffmpeg、模型明确不支持图片或处理失败时，自动继续文字阅读。' },
@@ -4043,6 +4068,28 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           h(Btn, { small: true, kind: 'ghost', onClick: loadShots }, '刷新')) },
           !shots ? h(Empty, { icon: '⏳', text: '加载中…' }) : shots.length === 0 ? h(Empty, { icon: '🎬', text: '还没有截图。打开上面的「让ta看画面」刷一轮 B 站，就会开始截。' }) :
             h('div', { className: 'ab-shots' }, shots.map((it) => h(ShotCell, { key: it.file, it, onChanged: () => { loadShots(); load() }, toast }))),
+        ),
+        onlySubs ? null : h(Card, { title: '它刷过的视频' + (seen ? '（' + seen.total + ' 条）' : ''), right: h(Seg, { value: seenTier, options: BILI_TIER_SEG, onChange: (v) => loadSeen(v, 0) }) },
+          !seen ? h(Empty, { icon: '⏳', text: '加载中…' }) : seen.items.length === 0 ? h(Empty, { icon: '📼', text: seenTier ? '这个档位还没有记录。' : '还没有记录。点上面的「现在刷一轮」试试。' }) :
+            h('div', { className: 'ab-list' }, seen.items.map((x) => h('div', { key: x.bvid, className: 'ab-li' },
+              h('div', { className: 'meta' }, BILI_TIER[x.tier] || x.tier, h('br'), x.at ? timeAgo(x.at) : ''),
+              h('div', { className: 'body' },
+                h('a', { href: 'https://www.bilibili.com/video/' + x.bvid, target: '_blank', rel: 'noreferrer' }, '《' + (x.title || x.bvid) + '》'),
+                x.up ? h('span', { className: 'ab-muted' }, '　' + x.up) : null,
+                x.status === 'liked' ? h('span', { className: 'ab-small', style: { marginLeft: 6 } }, '♥ 点赞') : null,
+                x.status === 'faved' ? h('span', { className: 'ab-small', style: { marginLeft: 6 } }, '★ 收藏') : null,
+                x.why ? h('div', { className: 'ab-muted' }, x.why) : null)))),
+          seen && seen.total > 20 ? h('div', { className: 'ab-flex', style: { marginTop: 8 } },
+            h(Btn, { small: true, kind: 'ghost', disabled: seenOffset <= 0, onClick: () => loadSeen(seenTier, Math.max(0, seenOffset - 20)) }, '上一页'),
+            h('span', { className: 'ab-small ab-muted' }, (seenOffset + 1) + '–' + Math.min(seenOffset + 20, seen.total) + ' / ' + seen.total),
+            h(Btn, { small: true, kind: 'ghost', disabled: seenOffset + 20 >= seen.total, onClick: () => loadSeen(seenTier, seenOffset + 20) }, '下一页')) : null,
+        ),
+        onlySubs ? null : h(Card, { title: '今天的日报' + (report ? '（' + (report.count || 0) + ' 条）' : ''), right: h('div', { className: 'ab-flex' },
+          h(Select, { value: report?.date || '', options: (report?.dates || []).map((d) => ({ value: d, label: d })), onChange: (d) => loadReport(d), placeholder: '今天', width: 150 }),
+          h(Btn, { small: true, kind: 'ghost', onClick: () => loadReport() }, '今天')) },
+          !report ? h(Empty, { icon: '⏳', text: '加载中…' }) : report.markdown
+            ? h('pre', { className: 'ab-code', style: { whiteSpace: 'pre-wrap', maxHeight: 360, overflow: 'auto' } }, report.markdown)
+            : h(Empty, { icon: '📄', text: '这一天还没有日报。' }),
         ),
         onlySubs ? null : h(Card, { title: 'ta刷过什么', right: h('div', { className: 'ab-flex' },
           h(Btn, { small: true, kind: 'primary', onClick: act('/bili/run', 'run'), disabled: !!busy }, busy === 'run' ? h(Fragment, null, h('i', { className: 'ab-spin' }), ' 正在刷…') : '现在刷一轮')) },

@@ -134,6 +134,16 @@ export default {
     api.route('/bili/subs/check', async () => subs.poll({ force: true }))
     api.route('/bili/account', async () => bili.account(true))
     api.route('/bili/run', async () => bili.run({ force: true }))
+    // 观察者新增：刷过的视频、当天日报、收藏夹下拉
+    api.route('/bili/seen', async (req) => {
+      const q = api.core.http.query(req) || {}
+      return bili.seenList({ tier: q.tier, offset: q.offset, limit: q.limit })
+    })
+    api.route('/bili/report', async (req) => {
+      const q = api.core.http.query(req) || {}
+      return bili.reportOf(q.date)
+    })
+    api.route('/bili/fav/folders', async () => bili.favFolders())
     // 截图库（面板里看全部、手动删）
     api.route('/bili/shots', async () => ({ ...bili.libraryShots(), limit: api.config().bili.shotLibrary }))
     api.route('/bili/shot/image', async (req, res) => {
