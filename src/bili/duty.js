@@ -230,6 +230,8 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
   async function transcribeAudio(info) {
     const c = cfg()
     if (!c.transcribe || !local || typeof local.call !== 'function' || typeof api.playurl !== 'function') return ''
+    // 先查本地 ASR 开关：没开就别抽音轨了，白下一遍音频
+    if (typeof local.active !== 'function' || !local.active('asr')) return ''
     const ffmpeg = findFfmpeg(c.ffmpegPath)
     if (!ffmpeg) return ''
     let file = ''

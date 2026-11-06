@@ -78,6 +78,31 @@ test('转写兜底：没有 ASR 服务 / 没 ffmpeg 时静默跳过，整轮照�
   assert.ok(bili.state().noSubtitle >= 1, '日报里记了因无字幕跳过')
 })
 
+test('转写兜底：本地 ASR 开关没开就不抽音轨（不碰 playurl）', async () => {
+  const calls = []
+  const cfg = normalize({ enabled: true, dryRun: false, ownerQQ: '10000001', bili: { enabled: true, keywords: [], perRun: 1, transcribe: true, ffmpegPath: process.execPath } })
+  const bili = duty.createBili({
+    getConfig: () => cfg,
+    log: { info() {}, warn() {}, debug() {} },
+    hub: { runSystemTurn: async () => JSON.stringify([{ i: 1, tier: 'ok', why: '表层信息', feeling: '嗯' }]), sendText: async () => ({}) },
+    api: {
+      nav: async () => ({ isLogin: true }),
+      recommend: async () => [{ bvid: 'BV1hhhhhhhhh', aid: 1, title: '没字幕', author: 'UP', play: 1, pubdate: Date.now() }],
+      view: async ({ bvid }) => ({ bvid, aid: 1, cid: 9, title: '没字幕', author: 'UP', play: 1, desc: '' }),
+      subtitle: async () => '',
+      comments: async () => [],
+      danmakuText: async () => [],
+      playurl: async () => { calls.push('playurl'); return { audio: [{ baseUrl: 'https://video.example/a.m4s' }] } },
+    },
+    // ffmpeg 在（process.execPath 存在），transcribe 也开着，只差本地 ASR 开关
+    local: { active: () => false, call: async () => { calls.push('asr'); return '' } },
+  })
+  const r = await bili.run({ force: true })
+  assert.equal(r.ok, true, r.message)
+  assert.deepEqual(calls, [], 'ASR 没开就不该抽音轨，也不该调识别服务')
+  assert.ok(bili.state().noSubtitle >= 1, '照样按无字幕记一笔')
+})
+
 test('刷一轮：有字幕的 worth 会分享给主人', async () => {
   const cfg = normalize({ enabled: true, dryRun: false, ownerQQ: '10000001', bili: { enabled: true, keywords: [], perRun: 1 } })
   const sent = []
