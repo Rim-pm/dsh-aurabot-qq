@@ -1,15 +1,16 @@
-// 刷 B 站：定时挑她和你感兴趣的方向去搜视频，读简介、字幕、热评，再按她的人格决定评不评论、分不分享给你、记住什么；
-// 定时看别人回她的评论并接着回；你在 QQ 里发链接，她也能点进去看完再聊。看过的、评过的都记成她的经历。
+// 刷 B 站（观察者）：定时挑她和你感兴趣的方向看视频，读简介、字幕、热评、弹幕，再按她的人格判断值不值得看；
+// 只点赞和收藏，不评论、不发弹幕、不改资料。你在 QQ 里发链接，她也能点进去看完再聊。
+// 看过的都记成她的经历，每天写一份日报，晚上推一条摘要给主人。
 
 import { dataDir, readJson, writeJson } from '../core/store.js'
 import { createBiliApi, findVideoId, parseCookie } from './api.js'
 import { loginSessionKey, recoverLoginPause } from './login-pause.js'
 import { lookWithVision, visionState } from './vision.js'
 import { createShotStore, shotPath, clockOf } from './shots.js'
-
-// 这些错误说明今天别再发了：没登录 / Cookie 过期、csrf 不对、风控、要验证码、太频繁
-const PAUSE_CODES = { '-101': 'B 站没登录或 Cookie 过期了', '-111': 'Cookie 里的 bili_jct 不对', '-352': '被 B 站风控了', '-509': '发得太频繁', '12015': 'B 站要求验证码' }
 import { isSilence, cleanOutboundText } from '../chat/reply.js'
+
+// 这些错误说明今天先别写了：没登录 / Cookie 过期、csrf 不对、风控、要验证码、太频繁
+const PAUSE_CODES = { '-101': 'B 站没登录或 Cookie 过期了', '-111': 'Cookie 里的 bili_jct 不对', '-352': '被 B 站风控了', '-509': '写得太频繁', '12015': 'B 站要求验证码' }
 
 const dayKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 const link = (bvid) => `https://www.bilibili.com/video/${bvid}`
@@ -22,12 +23,12 @@ export function pickJson(out, fallback) {
   try { return JSON.parse(m[0]) } catch (error) { return fallback }
 }
 
-/** 搜到的视频按门槛过滤：播放量够、不太老、没看过。 */
+/** 搜到的视频按门槛过滤：播放量够、不太老、没看过。推荐流不走这个（老新混合本来就是推荐的样子）。 */
 export function filterVideos(list, { minViews = 0, maxAgeDays = 0, seen = new Set(), now = Date.now() } = {}) {
   return (list || []).filter((v) => v.bvid && !seen.has(v.bvid) && (v.play || 0) >= minViews && (!maxAgeDays || !v.pubdate || now - v.pubdate <= maxAgeDays * 86400_000))
 }
 
-/** 一个视频交给她看的样子（标题、UP 主、简介、字幕节选、画面描述、热评）。 */
+/** 一个视频交给她看的样子（标题、UP 主、简介、字幕节选、弹幕节选、画面描述、热评）。 */
 export function digestOf(v, { subtitle = '', comments = [], vision = '' } = {}) {
   return [
     `《${v.title}》 UP主：${v.author || '?'}  播放 ${v.play || 0}${v.tname ? '  分区：' + v.tname : ''}  ${v.bvid}`,
@@ -40,27 +41,29 @@ export function digestOf(v, { subtitle = '', comments = [], vision = '' } = {}) 
   ].filter(Boolean).join('\n')
 }
 
-export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vision: see = lookWithVision, afterBrowse }) {
+export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vision: see = lookWithVision }) {
   const cfg = () => getConfig().bili
-  const api = injected || createBiliApi({ getCookie: () => cfg().cookie, log })
+  // 写闸门：observer 下只有点赞和收藏放行；social 全放行（工具和路由已经删掉，这里是兜底）
+  const allowWrite = (kind) => cfg().posture === 'social' || kind === 'like' || kind === 'fav'
+  const api = injected || createBiliApi({ getCookie: () => cfg().cookie, log, allowWrite })
   const shots = createShotStore({ max: () => getConfig().bili.shotLibrary })
   const file = () => dataDir('bili.json')
-  const load = () => readJson(file(), () => ({ day: '', runs: 0, comments: 0, replies: 0, lastRun: 0, lastReplyCheck: 0, seen: [], repliedFeed: [], history: [] }))
+  const load = () => readJson(file(), () => ({ day: '', runs: 0, comments: 0, replies: 0, likes: 0, favs: 0, lastRun: 0, seen: [], history: [] }))
   const save = (s) => writeJson(file(), s)
-  const today = (s) => { if (s.day !== dayKey()) Object.assign(s, { day: dayKey(), runs: 0, comments: 0, replies: 0 }) ; return s }
+  const today = (s) => { if (s.day !== dayKey()) Object.assign(s, { day: dayKey(), runs: 0, comments: 0, replies: 0, likes: 0, favs: 0 }) ; return s }
   let busy = false
   let stopped = false
   let login = { at: 0, key: '', value: { isLogin: false, uname: '' } }
 
   const owner = () => getConfig().ownerName || '主人'
-  // 能不能发评论 / 回复：Cookie 里要有 bili_jct，今天也没因为风控之类暂停
+  // 登录态能写吗：Cookie 里要有 bili_jct，今天也没因为风控之类暂停（点赞和收藏同样会撞 -101）
   const canPost = (s) => Boolean(parseCookie(cfg().cookie).bili_jct) && s.pauseDay !== dayKey()
   const pauseIf = (s, error) => {
     const why = PAUSE_CODES[String(error.code)]
     if (!why) return
     s.pauseDay = dayKey()
     s.pauseReason = why
-    log.warn(`今天先不在 B 站发评论了：${why}`)
+    log.warn(`今天先不在 B 站点赞 / 收藏了：${why}`)
   }
   const record = (s, item) => { s.history.unshift({ at: Date.now(), ...item }); s.history = s.history.slice(0, 40) }
 
@@ -74,7 +77,7 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
       const s = load()
       if (recoverLoginPause(s, { isLogin: value.isLogin, sessionKey: key, day: dayKey() })) {
         save(s)
-        log.info('B 站登录核验通过，已解除登录失效导致的评论暂停')
+        log.info('B 站登录核验通过，已解除登录失效导致的写入暂停')
       }
     } catch (error) {
       login = { at: Date.now(), key, value: { isLogin: false, uname: '', error: error.message } }
@@ -185,12 +188,6 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
     return r
   }
 
-  /** 她写 @主人 时换成主人的 B 站昵称，名字后面要有空格才算结束。 */
-  const atOwner = (text) => {
-    const name = String(cfg().ownerName || '').trim()
-    return name ? String(text).replace(/[@＠]主人\s*/g, `@${name} `) : String(text)
-  }
-
   /** 刷一轮。force = 面板里手动点的（不占每天的次数）。 */
   async function run({ force = false } = {}) {
     const c = cfg()
@@ -222,12 +219,10 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
       }
       s.seen = [...seen].slice(-500)
       if (!looked.length) return { ok: false, message: '视频都打不开' }
-      const commentLeft = c.comment && canPost(s) ? Math.max(0, c.maxCommentsPerDay - s.comments) : 0
       const out = await think(`你在 B 站刷到了这几个视频：\n\n${looked.map((x, i) => `【${i + 1}】${x.digest}`).join('\n\n')}\n\n` +
-        `看完说说你的想法。对每个视频给一个对象：{"i":序号, "feeling":"一句你的真实感受", "comment":"想在视频下发的评论（像普通观众，一两句、别打广告，不想评就空字符串）", "share":"想私聊分享给${owner()}的话（觉得${owner()}会喜欢才写，不然空字符串）", "remember":"值得记住的一件事（没有就空字符串）"}。` +
-        `这次最多评论 ${commentLeft} 个。只输出 JSON 数组。`)
+        `看完说说你的想法。对每个视频给一个对象：{"i":序号, "feeling":"一句你的真实感受", "share":"想私聊分享给${owner()}的话（觉得${owner()}会喜欢才写，不然空字符串）", "remember":"值得记住的一件事（没有就空字符串）"}。` +
+        `只输出 JSON 数组。`)
       const decisions = pickJson(out, [])
-      let commented = 0
       let shared = 0
       const felt = new Map() // bvid → 她自己的一句感受，发截图时配着用
       for (const d of Array.isArray(decisions) ? decisions : []) {
@@ -238,22 +233,6 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
         const remember = cleanOutboundText(d.remember, { warn: (message) => log.warn(`B 站见闻：${message}`) }).trim()
         if (feeling) felt.set(v.bvid, feeling)
         memory?.addEvent?.({ kind: 'seen', meta: { title: v.title, author: v.author, url: link(v.bvid), platform: 'bili', id: v.bvid }, text: [feeling, !isSilence(remember) ? remember : ''].filter(Boolean).join('；') || v.title, tags: ['B站'], importance: 0.4 })
-        const comment = cleanOutboundText(atOwner(d.comment || ''), { warn: (message) => log.warn(`B 站评论：${message}`) }).trim().slice(0, 200)
-        if (comment && !isSilence(comment) && commented < commentLeft && canPost(s)) {
-          try {
-            if (getConfig().dryRun) log.info(`试运行：本来要在 B 站《${v.title}》下评论：${comment}`)
-            else await api.postComment(v.aid, comment)
-            commented++
-            s.comments++
-            memory?.addEvent?.({ text: `在B站《${v.title}》下评论：${comment.slice(0, 60)}`, tags: ['B站'], importance: 0.4 })
-            record(s, { kind: 'comment', title: v.title, bvid: v.bvid, text: comment })
-          } catch (error) {
-            log.warn('B 站评论失败：', error.message)
-            pauseIf(s, error)
-            record(s, { kind: 'error', title: v.title, bvid: v.bvid, text: '评论没发出去：' + error.message })
-          }
-        }
-        if (c.like && !getConfig().dryRun) api.likeVideo(v.aid).catch(() => {})
         const share = cleanOutboundText(d.share, { warn: (message) => log.warn(`B 站分享：${message}`) }).trim()
         if (share && !isSilence(share) && c.shareToOwner && getConfig().ownerQQ) {
           await hub.sendText(`private:${getConfig().ownerQQ}`, `${share}\n${link(v.bvid)}`)
@@ -286,63 +265,14 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
       }
       if (!force) s.runs++
       s.lastRun = Date.now()
-      if (afterBrowse) {
-        try { await afterBrowse(looked.map(({ info }) => ({ bvid: info.bvid, title: info.title, text: felt.get(info.bvid) || '' }))) }
-        catch (error) { log.debug('本轮弹幕未完成：', error.message) }
-      }
-      log.info(`刷了一轮 B 站：看了 ${looked.length} 个，评论 ${commented} 条，分享 ${shared} 个，截图 ${shotSent} 张`)
-      return { ok: true, message: `看了 ${looked.length} 个视频，评论 ${commented} 条，分享给你 ${shared} 个${shotSent ? '，还发了张截图' : ''}`, watched: looked.length, commented, shared, shots: shotSent }
+      log.info(`刷了一轮 B 站：看了 ${looked.length} 个，分享 ${shared} 个，截图 ${shotSent} 张`)
+      return { ok: true, message: `看了 ${looked.length} 个视频，分享给你 ${shared} 个${shotSent ? '，还发了张截图' : ''}`, watched: looked.length, shared, shots: shotSent }
     } catch (error) {
       log.warn('刷 B 站出错：', error.message)
       return { ok: false, message: error.message }
     } finally {
       save(s)
       busy = false
-    }
-  }
-
-  /** 看别人回她的评论，接着回。 */
-  async function checkReplies() {
-    const c = cfg()
-    if (c.subsOnly) return { ok: false, message: '开着「只要订阅」，不回评论' }
-    if (!c.reply) return { ok: false, message: '回复没打开' }
-    const s = today(load())
-    s.lastReplyCheck = Date.now()
-    let n = 0
-    try {
-      const done = new Set(s.repliedFeed)
-      const fresh = (await api.replyFeed()).filter((x) => !done.has(x.id) && Number(x.type || 1) === 1 && x.oid).slice(0, 5)
-      for (const item of fresh) {
-        const x = {
-          ...item,
-          title: cleanOutboundText(item.title, { warn: (message) => log.warn(`B 站标题：${message}`) }).trim(),
-          name: cleanOutboundText(item.name, { warn: (message) => log.warn(`B 站昵称：${message}`) }).trim(),
-        }
-        done.add(x.id)
-        // 记下来：整理记忆时能知道 B 站上谁跟她聊过什么
-        hub.logChat?.('bili', x.name, `在 B 站《${x.title}》下回复你：${x.text}`, '')
-        if (s.replies >= c.maxRepliesPerDay || !canPost(s)) continue
-        const out = await think(`你在 B 站视频《${x.title}》下发过评论：「${x.myText}」\n${x.name} 回复你：「${x.text}」\n想回就用你的口气回一句（像普通网友聊天，别太长），不想回就只输出 [沉默]。只输出回复正文。`)
-        const reply = cleanOutboundText(out, { warn: (message) => log.warn(`B 站回复：${message}`) }).trim().split(/\n+/)[0]
-        if (!reply || isSilence(reply)) continue
-        try {
-          if (getConfig().dryRun) log.info(`试运行：本来要在 B 站回复 ${x.name}：${reply}`)
-          else await api.postComment(x.oid, `回复 @${x.name} :${reply}`.slice(0, 200), { root: x.root, parent: x.parent })
-          s.replies++
-          n++
-          memory?.addEvent?.({ text: `在B站回复了 ${x.name}：${reply.slice(0, 50)}`, tags: ['B站'], importance: 0.35 })
-          record(s, { kind: 'reply', title: x.title, text: `${x.name}：${x.text} → ${reply}` })
-        } catch (error) {
-          log.warn('B 站回复失败：', error.message)
-          pauseIf(s, error)
-        }
-      }
-      s.repliedFeed = [...done].slice(-300)
-      return { ok: true, message: `回了 ${n} 条`, replied: n }
-    } catch (error) {
-      return { ok: false, message: error.message }
-    } finally {
-      save(s)
     }
   }
 
@@ -360,65 +290,30 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
     return { ok: true, message: x.digest, bvid: x.info.bvid, aid: x.info.aid, title: x.info.title }
   }
 
-  /** 在某个视频下发评论（主人让她发的）。 */
-  async function comment(text, rawMessage) {
-    const message = cleanOutboundText(atOwner(rawMessage || ''), { warn: (message) => log.warn(`B 站评论：${message}`) }).slice(0, 200)
-    if (!message.trim()) return { ok: true, silent: true, message: '本轮保持沉默，未发送评论' }
-    const w = await watch(text)
-    if (!w.ok) return w
-    if (getConfig().dryRun) return { ok: true, message: `试运行：本来要在《${w.title}》下评论：${message}` }
-    const r = await api.postComment(w.aid, message)
-    memory?.addEvent?.({ text: `在B站《${w.title}》下评论：${String(message).slice(0, 60)}`, tags: ['B站'], importance: 0.45 })
-    const s = load(); record(s, { kind: 'comment', title: w.title, bvid: w.bvid, text: message }); save(s)
-    return { ok: true, message: `评论发出去了（《${w.title}》）${r?.missed?.length ? `；没找到 ${r.missed.join('、')}，这几个没 @ 上` : ''}` }
-  }
-
-  /** 改自己的 B 站签名（权限在模块里查）。 */
-  async function setSign(text) {
-    const sign = cleanOutboundText(text, { warn: (message) => log.warn(`B 站签名：${message}`) }).trim()
-    if (!sign) return { ok: false, message: '签名不能是空的' }
-    if ([...sign].length > 70) return { ok: false, message: 'B 站签名最多 70 个字' }
-    if (getConfig().dryRun) return { ok: true, message: `试运行：本来要把 B 站签名改成：${sign}` }
-    if (!parseCookie(cfg().cookie).bili_jct) return { ok: false, message: '没登录 B 站，改不了签名' }
-    await api.setSign(sign)
-    memory?.addEvent?.({ text: `把B站签名改成了：${sign.slice(0, 70)}`, tags: ['B站'], importance: 0.35 })
-    return { ok: true, message: `B 站签名改好了：${sign}` }
-  }
-
-  /** 换 B 站头像。file 是已经过 avatarSource 校验的 http(s) 网址。 */
-  async function setAvatar(file) {
-    if (!/^https?:\/\//i.test(String(file || ''))) return { ok: false, message: '头像只能用网址图片，或者刚才发的那张图' }
-    if (getConfig().dryRun) return { ok: true, message: `试运行：本来要把 B 站头像换成：${file}` }
-    if (!parseCookie(cfg().cookie).bili_jct) return { ok: false, message: '没登录 B 站，换不了头像' }
-    try {
-      await api.setFace(file)
-    } catch (error) {
-      return { ok: false, message: `B 站头像没换成：${error.message}` }
-    }
-    memory?.addEvent?.({ text: '换了B站头像', tags: ['B站'], importance: 0.35 })
-    return { ok: true, message: 'B 站头像换好了（B 站可能要审核一会儿才显示）' }
-  }
-
-  /** 每分钟调一次：醒着的时候按间隔刷、看回复。 */
+  /** 每分钟调一次：醒着的时候按间隔刷。 */
   async function tick() {
     const g = getConfig()
     const c = g.bili
     if (!g.enabled || !c.enabled) return
-    if (c.subsOnly) return // 只要订阅：刷视频和回评论整条线都不跑
+    if (c.subsOnly) return // 只要订阅：刷视频整条线都不跑
     const h = new Date().getHours()
     if (h < g.speakUp.awakeFrom || h >= g.speakUp.awakeTo) return
     const s = today(load())
-    if (c.reply && Date.now() - (s.lastReplyCheck || 0) > 20 * 60_000 && (await account()).isLogin) await checkReplies()
     if (c.autoBrowse && s.runs < c.maxRunsPerDay && Date.now() - (s.lastRun || 0) > c.intervalHours * 3600_000) await run()
   }
 
   return {
-    run, checkReplies, watch, comment, setSign, setAvatar, tick, account, sendShot, listShots,
+    run, watch, tick, account, sendShot, listShots,
     libraryShots, shotFileOf, deleteShot,
     dispose() { stopped = true },
     state: () => {
       const s = today(load())
-      return { runs: s.runs, comments: s.comments, replies: s.replies, lastRun: s.lastRun, history: s.history.slice(0, 20), canPost: canPost(s), pauseReason: s.pauseDay === dayKey() ? s.pauseReason : '', vision: visionState(cfg()), shots: { count: shots.count() } }
+      return {
+        runs: s.runs, likes: s.likes || 0, favs: s.favs || 0, comments: s.comments, replies: s.replies,
+        lastRun: s.lastRun, history: s.history.slice(0, 20), canPost: canPost(s),
+        pauseReason: s.pauseDay === dayKey() ? s.pauseReason : '', posture: cfg().posture,
+        vision: visionState(cfg()), shots: { count: shots.count() },
+      }
     },
   }
 }

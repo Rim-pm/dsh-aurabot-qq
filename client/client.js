@@ -1420,13 +1420,10 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       ]
       const row = (key, label, hint) => h(Row, { label, hint },
         h(Choices, { value: perms[key] || 'owner', onChange: (v) => setDraft(setPath(draft, 'profilePerms.' + key, v)), options: opts }))
-      return h(Card, { title: '改资料与名单', desc: 'ta能不能听人的话改自己的 QQ 昵称、签名、头像和 B 站签名，处理好友申请和改白名单；装了抖音、小黑盒模块后，它们的操作权限也在这里。改 QQ 资料要 SnowLuma 支持。各项默认仅主人。' },
+      return h(Card, { title: '改资料与名单', desc: 'ta能不能听人的话改自己的 QQ 昵称、签名、头像，处理好友申请和改白名单；装了抖音、小黑盒模块后，它们的操作权限也在这里。改 QQ 资料要 SnowLuma 支持。各项默认仅主人。B 站只读不写，没有可授权的项。' },
         row('qqNickname', 'QQ 昵称'),
         row('qqSignature', 'QQ 个性签名'),
         row('qqAvatar', 'QQ 头像', '只用网址图片，或「刚才发的那张图」。'),
-        row('biliSign', 'B 站签名', '要先在 B 站页登录并打开 B 站。'),
-        row('biliAvatar', 'B 站头像', '要先在 B 站页登录并打开 B 站。图片网址或刚才发的图，最大 2MB。'),
-        row('biliComment', 'B 站评论', '有人让ta去某个视频下发评论（bili_comment）。「仅主人」也包括你在群里开口。ta自己刷视频时发不发评论，看 B 站页的开关。'),
         row('qqFriendRequest', '处理好友申请', '让ta通过 / 拒绝别人加ta为好友的申请。ta自己主动加别人暂不支持（SnowLuma 没有这个接口）。'),
         row('whitelist', '改白名单', '让ta把 QQ 号 / 群号加进或移出下面的白名单。主人不会被移出。开成「所有人」前请想清楚。'),
         douyinOn && row('douyinBrowse', '刷抖音 / 看视频', '让ta去刷推荐（douyin_browse）、点开别人发来的抖音链接（douyin_watch）。定时自己刷不受这项限制。'),
@@ -3983,9 +3980,9 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         m.panel ? h(ExtPanel, { m, settings, draftSettings, setSettings, toast, reload }) : null)
     }
 
-    const BILI_KIND = { watch: '看了', comment: '评论', reply: '回复', share: '分享给你', shot: '发你截图', error: '没成功' }
+    const BILI_KIND = { watch: '看了', share: '分享给你', shot: '发你截图', like: '点赞', fav: '收藏', error: '没成功' }
 
-    /** B 站：登录、定时刷、评论 / 回复、分享给主人，以及她刷过什么。 */
+    /** B 站（观察者）：登录、定时刷、点赞 / 收藏、分享给主人，以及她刷过什么。 */
     function Bili({ draft, setDraft, toast }) {
       const f = useField(draft, setDraft)
       const [s, setS] = useState(null)
@@ -3998,13 +3995,26 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const acct = s && s.account
       // 「只要订阅」：别的 B 站卡片直接不渲染，面板跟实际行为保持一致
       const onlySubs = !!(draft.bili && draft.bili.subsOnly)
+      const observer = (draft.bili && draft.bili.posture) !== 'social'
       return h('div', { className: 'ab-grid' },
-        h(Card, { title: onlySubs ? 'B 站（只订阅）' : '刷 B 站', right: f.sw('bili.enabled'), desc: onlySubs ? '开着「只要订阅」，ta只会定时查你订阅的 UP 主动态并私聊推给你；不刷视频、不评论、不回评论、不发截图、不改 B 站资料。下面填的 Cookie 订阅也会用（只读填 SESSDATA 就够）。' : 'ta会定时去 B 站刷几个视频：从ta的兴趣、记忆里你喜欢的东西和下面的关键词里挑方向去搜，读简介、字幕和热评，再按自己的性格决定评不评论、要不要私聊分享给你、记住什么。看过的、评过的都记成ta的经历，聊天时会自然提起。你在 QQ 里发 B 站链接或分享卡片，ta也能点进去看完再聊。' },
-          h(Row, { label: '只要订阅，别的 B 站功能都关掉', hint: '不刷视频、不评论、不回评论、不发截图、不改头像签名；聊天里也不再给ta看视频的工具' }, f.sw('bili.subsOnly')),
+        h(Card, { title: onlySubs ? 'B 站（只订阅）' : '刷 B 站', right: f.sw('bili.enabled'), desc: onlySubs ? '开着「只要订阅」，ta只会定时查你订阅的 UP 主动态并私聊推给你；不刷视频、不点赞不收藏、不发截图。下面填的 Cookie 订阅也会用（只读填 SESSDATA 就够）。' : '观察者模式：ta会定时去 B 站看视频（关键词留空就刷账号推荐流），读简介、字幕、热评和弹幕，判断值不值得看。只点赞和收藏，不评论、不发弹幕、不改资料；值得看的会私聊分享给你，每天还有一条日报摘要。你在 QQ 里发 B 站链接或分享卡片，ta也能点进去看完再聊。' },
+          h(Row, { label: '姿态', hint: observer ? '只看只记：不评论、不发弹幕、不改资料，只保留点赞和收藏' : '社交模式：放开写闸门（评论 / 弹幕 / 改资料的工具和路由已下线，闸门留着兜底）' },
+            h(Choices, {
+              value: observer ? 'observer' : 'social',
+              options: [
+                { value: 'observer', label: '观察者', desc: '只看只记（默认）' },
+                { value: 'social', label: '社交', desc: '放开写闸门' },
+              ],
+              onChange: (v) => {
+                if (v === 'social' && !confirm('切到社交模式？\n\n写闸门会放开（评论 / 改资料接口不再拒绝），但评论、弹幕、改资料的工具和面板入口已经删掉，实际不会有公开互动。')) return
+                setDraft(setPath(draft, 'bili.posture', v))
+              },
+            })),
+          h(Row, { label: '只要订阅，别的 B 站功能都关掉', hint: '不刷视频、不点赞不收藏、不发截图；聊天里也不再给ta看视频的工具' }, f.sw('bili.subsOnly')),
           h(BiliCookie, { draft, setDraft }),
           h('div', { className: 'ab-flex', style: { marginTop: 4 } },
             h(Btn, { small: true, onClick: async () => { await get('/bili/account'); load() } }, '检查登录'),
-            acct ? h('span', { className: 'ab-small', style: { color: acct.isLogin ? 'var(--ab-ok)' : 'var(--ab-warn)' } }, acct.isLogin ? '已登录：' + acct.uname : '没登录（只能看，不能评论）') : null),
+            acct ? h('span', { className: 'ab-small', style: { color: acct.isLogin ? 'var(--ab-ok)' : 'var(--ab-warn)' } }, acct.isLogin ? '已登录：' + acct.uname : '没登录（只能看，不能点赞收藏）') : null),
         ),
         h(BiliSubs, { draft, setDraft, toast }),
         onlySubs ? null : h(Card, { title: '怎么刷', desc: '只在「主动搭话」里设的醒着时间内刷。' },
@@ -4012,18 +4022,16 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           h(Row, { label: '多久刷一轮' }, f.range('bili.intervalHours', 1, 24, 1, (v) => v + ' 小时')),
           h(Row, { label: '每天最多刷' }, f.range('bili.maxRunsPerDay', 0, 12, 1, (v) => v + ' 轮')),
           h(Row, { label: '一轮看几个视频' }, f.range('bili.perRun', 1, 6, 1, (v) => v + ' 个')),
-          h(Row, { label: '额外想看的方向', hint: '一行一个；另外还会参考ta的兴趣和记忆' }, f.list('bili.keywords', { placeholder: '白米饭 做法\n猫咪\n游戏解说' })),
-          h(Row, { label: '播放量门槛' }, f.num('bili.minViews', { min: 0 }), h('span', { className: 'ab-muted' }, '次以上')),
-          h(Row, { label: '只看最近' }, f.num('bili.maxAgeDays', { min: 0 }), h('span', { className: 'ab-muted' }, '天内发的（0 = 不限）')),
+          h(Row, { label: '额外想看的方向', hint: '留空 = 刷账号推荐流；填了才按关键词搜（一行一个，另外还会参考ta的兴趣和记忆）' }, f.list('bili.keywords', { placeholder: '白米饭 做法\n猫咪\n游戏解说' })),
+          h(Row, { label: '播放量门槛', hint: '只对搜索 / 热门生效，推荐流不过滤' }, f.num('bili.minViews', { min: 0 }), h('span', { className: 'ab-muted' }, '次以上')),
+          h(Row, { label: '只看最近', hint: '只对搜索 / 热门生效，推荐流不过滤' }, f.num('bili.maxAgeDays', { min: 0 }), h('span', { className: 'ab-muted' }, '天内发的（0 = 不限）')),
         ),
-        h(Card, { title: '评论、回复和分享', desc: '评论和回复要登录。试运行开着时只记日志不发。' },
-          h(Row, { label: '主人的 B 站昵称', hint: '填完整昵称。ta评论里写 @主人 时会 @ 这个号' }, f.text('bili.ownerName', { placeholder: '不填就 @ 不到你' })),
-          h(Row, { label: '自己发评论', hint: '只管ta自己刷视频时发不发；别人让ta发，看「权限」页的 B 站评论' }, f.sw('bili.comment'), h('span', { className: 'ab-muted' }, '每天最多'), f.num('bili.maxCommentsPerDay', { min: 0, max: 50 }), h('span', { className: 'ab-muted' }, '条')),
-          h(Row, { label: '回别人回ta的评论' }, f.sw('bili.reply'), h('span', { className: 'ab-muted' }, '每天最多'), f.num('bili.maxRepliesPerDay', { min: 0, max: 100 }), h('span', { className: 'ab-muted' }, '条')),
-          h(Row, { label: '看到好玩的分享给你', hint: '私聊发给主人，带视频链接' }, f.sw('bili.shareToOwner')),
-          h(Row, { label: '顺手点赞' }, f.sw('bili.like')),
+        h(Card, { title: '分享、点赞和收藏', desc: '点赞和收藏要登录，并且 Cookie 里要有 bili_jct；试运行开着时只记日志不写。' },
+          h(Row, { label: '看到值得看的分享给你', hint: '私聊发给主人，带视频链接；只发「值得看」那一档' }, f.sw('bili.shareToOwner')),
+          h(Row, { label: '顺手点赞（只给值得看）', hint: '每天最多 N 条，第 N+1 条不再发请求' }, f.sw('bili.like'), h('span', { className: 'ab-muted' }, '每天最多'), f.num('bili.maxLikesPerDay', { min: 0, max: 50 }), h('span', { className: 'ab-muted' }, '条')),
+          h(Row, { label: '每天最多收藏' }, f.num('bili.maxFavsPerDay', { min: 0, max: 100 }), h('span', { className: 'ab-muted' }, '条')),
         ),
-        onlySubs ? null : h(Card, { title: '看画面（抽帧 + 视觉）', desc: '默认只读标题、简介、字幕和热评。打开后用 ffmpeg 抽帧交给视觉模型，截图保存到本机，可以在 QQ 聊天里让ta挑一张发送。没有 ffmpeg、模型明确不支持图片或处理失败时，自动继续文字阅读。' },
+        onlySubs ? null : h(Card, { title: '看画面（抽帧 + 视觉）', desc: '默认只读标题、简介、字幕、热评和弹幕。打开后用 ffmpeg 抽帧交给视觉模型，截图保存到本机，可以在 QQ 聊天里让ta挑一张发送。没有 ffmpeg、模型明确不支持图片或处理失败时，自动继续文字阅读。' },
           h(Row, { label: '让ta看画面', hint: '需要视觉模型 + ffmpeg；关掉就退回只看文字' }, f.sw('bili.vision')),
           h(Row, { label: '每个视频抽几帧' }, f.range('bili.visionFrames', 2, 12, 1, (v) => v + ' 帧')),
           h(Row, { label: '刷完顺手发张截图', hint: '概率；跟发一张表情包一样默认 35%，0 = 从不。截图都存在本机，你让ta发ta也能挑' }, f.range('bili.shotChance', 0, 1, 0.05, (v) => Math.round(v * 100) + '%')),
@@ -4037,67 +4045,14 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             h('div', { className: 'ab-shots' }, shots.map((it) => h(ShotCell, { key: it.file, it, onChanged: () => { loadShots(); load() }, toast }))),
         ),
         onlySubs ? null : h(Card, { title: 'ta刷过什么', right: h('div', { className: 'ab-flex' },
-          h(Btn, { small: true, onClick: act('/bili/replies', 'replies'), disabled: !!busy }, busy === 'replies' ? '正在看…' : '看看有没有人回ta'),
           h(Btn, { small: true, kind: 'primary', onClick: act('/bili/run', 'run'), disabled: !!busy }, busy === 'run' ? h(Fragment, null, h('i', { className: 'ab-spin' }), ' 正在刷…') : '现在刷一轮')) },
-          s && s.pauseReason ? h('div', { className: 'ab-note warn', style: { marginBottom: 8 } }, '今天先不发评论和回复了：' + s.pauseReason + '。登录失效请保存新 Cookie 后点「检查登录」；验证、风控或频率限制不会因登录成功而解除。') : null,
-          s ? h('div', { className: 'ab-muted ab-small', style: { marginBottom: 8 } }, '今天自动刷了 ' + s.runs + ' 轮 · 评论 ' + s.comments + ' 条 · 回复 ' + s.replies + ' 条' + (s.lastRun ? ' · 上次 ' + timeAgo(s.lastRun) : '') + '（手动刷不占次数）') : null,
+          s && s.pauseReason ? h('div', { className: 'ab-note warn', style: { marginBottom: 8 } }, '今天先不点赞和收藏了：' + s.pauseReason + '。登录失效请保存新 Cookie 后点「检查登录」；验证、风控或频率限制不会因登录成功而解除。') : null,
+          s ? h('div', { className: 'ab-muted ab-small', style: { marginBottom: 8 } }, '今天自动刷了 ' + s.runs + ' 轮 · 点赞 ' + (s.likes || 0) + ' 条 · 收藏 ' + (s.favs || 0) + ' 条' + (s.lastRun ? ' · 上次 ' + timeAgo(s.lastRun) : '') + '（手动刷不占次数）') : null,
           !s ? h(Empty, { icon: '⏳', text: '加载中…' }) : s.history.length === 0 ? h(Empty, { icon: '📺', text: '还没刷过。点「现在刷一轮」试试。' }) :
             h('div', { className: 'ab-list' }, s.history.map((x, i) => h('div', { key: i, className: 'ab-li' },
               h('div', { className: 'meta' }, timeAgo(x.at), h('br'), BILI_KIND[x.kind] || x.kind),
               h('div', { className: 'body' }, x.bvid ? h('a', { href: 'https://www.bilibili.com/video/' + x.bvid, target: '_blank', rel: 'noreferrer' }, '《' + x.title + '》') : h('b', null, '《' + x.title + '》'), x.text ? h('div', { className: 'ab-muted' }, x.text) : null)))),
         ),
-        h(BiliDanmaku, { draft, setDraft, toast }),
-      )
-    }
-
-    /** 弹幕直接嵌在内置 B 站页，不依赖额外扩展面板。 */
-    function BiliDanmaku({ draft, setDraft, toast }) {
-      const f = useField(draft, setDraft)
-      const [video, setVideo] = useState('')
-      const [part, setPart] = useState(1)
-      const [seconds, setSeconds] = useState('')
-      const [text, setText] = useState('')
-      const [position, setPosition] = useState('scroll')
-      const [info, setInfo] = useState(null)
-      const [status, setStatus] = useState(null)
-      const [busy, setBusy] = useState(false)
-      const load = () => get('/bili/danmaku/state').then(setStatus)
-      useEffect(() => { load() }, [])
-      useEffect(() => { setInfo(null) }, [video, part])
-      const action = async (kind) => {
-        setBusy(true)
-        try {
-          const response = await fetch(API + '/bili/danmaku/' + kind, {
-            method: 'POST', headers: { 'content-type': 'application/json', 'x-aurabot-bili-danmaku': '1' },
-            body: JSON.stringify({ video, part, seconds, text, position }),
-          })
-          const result = await response.json()
-          if (result.info) setInfo(result.info)
-          toast(result.message || (result.ok ? '视频信息已读取' : '读取未完成'), result.ok ? 'ok' : 'err')
-          await load()
-        } catch { toast('弹幕接口暂时无法连接，请先到 B 站确认是否发送，避免重复提交', 'err') }
-        finally { setBusy(false) }
-      }
-      return h(Card, { title: '视频弹幕', desc: '两个开关默认关闭，改完先保存设置。发送按钮会实际提交弹幕；试运行时不发送。沿用本页的 B 站登录。' },
-        h(Row, { label: '允许发送弹幕', hint: '关闭后手动、聊天工具和自动弹幕均不发送；聊天工具只接受主人私聊请求' }, f.sw('bili.danmakuEnabled')),
-        h(Row, { label: '刷完视频自己发弹幕', hint: '另行开启；每个视频每天最多一条自动弹幕' }, f.sw('bili.autoDanmaku')),
-        h(Row, { label: '每天最多提交弹幕', hint: '手动和自动共用次数上限，提交失败也计数' }, f.num('bili.maxDanmakuPerDay', { min: 1, max: 20 })),
-        h(Row, { label: '视频或番剧链接', hint: '支持 BV/av、ep单集、ss整季链接；短链接请先展开' }, h('input', { className: 'ab-input', value: video, placeholder: '视频链接、番剧链接或编号', onChange: (e) => setVideo(e.target.value) })),
-        h(Row, { label: '分P / 选集序号', hint: '普通视频填1；多段投稿选分P，ss整季链接选第几集；ep链接直接定位那一集' }, h('input', { className: 'ab-input sm', type: 'number', min: 1, value: part, onChange: (e) => setPart(e.target.value) })),
-        h(Row, { label: '出现时间（秒）', hint: '例如83表示01:23；按当前分P或单集计算' }, h('input', { className: 'ab-input sm', type: 'number', min: 0, step: 0.1, value: seconds, onChange: (e) => setSeconds(e.target.value) })),
-        h(Row, { label: '弹幕文字', hint: '一行，最多100字' }, h('input', { className: 'ab-input', value: text, onChange: (e) => setText(e.target.value) })),
-        h(Row, { label: '位置' }, h('select', { className: 'ab-input', value: position, onChange: (e) => setPosition(e.target.value) },
-          h('option', { value: 'scroll' }, '滚动'), h('option', { value: 'top' }, '顶部'), h('option', { value: 'bottom' }, '底部'))),
-        info ? h('p', { className: 'ab-note' }, `《${info.title}》 · ${info.kind === 'bangumi' ? '番剧单集' : '第' + info.part + 'P'} · ${info.duration}秒`) : null,
-        h('div', { className: 'ab-flex', style: { marginTop: 12 } },
-          h(Btn, { disabled: busy || !video, onClick: () => action('inspect') }, '检查视频（不发送）'),
-          h(Btn, { kind: 'primary', disabled: busy || !video || !text.trim() || seconds === '' || draft.bili?.danmakuEnabled !== true, onClick: () => action('send') }, busy ? '处理中…' : '发送弹幕')),
-        status?.ok ? h('p', { className: 'ab-small ab-muted' }, `今天已确认发送 ${status.sentToday} 条 · 已提交 ${status.attemptsToday}/${status.limit} 次 · 两次提交至少间隔30秒`) : null,
-        h('div', { className: 'ab-list' }, (status?.history || []).map((row, index) => h('div', { className: 'ab-li', key: index },
-          h('div', { className: 'meta' }, timeAgo(row.at), h('br'), row.auto ? '自己决定' : '主人要求'),
-          h('div', { className: 'body' }, h('b', null, row.title || row.video), ` · ${/^(ep|ss)/.test(row.video) ? '番剧单集' : '第' + row.part + 'P'} ${row.seconds}秒`, h('div', null, row.text),
-            h('div', { className: 'ab-small ab-muted' }, row.ok ? `已发送 · 弹幕ID ${row.id}` : row.message),
-            row.platformResponse ? h('details', null, h('summary', null, '平台响应'), h('pre', { className: 'ab-code' }, JSON.stringify(row.platformResponse, null, 2))) : null)))),
       )
     }
 

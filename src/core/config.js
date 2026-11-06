@@ -19,7 +19,7 @@ export const DEFAULTS = {
   approvalNotify: true, // DSH 要授权时把请求发到主人私聊
   qqApi: { enabled: true }, // 她能用 qq_api_call 调 QQ 接口：别人只能查当前群，写操作只听主人
   approvalViaQQ: true, // 主人私聊会话要授权时，在 QQ 回复「确认」直接批准这一次
-  profilePerms: { qqNickname: 'owner', qqSignature: 'owner', qqAvatar: 'owner', biliSign: 'owner', biliAvatar: 'owner', biliComment: 'owner', qqFriendRequest: 'owner', whitelist: 'owner', douyinBrowse: 'owner', douyinLike: 'owner', douyinComment: 'owner', douyinShareOwner: 'owner', douyinDm: 'owner' }, // 改资料类操作（含抖音浏览 / 点赞 / 评论 / 分享）的权限：off 关 / owner 仅主人私聊 / all 所有人。抖音项默认仅主人，总开关默认关
+  profilePerms: { qqNickname: 'owner', qqSignature: 'owner', qqAvatar: 'owner', qqFriendRequest: 'owner', whitelist: 'owner', douyinBrowse: 'owner', douyinLike: 'owner', douyinComment: 'owner', douyinShareOwner: 'owner', douyinDm: 'owner' }, // 改资料类操作（含抖音浏览 / 点赞 / 评论 / 分享）的权限：off 关 / owner 仅主人私聊 / all 所有人。抖音项默认仅主人，总开关默认关
   longTasks: true, // 长任务模式：主人私聊（完整权限）额外挂 dsh-tool-jobs + dsh-tool-schedule，会多一点工具定义、稍慢
   // 后台子智能体委派（默认关）：模块用 hub.runSubagentTurn 派子智能体时，正常要求「主人开口」的来源；
   // 定时任务这类没人应答的场合，只有打开这个开关才允许派活。关着 = 一律拒绝（一审 #177 的审批策略）。
@@ -154,27 +154,37 @@ export const DEFAULTS = {
   local: { tts: false, image: false, song: false, asr: false, video: false, videoTimeoutMin: 20 },
   bili: {
     enabled: false,
-    subsOnly: false, // 只要订阅：不刷视频、不评论、不回评论、不发截图、不改资料，只查订阅的 UP 主动态
+    // observer = 只看只记：不评论、不发弹幕、不改资料，只保留点赞和收藏两种私有写入；
+    // social = 放开写闸门（老配置升级也一律落到 observer，评论 / 弹幕 / 改资料的工具和路由已经删掉）
+    posture: 'observer',
+    subsOnly: false, // 只要订阅：不刷视频、不点赞不收藏、不发截图，只查订阅的 UP 主动态
     sessdata: '', // B 站 Cookie 里的 SESSDATA（登录凭证）
-    biliJct: '', // B 站 Cookie 里的 bili_jct（发评论要用）。两个都不填也能看视频，只是不能评论
-    ownerName: '', // 主人的 B 站昵称：她写 @主人 时 @ 这个号
+    biliJct: '', // B 站 Cookie 里的 bili_jct（点赞 / 收藏要用）。两个都不填也能看视频，只是不能写
+    ownerName: '', // 主人的 B 站昵称（老字段，保留给老配置读）
     cookie: '', // 由上面两个拼出来给接口用；老配置的整串会自动拆到上面两个里
     autoBrowse: true, // 定时自己去刷
     intervalHours: 4, // 多久刷一轮
     maxRunsPerDay: 3,
     perRun: 3, // 一轮看几个视频
-    keywords: [], // 额外想让她搜的方向（另外还会参考她的兴趣和记忆里你喜欢的东西）
-    minViews: 5000, // 播放量门槛
-    maxAgeDays: 60, // 只看最近多少天发的
-    comment: true, // 自己发评论
+    keywords: [], // 留空 = 刷账号推荐流；填了才按关键词搜
+    minViews: 5000, // 播放量门槛（只对搜索 / 热门生效，推荐流不过滤）
+    maxAgeDays: 60, // 只看最近多少天发的（同上，推荐流不过滤）
+    comment: true, // 老字段，observer 下强制 false（评论工具已删）
     maxCommentsPerDay: 3,
-    reply: true, // 回别人回她的评论
+    reply: true, // 老字段，observer 下强制 false（回评论已删）
     maxRepliesPerDay: 6,
-    danmakuEnabled: false, // 主人主动打开后才允许发送弹幕
-    autoDanmaku: false, // 刷完自己发弹幕，另行开启
-    maxDanmakuPerDay: 3, // 手动和自动共用提交上限（失败也计数）
-    shareToOwner: true, // 看到好玩的私聊分享给主人
-    like: false, // 顺手点赞
+    danmakuEnabled: false, // 老字段，observer 下强制 false（弹幕模块已删）
+    autoDanmaku: false, // 老字段，observer 下强制 false
+    maxDanmakuPerDay: 3, // 老字段，只留给老配置读
+    shareToOwner: true, // 看到值得看的私聊分享给主人
+    like: true, // 顺手点赞：只给「值得看」，每天最多 maxLikesPerDay 条
+    maxLikesPerDay: 5, // 点赞日上限
+    maxFavsPerDay: 10, // 收藏日上限
+    favWorthFolderId: 0, // 「值得看」收藏到哪个夹（0 = 不收藏）
+    favOkFolderId: 0, // 「可以看」收藏到哪个夹（0 = 不收藏）
+    dailyDigest: true, // 每天推一条日报摘要
+    dailyDigestHour: 21, // 几点推（0-23）
+    transcribe: false, // 没有字幕时走本地 ASR（可选）
     vision: false, // 可选：ffmpeg 抽帧交给视觉模型
     visionFrames: 6,
     ffmpegPath: '', // 留空从 PATH 查找
@@ -489,7 +499,21 @@ export function normalize(raw) {
   c.local.videoTimeoutMin = num(c.local.videoTimeoutMin, 20, 1, BIG)
   const b = c.bili
   Object.assign(b, splitBiliCookie(b))
-  for (const k of ['enabled', 'subsOnly', 'autoBrowse', 'comment', 'reply', 'shareToOwner', 'like', 'vision', 'danmakuEnabled', 'autoDanmaku']) b[k] = bool(b[k], DEFAULTS.bili[k])
+  // 姿态：只有明确写了 social 才算社交模式；缺字段、脏值、老配置一律落到观察者
+  b.posture = b.posture === 'social' ? 'social' : 'observer'
+  for (const k of ['enabled', 'subsOnly', 'autoBrowse', 'comment', 'reply', 'shareToOwner', 'like', 'vision', 'danmakuEnabled', 'autoDanmaku', 'dailyDigest', 'transcribe']) b[k] = bool(b[k], DEFAULTS.bili[k])
+  // 观察者模式下这几个开关一律关掉（字段保留，老配置读取不报错）
+  if (b.posture === 'observer') {
+    b.comment = false
+    b.reply = false
+    b.danmakuEnabled = false
+    b.autoDanmaku = false
+  }
+  b.maxLikesPerDay = Math.round(num(b.maxLikesPerDay, 5, 0, BIG))
+  b.maxFavsPerDay = Math.round(num(b.maxFavsPerDay, 10, 0, BIG))
+  b.favWorthFolderId = Math.round(num(b.favWorthFolderId, 0, 0, BIG))
+  b.favOkFolderId = Math.round(num(b.favOkFolderId, 0, 0, BIG))
+  b.dailyDigestHour = Math.round(num(b.dailyDigestHour, 21, 0, 23))
   b.visionFrames = Math.round(num(b.visionFrames, 6, 1, 100))
   b.ffmpegPath = String(b.ffmpegPath || '').trim()
   b.shotChance = num(b.shotChance, 0.35, 0, 1)

@@ -54,6 +54,10 @@ test('面板接线：订阅的五个接口和定时任务都注册上了', () =>
   }
   assert.ok(timers.includes('订阅B站动态'), '每分钟要有一次订阅 tick')
   assert.ok(timers.includes('刷B站'), '原来的刷视频 tick 不能被挤掉')
+  // 观察者：评论 / 弹幕的路由已经删掉，面板点不到也不该有接口
+  for (const p of ['/bili/replies', '/bili/danmaku/state', '/bili/danmaku/inspect', '/bili/danmaku/send']) {
+    assert.equal(routes.has(p), false, `不该再有接口 ${p}`)
+  }
 })
 
 test('面板接口：空列表、取消没订的、查一轮都回得干净（不打网络）', async () => {
@@ -77,6 +81,8 @@ test('工具：订阅类工具在，改订阅只有主人能改', async () => {
   const tools = ownerBoot.builders[0]({ chat: ownerBoot.chat, sessionId: 's1' })
   const names = tools.map((t) => t.name)
   for (const n of ['bili_subscribe', 'bili_unsubscribe', 'bili_subs']) assert.ok(names.includes(n), `缺工具 ${n}`)
+  for (const n of ['bili_comment', 'bili_danmaku', 'bili_set_avatar', 'bili_set_sign']) assert.equal(names.includes(n), false, `观察者不该再有 ${n}`)
+  assert.equal(ownerBoot.builders.length, 1, '改头像 / 签名的那个工具块整个删掉了')
 
   const subsTool = tools.find((t) => t.name === 'bili_subs')
   const r = await subsTool.execute({})
@@ -168,11 +174,11 @@ test('配置：每号的 prompt / mode / minLevel 会被归一化（老配置也
   assert.equal(c.bili.subs[2].minLevel, 3, '越界的阈值夹回来')
 })
 
-test('只要订阅：只剩三个订阅工具，看视频 / 评论 / 截图 / 改资料全不给她', () => {
+test('只要订阅：只剩三个订阅工具，看视频 / 截图 / 改资料全不给她', () => {
   const { builders, chat } = boot({ bili: { subsOnly: true } })
   const names = builders[0]({ chat, sessionId: 's1' }).map((t) => t.name).sort()
   assert.deepEqual(names, ['bili_subs', 'bili_subscribe', 'bili_unsubscribe'])
-  assert.deepEqual(builders[1]({ chat, sessionId: 's1' }), [], '改头像 / 签名也不给')
+  assert.equal(builders.length, 1, '改头像 / 签名的那个工具块整个删掉了')
 })
 
 test('只要订阅：刷视频那条线整个不跑', async () => {
@@ -193,9 +199,9 @@ test('只要订阅：刷视频那条线整个不跑', async () => {
   assert.deepEqual(calls, [], 'subsOnly 下不该向 B 站发任何请求')
 })
 
-test('只要订阅：手动「刷一轮 / 看回复」的接口也拒绝（面板藏了按钮，接口还在）', async () => {
+test('只要订阅：手动「刷一轮」的接口也拒绝（面板藏了按钮，接口还在）', async () => {
   const cfg = normalize({ enabled: true, dryRun: false, ownerQQ: '10000001', bili: { enabled: true, subsOnly: true } })
   const bili = createBili({ getConfig: () => cfg, hub: {}, log: { info() {}, warn() {}, debug() {} }, api: {} })
   assert.match((await bili.run({ force: true })).message, /只要订阅/)
-  assert.match((await bili.checkReplies()).message, /只要订阅/)
+  assert.equal(typeof bili.checkReplies, 'undefined', '回评论的入口已经删掉')
 })

@@ -223,7 +223,7 @@ function browsing({ dryRun = false, sendResult = { message_id: 1 }, failVision =
   const info = { bvid: 'BV1aaaaaaaaa', cid: 1, aid: 1, title: '猫的视频', duration: 60 }
   const bili = createBili({
     getConfig: () => cfg, log: { info() {}, debug() {}, warn() {} },
-    api: { view: async () => info, subtitle: async () => '文本字幕', comments: async () => [], search: async () => [{ ...info, play: 100000 }], popular: async () => [] },
+    api: { view: async () => info, subtitle: async () => '文本字幕', comments: async () => [], danmakuText: async () => [], recommend: async () => [{ ...info, play: 100000 }], search: async () => [{ ...info, play: 100000 }], popular: async () => [] },
     vision: async () => { if (failVision) throw new Error('坏流'); return { text: '猫在吃饭', frames: [{ sec: 10, buf: Buffer.from('frame') }] } },
     hub: {
       runSystemTurn: async (_id, _name, prompt) => prompt.includes('挑 3 个') ? '["猫"]' : '[{"i":1,"feeling":"好可爱"}]',

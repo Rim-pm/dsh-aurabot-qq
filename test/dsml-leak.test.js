@@ -195,7 +195,6 @@ test('B 站评论出口复用清洗，纯调用不请求网络，正常正文保
     async fetchImpl(url, options) { requests.push({ url, options }); return { async json() { return { code: 0, data: { rpid: 42 } } } } },
   })
   assert.equal((await api.postComment(1, block)).silent, true)
-  assert.equal((await api.postDanmaku({}, block, 0, 1)).silent, true)
   assert.equal(requests.length, 0)
   await api.postComment(1, `前文${block}后文`, { root: 2, parent: 3 })
   assert.equal(requests.length, 1)
@@ -203,7 +202,7 @@ test('B 站评论出口复用清洗，纯调用不请求网络，正常正文保
   assert.equal(form.get('message'), '前文后文')
   assert.equal(form.get('root'), '2')
   assert.equal(form.get('parent'), '3')
-  assert.equal(warnings.length, 2)
+  assert.equal(warnings.length, 1)
 })
 
 test('空间和桌宠的独立路径复用同一清洗，截断及去 HTML 前先删除工具参数', async (t) => {
