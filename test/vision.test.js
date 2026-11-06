@@ -230,3 +230,39 @@ test('视觉描述：图片经附件服务登记后送入配置模型', async ()
   assert.equal(request.model, 'vision')
   assert.equal(request.messages[0].content[1].type, 'attachment')
 })
+
+test('视觉描述：传了刷B站模型就用它，不再看配置里的聊天模型', async () => {
+  let request
+  const dsh = {
+    get: () => null,
+    attachments: { admitPromptContent: async (content) => content },
+    llm: { stream: async function * (params) { request = params; yield { type: 'text-delta', text: '画面上有只猫。' } } },
+  }
+  await describeFrames(dsh, {
+    info: { title: '猫', duration: 60 },
+    frames: [Buffer.from('jpeg')],
+    cfg: { model: { provider: 'chat', model: 'chat-m' } },
+    model: { provider: 'bili', model: 'cheap-vision' },
+  })
+  assert.equal(request.provider, 'bili')
+  assert.equal(request.model, 'cheap-vision')
+})
+
+test('看画面：把刷B站模型交给能力判断和视觉描述', async () => {
+  const { args, calls } = pipeline()
+  let seenTarget, describeModel
+  args.deps.canSeeImages = async (_dsh, _cfg, target) => { seenTarget = target; return true }
+  args.deps.describeFrames = async (_dsh, o) => { describeModel = o.model; return '画面描述' }
+  await lookWithVision({ ...args, model: { provider: 'p', model: 'cheap' } })
+  assert.deepEqual(seenTarget, { provider: 'p', model: 'cheap' }, '能力判断要按刷B站模型来')
+  assert.deepEqual(describeModel, { provider: 'p', model: 'cheap' }, '视觉描述也用同一个模型')
+  assert.ok(calls.length >= 0)
+})
+
+test('看画面：没传刷B站模型就跟随聊天模型（target 为 null）', async () => {
+  const { args } = pipeline()
+  let seenTarget = 'unset'
+  args.deps.canSeeImages = async (_dsh, _cfg, target) => { seenTarget = target; return true }
+  await lookWithVision(args)
+  assert.equal(seenTarget, null)
+})

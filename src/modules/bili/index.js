@@ -32,6 +32,14 @@ export default {
   setup(api) {
     const { hub } = api.core
     announcePosture(api)
+    // 刷视频这条线可以单独选模型：后台会话固定叫 system:bili，在这里拦一下就行（不用改 hub）
+    api.on('model', (sel, chat) => {
+      if (!chat || chat.chatId !== 'system:bili') return undefined
+      const m = api.config().bili?.browseModel || {}
+      const provider = String(m.provider || '').trim()
+      const model = String(m.model || '').trim()
+      return provider && model ? { provider, model } : undefined
+    })
     const bili = createBili({ getConfig: api.config, hub, memory: api.lazy('memory'), log: api.log, dsh: api.dsh, local: api.core.local })
     api.every(60_000, () => bili.tick(), '刷B站')
     // 订阅 UP 主动态：单独的引擎，不跟「刷视频」抢配额（它自己会按 subIntervalMin 节流）

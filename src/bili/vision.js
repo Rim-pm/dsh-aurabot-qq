@@ -79,11 +79,12 @@ export function grabFrame(ffmpeg, url, at, { width = 512, timeoutMs = 15000, max
 
 const SYSTEM = '你在看一个视频的若干张截图。只写画面上确实能看到的东西：场景、人物、物体、动作、画面里的文字 / 字幕条 / 贴纸。不要猜剧情，不要编造没出现的内容，不要发表感想。用 3~6 句中文写。'
 
-/** 把几帧交给视觉模型，换一段画面描述。 */
-export async function describeFrames(dsh, { info, frames, cfg }) {
+/** 把几帧交给视觉模型，换一段画面描述。model 传了就只看这个模型（刷 B 站单独选的模型）。 */
+export async function describeFrames(dsh, { info, frames, cfg, model }) {
   const images = frames.map((f) => ({ data: f.toString('base64'), mediaType: 'image/jpeg' }))
   const text = await askModel(dsh, {
     cfg,
+    ...(model && model.provider && model.model ? { model } : {}),
     system: SYSTEM,
     text: `这些截图来自视频《${info.title}》（UP主 ${info.author || '?'}，时长 ${Math.round(Number(info.duration) || 0)} 秒），按时间先后排列，大致分布在全片 5%~95% 的位置。\n把它们当成「我看到了什么」如实记下来。`,
     images,
@@ -128,7 +129,7 @@ export function windowAt(windows, sec) {
  * 返回 { text, frames }：text 是画面描述（不可用时为空串），frames 是 [{sec, buf}] 抽到的帧
  * （调用方可以存下来当截图用；关掉看画面时两个都为空）。
  */
-export async function lookWithVision({ dsh, api, info, getConfig, log, deps = {} }) {
+export async function lookWithVision({ dsh, api, info, getConfig, log, model, deps = {} }) {
   const empty = { text: '', frames: [] }
   const full = getConfig()
   const c = (full && full.bili) || {}
@@ -140,9 +141,10 @@ export async function lookWithVision({ dsh, api, info, getConfig, log, deps = {}
     return empty
   }
   const assertUrl = deps.assertPublicUrl || assertPublicUrl
+  const target = model && model.provider && model.model ? model : null
   const frames = []
   try {
-    if (await (deps.canSeeImages || canSeeImages)(dsh, full) === false) {
+    if (await (deps.canSeeImages || canSeeImages)(dsh, full, target) === false) {
       log?.debug('看画面跳过：当前模型不支持图片')
       return empty
     }
@@ -180,7 +182,7 @@ export async function lookWithVision({ dsh, api, info, getConfig, log, deps = {}
       log?.debug('看画面跳过：一帧都没抽出来')
       return empty
     }
-    const text = await (deps.describeFrames || describeFrames)(dsh, { info, frames: frames.map((f) => f.buf), cfg: full })
+    const text = await (deps.describeFrames || describeFrames)(dsh, { info, frames: frames.map((f) => f.buf), cfg: full, model: target })
     return { text: String(text || '').trim(), frames }
   } catch (error) {
     log?.debug('看画面失败，退回文字：', error.message)

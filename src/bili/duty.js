@@ -207,6 +207,14 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
     return hub.runSystemTurn('bili', 'QQ · 刷B站', `【刷 B 站，不是聊天，这一轮不会发到聊天里】\n${prompt}`, { timeoutMs: 180000 })
   }
 
+  /** 刷视频这条线单独选的模型；没选就是 null（跟随聊天模型）。看画面时也要用它，不然抽帧和写想法不是同一个模型。 */
+  function browseModel() {
+    const m = cfg().browseModel || {}
+    const provider = String(m.provider || '').trim()
+    const model = String(m.model || '').trim()
+    return provider && model ? { provider, model } : null
+  }
+
   /** 这一轮搜什么：她自己的兴趣 + 记忆里你喜欢的东西 + 面板里填的关键词，让她挑 3 个。 */
   async function chooseKeywords() {
     const c = cfg()
@@ -254,7 +262,7 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
     }
   }
 
-  async function lookAt(v) {
+  async function lookAt(v, model = null) {
     const rawInfo = await api.view({ bvid: v.bvid })
     const info = {
       ...rawInfo,
@@ -271,7 +279,7 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
     let shotIds = []
     if (c.vision) {
       try {
-        const r = await see({ dsh, api, info, getConfig, log })
+        const r = await see({ dsh, api, info, getConfig, log, model })
         vision = r.text || ''
         if (vision) log.debug(`看了《${info.title}》的画面：${vision.slice(0, 40)}…`)
         // 抽到的帧顺手存进截图库：之后她自己发、或主人让她挑一张发
@@ -378,8 +386,9 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
       while (picked.length < c.perRun && [...byKw.values()].some((l) => l.length)) for (const l of byKw.values()) if (l.length && picked.length < c.perRun) { const v = l.shift(); if (!picked.some((p) => p.bvid === v.bvid)) picked.push(v) }
       if (!picked.length) return { ok: false, message: '这次没搜到合适的视频' }
       const looked = []
+      const model = browseModel()
       for (const v of picked) {
-        try { looked.push(await lookAt(v)) } catch (error) { log.debug(`看 ${v.bvid} 失败：`, error.message) }
+        try { looked.push(await lookAt(v, model)) } catch (error) { log.debug(`看 ${v.bvid} 失败：`, error.message) }
         seen.add(v.bvid)
       }
       if (!looked.length) return { ok: false, message: '视频都打不开' }

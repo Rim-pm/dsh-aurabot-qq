@@ -187,6 +187,8 @@ export const DEFAULTS = {
     transcribe: false, // 没有字幕时走本地 ASR（可选）
     vision: false, // 可选：ffmpeg 抽帧交给视觉模型
     visionFrames: 6,
+    // 刷视频这条线（挑关键词、看完写想法、看画面）用哪个模型；留空跟随聊天模型
+    browseModel: { provider: '', model: '' },
     ffmpegPath: '', // 留空从 PATH 查找
     shotChance: 0.35, // 刷完发截图给主人；0 = 不自动发
     shotLibrary: 300,
@@ -515,6 +517,10 @@ export function normalize(raw) {
   b.favOkFolderId = Math.round(num(b.favOkFolderId, 0, 0, BIG))
   b.dailyDigestHour = Math.round(num(b.dailyDigestHour, 21, 0, 23))
   b.visionFrames = Math.round(num(b.visionFrames, 6, 1, 100))
+  b.browseModel = {
+    provider: String(b.browseModel?.provider || '').trim(),
+    model: String(b.browseModel?.model || '').trim(),
+  }
   b.ffmpegPath = String(b.ffmpegPath || '').trim()
   b.shotChance = num(b.shotChance, 0.35, 0, 1)
   b.shotLibrary = Math.round(num(b.shotLibrary, 300, 1, BIG))

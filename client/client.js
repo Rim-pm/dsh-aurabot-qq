@@ -4032,6 +4032,18 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const [report, setReport] = useState(null)
       const [folders, setFolders] = useState([])
       const [folderErr, setFolderErr] = useState('')
+      // 刷 B 站单独用的模型：列 DSH 里已经接好的模型，能看图的标出来（开了「看画面」才用得上）
+      const [models, setModels] = useState(null)
+      const [modelsErr, setModelsErr] = useState('')
+      // 「只要订阅」：别的 B 站卡片直接不渲染，面板跟实际行为保持一致
+      const onlySubs = !!(draft.bili && draft.bili.subsOnly)
+      useEffect(() => {
+        // 只订阅时刷视频这张卡片根本不渲染，别白查一次模型列表
+        if (onlySubs) return
+        get('/models')
+          .then((r) => { setModels(r.list || []); setModelsErr('') })
+          .catch((e) => { setModels([]); setModelsErr(e.message || '查不到模型列表') })
+      }, [onlySubs])
       const load = () => get('/bili/state').then(setS).catch((e) => toast(e.message, 'err'))
       const loadShots = () => get('/bili/shots').then((r) => setShots(r.items || [])).catch((e) => { setShots([]); toast(e.message, 'err') })
       const loadSeen = (tier = '', offset = 0) => get('/bili/seen?tier=' + encodeURIComponent(tier) + '&offset=' + offset + '&limit=20')
@@ -4046,12 +4058,36 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       useEffect(() => { load(); loadShots(); loadSeen('', 0); loadReport(); loadFolders() }, [])
       const act = (path, label) => async () => { setBusy(label); const r = await post(path); setBusy(''); toast(r.message, r.ok ? 'ok' : 'err'); load(); loadShots(); loadSeen(seenTier, 0); loadReport() }
       const acct = s && s.account
-      // 「只要订阅」：别的 B 站卡片直接不渲染，面板跟实际行为保持一致
-      const onlySubs = !!(draft.bili && draft.bili.subsOnly)
       const observer = (draft.bili && draft.bili.posture) !== 'social'
       const favOptions = [{ value: '0', label: '不收藏' }, ...folders.map((x) => ({ value: String(x.id), label: x.title + '（' + x.count + '）' }))]
       const favRow = (path, label) => h(Row, { label, hint: folderErr || '0 = 不收藏' },
         h(Select, { value: String(getPath(draft, path) ?? 0), options: favOptions, onChange: (v) => setDraft(setPath(draft, path, Number(v))), width: 240 }))
+      const bm = (draft.bili && draft.bili.browseModel) || {}
+      const bmKey = bm.provider && bm.model ? bm.provider + '::' + bm.model : ''
+      const bmHit = bmKey && models ? models.find((m) => m.provider + '::' + m.model === bmKey) : null
+      // 存过的模型已经不在列表里（删了 provider / 改名）：仍然按配置走，得让主人知道不是「跟随聊天模型」
+      const bmGone = !!(bmKey && models && !modelsErr && !bmHit)
+      // 必须两个字段一起写：只有一个非空时后台会当没设，静默退回聊天模型
+      const pickBrowseModel = (v) => {
+        const [p, ...rest] = String(v || '').split('::')
+        setDraft(setPath(setPath(draft, 'bili.browseModel.provider', v ? p : ''), 'bili.browseModel.model', v ? rest.join('::') : ''))
+      }
+      const browseModelRow = h(Row, { label: '刷 B 站用的模型', hint: '挑关键词、看完写想法都走这个模型；留空就用「模型」页那个聊天模型。挑个便宜的能省 token，开了「看画面」的话得选能看图的（不然抽帧会被跳过，只读文字）。' },
+        h(Select, {
+          value: bmKey, width: 320,
+          options: [{ value: '', label: '跟随聊天模型', desc: '和「模型」页选的一样' }].concat((models || []).map((m) => ({
+            value: m.provider + '::' + m.model,
+            label: m.name + (m.vision === true ? '（能看图）' : m.vision === false ? '（不看图）' : ''),
+            desc: m.provider,
+            group: m.provider,
+          }))),
+          onChange: pickBrowseModel,
+        }),
+        models === null ? h('span', { className: 'ab-muted ab-small' }, ' 正在查模型…') : null,
+        modelsErr ? h('span', { className: 'ab-small', style: { color: 'var(--ab-warn)' } }, ' 查不到模型列表：' + modelsErr) : null,
+        bmGone ? h('span', { className: 'ab-small', style: { color: 'var(--ab-warn)' } }, ` 存的 ${bm.provider}::${bm.model} 已经不在列表里了，刷 B 站仍按它走；要换就在上面挑一个`) : null,
+        bmHit && bmHit.vision === false && draft.bili?.vision
+          ? h('span', { className: 'ab-small', style: { color: 'var(--ab-warn)' } }, ' 这个模型看不了图，抽帧会被跳过，只读文字') : null)
       return h('div', { className: 'ab-grid' },
         h(Card, { title: onlySubs ? 'B 站（只订阅）' : '刷 B 站', right: f.sw('bili.enabled'), desc: onlySubs ? '开着「只要订阅」，ta只会定时查你订阅的 UP 主动态并私聊推给你；不刷视频、不点赞不收藏、不发截图。下面填的 Cookie 订阅也会用（只读填 SESSDATA 就够）。' : '观察者模式：ta会定时去 B 站看视频（关键词留空就刷账号推荐流），读简介、字幕、热评和弹幕，判断值不值得看。只点赞和收藏，不评论、不发弹幕、不改资料；值得看的会私聊分享给你，每天还有一条日报摘要。你在 QQ 里发 B 站链接或分享卡片，ta也能点进去看完再聊。' },
           h(Row, { label: '姿态', hint: observer ? '只看只记：不评论、不发弹幕、不改资料，只保留点赞和收藏' : '社交模式：放开写闸门（评论 / 弹幕 / 改资料的工具和路由已下线，闸门留着兜底）' },
@@ -4074,6 +4110,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         ),
         h(BiliSubs, { draft, setDraft, toast }),
         onlySubs ? null : h(Card, { title: '怎么刷', desc: '只在「主动搭话」里设的醒着时间内刷。' },
+          browseModelRow,
           h(Row, { label: '定时自己去刷' }, f.sw('bili.autoBrowse')),
           h(Row, { label: '多久刷一轮' }, f.range('bili.intervalHours', 1, 24, 1, (v) => v + ' 小时')),
           h(Row, { label: '每天最多刷' }, f.range('bili.maxRunsPerDay', 0, 12, 1, (v) => v + ' 轮')),

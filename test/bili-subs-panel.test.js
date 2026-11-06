@@ -17,6 +17,7 @@ function boot({ owner = true, bili = {} } = {}) {
   const routes = new Map()
   const builders = []
   const timers = []
+  const listeners = new Map()
   const hub = {
     turnHasOwner: () => owner,
     turnSendersAllOwner: () => owner,
@@ -37,14 +38,14 @@ function boot({ owner = true, bili = {} } = {}) {
       return join(d, ...parts)
     },
     log: { info() {}, debug() {}, warn() {} },
-    on() {},
+    on: (event, fn) => { if (!listeners.has(event)) listeners.set(event, []); listeners.get(event).push(fn) },
     tool: (fn) => builders.push(fn),
     every: (ms, fn, name) => timers.push(name),
     route: (p, fn) => routes.set(p, fn),
     core: { hub, http: { body: async (req) => req.body || {}, query: () => ({}) } },
   })
   const chat = { kind: 'private', userId: '10000001', chatId: 'private:10000001' }
-  return { cfg, routes, builders, timers, chat }
+  return { cfg, routes, builders, timers, listeners, chat }
 }
 
 test('面板接线：订阅的五个接口和定时任务都注册上了', () => {
@@ -143,6 +144,7 @@ test('面板要读的配置项都在（默认值）', () => {  const c = normali
   assert.equal(c.bili.aiFilter, false)
   assert.equal(c.bili.aiFilterPrompt, '')
   assert.deepEqual(c.bili.aiFilterModel, { provider: '', model: '' })
+  assert.deepEqual(c.bili.browseModel, { provider: '', model: '' }, '刷B站模型默认跟随聊天模型')
   assert.equal(c.bili.aiFilterMinLevel, 2)
   assert.equal(c.bili.aiFilterVision, false)
   assert.equal(c.bili.aiFilterMaxChars, 800)
@@ -258,4 +260,33 @@ test('只要订阅：手动「刷一轮」的接口也拒绝（面板藏了按�
   const bili = createBili({ getConfig: () => cfg, hub: {}, log: { info() {}, warn() {}, debug() {} }, api: {} })
   assert.match((await bili.run({ force: true })).message, /只要订阅/)
   assert.equal(typeof bili.checkReplies, 'undefined', '回评论的入口已经删掉')
+})
+
+test('刷B站模型：只拦 system:bili，没选就跟随聊天模型', () => {
+  const empty = boot()
+  const hooks = empty.listeners.get('model') || []
+  assert.equal(hooks.length, 1, '要注册一个 model hook')
+  assert.equal(hooks[0]({ provider: 'chat', model: 'chat-m' }, { chatId: 'system:bili', kind: 'system' }), undefined, '没选就返回 undefined')
+  assert.equal(hooks[0]({ provider: 'chat', model: 'chat-m' }, { chatId: 'private:1', kind: 'private' }), undefined, '别的聊天不受影响')
+
+  const picked = boot({ bili: { browseModel: { provider: 'p', model: 'cheap' } } })
+  const hook = (picked.listeners.get('model') || [])[0]
+  assert.deepEqual(hook({ provider: 'chat', model: 'chat-m' }, { chatId: 'system:bili', kind: 'system' }), { provider: 'p', model: 'cheap' })
+  assert.equal(hook({ provider: 'chat', model: 'chat-m' }, { chatId: 'system:bili:extra', kind: 'system' }), undefined, '带 key 的后台会话不拦')
+  assert.equal(hook({ provider: 'chat', model: 'chat-m' }, { chatId: 'private:1', kind: 'private' }), undefined)
+})
+
+test('面板：刷B站模型能在 UI 上选，接的是 bili.browseModel', () => {
+  const client = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
+  const start = client.indexOf('function Bili(')
+  const end = client.indexOf('function ShotCell(')
+  assert.ok(start >= 0 && end > start, '找不到 Bili 组件')
+  const card = client.slice(start, end)
+  assert.ok(card.includes('刷 B 站用的模型'), '刷B站卡片缺模型下拉')
+  assert.ok(card.includes('bili.browseModel'), '这一行没接到 bili.browseModel')
+  assert.ok(card.includes("get('/models')"), '模型列表要从 /models 读')
+  assert.match(card, /setPath\(setPath\(draft, 'bili\.browseModel\.provider'/, '选模型时要一起写 provider')
+  assert.ok(card.includes("'bili.browseModel.model'"), '选模型时要一起写 model')
+  assert.ok(card.includes('bmGone'), '存过的模型不在列表里要提示')
+  assert.ok(card.includes('modelsErr'), '拉不到模型列表要提示')
 })
