@@ -603,12 +603,21 @@ export function apply(ctx) {
       if (!unloaded) setPendingModules(left)
     }).catch((error) => log.warn('恢复模块失败：', error.message))
   booted.then(() => { if (!unloaded) bridge.refresh() })
+  // boot 完成后自愈一轮：把掉出「Aurabot · QQ」工作区的 QQ 会话重新挂上（多宿主整份覆盖 workspace.json 会抹掉 sessionId）。
+  // 这也是授权通知能转进 QQ 的前提：isAurabotWorkspaceSession 靠 ws.sessionIds 认工作区里的会话。
+  booted.then(
+    () => { if (!unloaded) return hub?.healWorkspace?.() },
+    // boot 自己没跑完：这轮自愈跳过（和「自愈执行失败」分开报，别混成一条）
+    (error) => log.debug('启动没完成，QQ 会话自愈这轮跳过了：', error.message),
+  ).catch((error) => log.debug('QQ 会话自愈没跑成：', error.message))
 
   // ---------- 审批请求：DSH 要授权时把请求发到 QQ ----------
   // 说明：DSH 的批准动作只能由界面回答（host 拿不到应答通道），所以这里只做通知。
   const approvalSeen = new Map()
   // 授权通知只看 Aurabot · QQ 工作区：既包括 hub 映射的聊天会话，也包括同一工作区里
   // 主人手动打开 / 调试 / 新建的会话。别的 DSH 项目的会话一律不转到 QQ。
+  // 后一条靠 ws.sessionIds 判断，而它会被多宿主整份覆盖抹掉 —— hub 的启动自愈（healWorkspace）
+  // 把会话补挂回去之后，这里才能照常命中。
   function isAurabotWorkspaceSession(session) {
     if (!session?.id) return false
     try { if (hub?.chatOfSession?.(session.id)) return true } catch (error) {}

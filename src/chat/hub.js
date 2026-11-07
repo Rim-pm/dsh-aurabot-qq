@@ -566,7 +566,50 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
       ws = await reg.create(dir, WORKSPACE_TITLE)
       log.info('建好了工作区「' + WORKSPACE_TITLE + '」：' + dir)
     }
+    // 工作区就绪后顺手自愈一次（host.js 在 boot 完成后也会调一次，两处共用下面的 once 标志）
+    healWorkspace().catch((error) => log.debug('QQ 会话自愈没跑成：', error.message))
     return ws
+  }
+
+  // 启动自愈：把掉出工作区的 QQ 会话重新挂回去。
+  // dshweb 侧边栏的分组只认 workspace.sessionIds（不按会话目录兜底），而 workspace.json 是整份原子覆盖：
+  // 多个 DSH 宿主共享 ~/.dsh/storages 时会互相把对方挂好的 sessionId 抹掉，QQ 会话就掉进「未分组」。
+  // 这里按 sessions.json 的映射补挂一轮就收手；单个失败不中断整轮（attachSession 对 cwd 不一致、
+  // 目录被删、header 缺 cwd 都会抛错），补不上的不影响聊天本体（按 sessionId 恢复，不走工作区），
+  // 只是侧栏还显示「未分组」。host.js 的授权通知也认 ws.sessionIds，补挂上了通知才能照常转进 QQ。
+  let workspaceHealed = false
+  async function healWorkspace() {
+    if (workspaceHealed || disposed) return 0
+    const reg = dsh.workspaceRegistry || dsh.get('workspaceRegistry')
+    // registry 初始化完成前 list() 会直接抛（真实实现：workspace registry is not started yet），
+    // 抛错等同于「还没就绪」：不算跑过，等下个触发点再试
+    let list
+    try { list = reg?.list?.() || [] } catch (error) { return 0 }
+    if (!list.length) return 0
+    const norm = (p) => String(p || '').replace(/[\\/]+$/, '').toLowerCase()
+    const ws = list.find((w) => norm(w.path) === norm(workspaceDirOf(getConfig())))
+    if (!ws) return 0 // 工作区还没建（第一条消息时 ensureWorkspace 会建），到时它自己会触发
+    const m = map()
+    let n = 0
+    let failed = 0
+    let stopped = false
+    for (const entry of Object.values(m.chats || {})) {
+      if (disposed) { stopped = true; break }
+      const sid = String(entry?.sessionId || '')
+      // 已挂上的跳过；已归档的不捞（那是「重新开始」明确丢掉的会话，捞回来违背主人的操作）
+      if (!sid || (ws.sessionIds || []).includes(sid) || (reg.archivedSessionIds || []).includes(sid)) continue
+      try {
+        await ws.attachSession(sid)
+        n++
+      } catch (error) {
+        failed++
+        log.debug(`会话 ${sid.slice(-8)} 挂不回工作区（${error.message}）`)
+      }
+    }
+    if (n) log.info(`自愈：把 ${n} 个掉出「${WORKSPACE_TITLE}」的 QQ 会话重新挂了回去`)
+    // once 标志只在「这轮确实跑完」时置位：中途被卸载、或整轮全败都留着下次再试
+    if (!stopped && !(failed > 0 && n === 0)) workspaceHealed = true
+    return n
   }
 
   function controller() {
@@ -2699,6 +2742,7 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
     logChat,
     localTranscribe,
     ensureWorkspace,
+    healWorkspace,
     chatLogOf,
     forgetChatLog,
     noteSaid,

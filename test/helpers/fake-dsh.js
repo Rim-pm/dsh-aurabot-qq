@@ -75,6 +75,34 @@ export function createFakeDsh({ brain }) {
     return agent
   }
 
+  // 假的工作区注册表：只实现 Aurabot 用到的那几样（list / create / attachSession / 归档）。
+  // attachSession 照真实实现：前插、幂等；调用都记进 attachCalls，行为可用 attachBehavior 注入（抛错 = 挂载失败）。
+  const registry = {
+    archivedSessionIds: [],
+    attachCalls: [],
+    attachBehavior: null,
+    addWorkspace({ path, title = path, sessionIds = [] } = {}) {
+      const w = {
+        id: randomUUID(),
+        path,
+        title,
+        sessionIds: [...sessionIds],
+        async attachSession(sessionId) {
+          registry.attachCalls.push({ sessionId, workspace: w })
+          if (registry.attachBehavior) await registry.attachBehavior(sessionId, w)
+          if (!w.sessionIds.includes(sessionId)) w.sessionIds.unshift(sessionId)
+        },
+      }
+      workspaces.push(w)
+      return w
+    },
+    archiveSession(id) { this.archivedSessionIds.push(id) },
+    list: () => workspaces,
+    async create(path, title) {
+      return registry.addWorkspace({ path, title })
+    },
+  }
+
   const globalTools = new Map() // 全局工具（DSH 所有会话都能看到）
   const provided = new Map() // ctx.provide 登记的服务
   const ctx = {
@@ -97,16 +125,7 @@ export function createFakeDsh({ brain }) {
     },
     systemPrompt: { variable: (n, fn) => { variables.set(n, fn); return () => variables.delete(n) } },
     webServer: { register: (r) => { routes.set(r.path, r); return () => routes.delete(r.path) } },
-    workspaceRegistry: {
-      archivedSessionIds: [],
-      archiveSession(id) { this.archivedSessionIds.push(id) },
-      list: () => workspaces,
-      async create(path, title) {
-        const w = { id: randomUUID(), path, title, sessionIds: [] }
-        workspaces.push(w)
-        return w
-      },
-    },
+    workspaceRegistry: registry,
     agents: { get: (id) => agents.get(id) },
     attachments: {
       async admitPromptContent(content) {
@@ -168,5 +187,5 @@ export function createFakeDsh({ brain }) {
     return { status, raw: () => out, json: () => JSON.parse(out) }
   }
 
-  return { ctx, emit, routes, variables, agents, workspaces, turns, logs, call, dispose: () => disposers.reverse().forEach((d) => { try { d() } catch (e) {} }) }
+  return { ctx, registry, emit, routes, variables, agents, workspaces, turns, logs, call, dispose: () => disposers.reverse().forEach((d) => { try { d() } catch (e) {} }) }
 }
