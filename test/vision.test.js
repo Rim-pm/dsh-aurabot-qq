@@ -2,7 +2,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
-import { frameTimes, pickVideoStream, findFfmpeg, visionState, lookWithVision, describeFrames, progressiveWindows, windowAt } from '../src/bili/vision.js'
+import { EventEmitter } from 'node:events'
+import { frameTimes, pickVideoStream, findFfmpeg, visionState, lookWithVision, describeFrames, progressiveWindows, windowAt, frameArgs, grabFrame, hasProxy, withoutProxy } from '../src/bili/vision.js'
 import { digestOf } from '../src/bili/duty.js'
 
 test('frameTimes：跳过首尾 5%，均匀铺开，不重复', () => {
@@ -265,4 +266,90 @@ test('看画面：没传刷B站模型就跟随聊天模型（target 为 null）'
   args.deps.canSeeImages = async (_dsh, _cfg, target) => { seenTarget = target; return true }
   await lookWithVision(args)
   assert.equal(seenTarget, null)
+})
+
+test('frameArgs：白名单包含 httpproxy，B 站请求头齐全', () => {
+  const args = frameArgs('https://cdn.example/a.m4s', 12)
+  const i = args.indexOf('-protocol_whitelist')
+  assert.ok(i >= 0, '显式限制协议')
+  assert.ok(args[i + 1].split(',').includes('httpproxy'), '有代理时 ffmpeg 走 httpproxy，必须在白名单里')
+  assert.ok(args[i + 1].split(',').includes('https'))
+  assert.ok(args[i + 1].split(',').includes('tls'))
+  assert.equal(args[args.indexOf('-ss') + 1], '12')
+  assert.match(args[args.indexOf('-headers') + 1], /Referer: https:\/\/www\.bilibili\.com\//)
+})
+
+test('hasProxy / withoutProxy：只认代理相关变量，大小写都算', () => {
+  assert.equal(hasProxy({}), false)
+  assert.equal(hasProxy({ PATH: 'x' }), false)
+  assert.equal(hasProxy({ HTTP_PROXY: 'http://127.0.0.1:7890' }), true)
+  assert.equal(hasProxy({ https_proxy: 'http://127.0.0.1:7890' }), true)
+  assert.equal(hasProxy({ ALL_PROXY: 'socks5://127.0.0.1:7890' }), true)
+  assert.equal(hasProxy({ NO_PROXY: '127.0.0.1' }), true, 'NO_PROXY 也算设了代理环境')
+  const env = withoutProxy({ PATH: 'x', HTTP_PROXY: 'a', https_proxy: 'b', NO_PROXY: 'c' })
+  assert.deepEqual(env, { PATH: 'x' })
+})
+
+function jpeg() {
+  const buf = Buffer.alloc(600, 0x20)
+  buf[0] = 0xff
+  buf[1] = 0xd8
+  return buf
+}
+
+function fakeSpawn(reply) {
+  const calls = []
+  const spawnImpl = (cmd, args, opts) => {
+    const proc = new EventEmitter()
+    proc.stdout = new EventEmitter()
+    proc.stderr = new EventEmitter()
+    proc.kill = () => { proc.killed = true }
+    const call = { cmd, args, env: opts && opts.env, proc }
+    calls.push(call)
+    setImmediate(() => {
+      const r = reply(call, calls.length - 1)
+      if (r.hang) return
+      if (r.stderr) proc.stderr.emit('data', Buffer.from(r.stderr))
+      if (r.stdout) proc.stdout.emit('data', r.stdout)
+      proc.emit('close', r.code ?? 0)
+    })
+    return proc
+  }
+  return { spawnImpl, calls }
+}
+
+test('grabFrame：系统代理走不通时去掉代理直连重试', async () => {
+  const env = { PATH: 'x', HTTP_PROXY: 'http://127.0.0.1:7890', HTTPS_PROXY: 'http://127.0.0.1:7890' }
+  const { spawnImpl, calls } = fakeSpawn((_call, i) => (i === 0
+    ? { code: 1, stderr: "Protocol 'httpproxy' not on whitelist 'http,https,tcp,tls,crypto,httpproxy'!" }
+    : { code: 0, stdout: jpeg() }))
+  const buf = await grabFrame('ffmpeg', 'https://cdn.example/a.m4s', 5, { env, spawnImpl })
+  assert.ok(buf && buf[0] === 0xff && buf[1] === 0xd8, '第二次直连抽到了帧')
+  assert.equal(calls.length, 2, '代理失败后才重试一次')
+  assert.equal(calls[0].env, env, '第一次用原环境')
+  assert.ok(calls[1].env && !Object.keys(calls[1].env).some((k) => /proxy/i.test(k)), '第二次去掉代理变量')
+  assert.equal(calls[1].env.PATH, 'x', '其他环境变量保留')
+})
+
+test('grabFrame：没有代理环境时不重试，失败原因写进日志', async () => {
+  const logs = []
+  const { spawnImpl, calls } = fakeSpawn(() => ({ code: 1, stderr: 'Server returned 403 Forbidden' }))
+  const buf = await grabFrame('ffmpeg', 'https://cdn.example/a.m4s', 5, {
+    env: { PATH: 'x' }, spawnImpl, log: { debug: (...a) => logs.push(a.join(' ')) },
+  })
+  assert.equal(buf, null)
+  assert.equal(calls.length, 1)
+  assert.ok(logs.some((l) => /403/.test(l)), '把 ffmpeg 的 stderr 带出来')
+})
+
+test('grabFrame：超时不重试（避免坏流拖两倍时间）', async () => {
+  const { spawnImpl, calls } = fakeSpawn(() => ({ hang: true }))
+  const start = Date.now()
+  const buf = await grabFrame('ffmpeg', 'https://cdn.example/a.m4s', 5, {
+    env: { HTTP_PROXY: 'http://127.0.0.1:7890' }, spawnImpl, timeoutMs: 30,
+  })
+  assert.equal(buf, null)
+  assert.equal(calls.length, 1)
+  assert.ok(calls[0].proc.killed, '超时杀掉子进程')
+  assert.ok(Date.now() - start < 2000)
 })

@@ -36,38 +36,66 @@ export function pickVideoStream(list = []) {
   return (decent.length ? decent : pool).slice().sort((a, b) => (a.bandwidth || 0) - (b.bandwidth || 0))[0] || null
 }
 
-/** 从流里抽一帧（JPEG）。失败返回 null，不抛。 */
-export function grabFrame(ffmpeg, url, at, { width = 512, timeoutMs = 15000, maxBytes = 2 * 1024 * 1024 } = {}) {
+// ffmpeg 默认会读 HTTP_PROXY / HTTPS_PROXY 走系统代理。白名单里少了 httpproxy 时，
+// ffmpeg 直接报「Protocol 'httpproxy' not on whitelist」打不开输入 —— 一个字节都抽不到。
+const PROTOCOLS = 'http,https,tcp,tls,crypto,httpproxy'
+
+const PROXY_KEY = /^(https?|all|no)_proxy$/i
+
+/** 环境变量里有没有代理设置（ffmpeg 会自动用它）。 */
+export function hasProxy(env = process.env) {
+  return Object.keys(env || {}).some((k) => PROXY_KEY.test(k))
+}
+
+/** 复制一份去掉代理的环境变量：系统代理连不上 CDN 时直连重试。 */
+export function withoutProxy(env = process.env) {
+  const out = {}
+  for (const [k, v] of Object.entries(env || {})) if (!PROXY_KEY.test(k)) out[k] = v
+  return out
+}
+
+/** 抽一帧的 ffmpeg 参数。 */
+export function frameArgs(url, at, { width = 512, timeoutMs = 15000 } = {}) {
+  return [
+    '-hide_banner', '-loglevel', 'error', '-nostdin',
+    // B 站 CDN 要 Referer，否则 403
+    '-headers', `Referer: https://www.bilibili.com/\r\nUser-Agent: ${UA}\r\n`,
+    '-rw_timeout', String(timeoutMs * 1000),
+    '-protocol_whitelist', PROTOCOLS,
+    '-ss', String(at), '-i', url,
+    '-frames:v', '1', '-an', '-vf', `scale=${width}:-2`,
+    '-q:v', '3', '-f', 'image2', '-c:v', 'mjpeg', 'pipe:1',
+  ]
+}
+
+const shortErr = (s) => String(s || '').replace(/\s+/g, ' ').trim().slice(0, 300)
+
+/** 抽一次帧。返回 { buf, timedOut, stderr }，不抛。 */
+function grabOnce(spawnImpl, ffmpeg, url, at, { width, timeoutMs, maxBytes, env }) {
   return new Promise((resolve) => {
     let settled = false
     let timer
-    const finish = (v) => { if (!settled) { settled = true; clearTimeout(timer); resolve(v) } }
+    let timedOut = false
+    let stderr = ''
+    const finish = (buf) => { if (!settled) { settled = true; clearTimeout(timer); resolve({ buf, timedOut, stderr }) } }
     let proc
     try {
-      proc = spawn(ffmpeg, [
-        '-hide_banner', '-loglevel', 'error', '-nostdin',
-        // B 站 CDN 要 Referer，否则 403
-        '-headers', `Referer: https://www.bilibili.com/\r\nUser-Agent: ${UA}\r\n`,
-        '-rw_timeout', String(timeoutMs * 1000),
-        '-protocol_whitelist', 'http,https,tcp,tls,crypto',
-        '-ss', String(at), '-i', url,
-        '-frames:v', '1', '-an', '-vf', `scale=${width}:-2`,
-        '-q:v', '3', '-f', 'image2', '-c:v', 'mjpeg', 'pipe:1',
-      ], { windowsHide: true })
+      proc = spawnImpl(ffmpeg, frameArgs(url, at, { width, timeoutMs }), { windowsHide: true, ...(env ? { env } : {}) })
     } catch (error) {
       return finish(null)
     }
     const out = []
     let bytes = 0
     const stop = () => { try { proc.kill() } catch (error) {} finish(null) }
-    timer = setTimeout(stop, timeoutMs)
+    timer = setTimeout(() => { timedOut = true; stop() }, timeoutMs)
     proc.stdout.on('data', (d) => {
       if (settled) return
       bytes += d.length
       if (bytes > maxBytes) return stop()
       out.push(d)
     })
-    proc.stderr.on('data', () => {}) // 只用来占位，别让管道堵住
+    // stderr 只留最后一小段：失败原因（403 / 白名单 / 连不上）要能进日志
+    proc.stderr.on('data', (d) => { stderr = (stderr + String(d)).slice(-800) })
     proc.on('error', () => { clearTimeout(timer); finish(null) })
     proc.on('close', (code) => {
       clearTimeout(timer)
@@ -75,6 +103,23 @@ export function grabFrame(ffmpeg, url, at, { width = 512, timeoutMs = 15000, max
       finish(code === 0 && buf.length > 500 && buf[0] === 0xff && buf[1] === 0xd8 ? buf : null)
     })
   })
+}
+
+/**
+ * 从流里抽一帧（JPEG）。失败返回 null，不抛。
+ * 设了系统代理但代理连不上 B 站 CDN 时，没超时就直连再试一次（代理走不通很常见，直连多半能行）。
+ */
+export async function grabFrame(ffmpeg, url, at, { width = 512, timeoutMs = 15000, maxBytes = 2 * 1024 * 1024, log = null, env = process.env, spawnImpl = spawn } = {}) {
+  const first = await grabOnce(spawnImpl, ffmpeg, url, at, { width, timeoutMs, maxBytes, env })
+  if (first.buf) return first.buf
+  if (!first.timedOut && hasProxy(env)) {
+    const second = await grabOnce(spawnImpl, ffmpeg, url, at, { width, timeoutMs, maxBytes, env: withoutProxy(env) })
+    if (second.buf) return second.buf
+    log?.debug?.('抽帧失败（直连也失败）：', shortErr(second.stderr) || '没有输出')
+    return null
+  }
+  log?.debug?.('抽帧失败：', shortErr(first.stderr) || '没有输出')
+  return null
 }
 
 const SYSTEM = '你在看一个视频的若干张截图。只写画面上确实能看到的东西：场景、人物、物体、动作、画面里的文字 / 字幕条 / 贴纸。不要猜剧情，不要编造没出现的内容，不要发表感想。用 3~6 句中文写。'
@@ -175,7 +220,7 @@ export async function lookWithVision({ dsh, api, info, getConfig, log, model, de
         at = Math.max(0, t - win.startMs / 1000) // 段内相对时间
         await assertUrl(url)
       }
-      const buf = await (deps.grabFrame || grabFrame)(ffmpeg, url, at, { timeoutMs: Math.min(15000, remaining) })
+      const buf = await (deps.grabFrame || grabFrame)(ffmpeg, url, at, { timeoutMs: Math.min(15000, remaining), log })
       if (buf) frames.push({ sec: t, buf })
     }
     if (!frames.length) {
