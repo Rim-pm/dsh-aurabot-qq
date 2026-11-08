@@ -45,7 +45,9 @@ export default {
     // 订阅 UP 主动态：单独的引擎，不跟「刷视频」抢配额（它自己会按 subIntervalMin 节流）
     const subs = createSubs({
       getConfig: api.config, setConfig: api.setConfig, hub, memory: api.lazy('memory'), log: api.log, ask: api.ask,
-      // 判定用哪个模型由面板单独选；问图之前先确认它真的能看图（模型自己说了算，主人的手动声明不管这个）
+      // 判定用哪个模型由面板单独选；问图之前先确认它真的能看图。
+      // 单独选了判定模型时只看这个模型的元数据（主人的手动声明是给聊天模型的，不该管到它）；
+      // 没选（target 为 null）就是跟随聊天模型，这时手动声明的「视觉能力」照常生效。
       canSee: (target) => canSeeImages(api.dsh, api.config(), target),
     })
     api.every(60_000, () => subs.tick(), '订阅B站动态')
