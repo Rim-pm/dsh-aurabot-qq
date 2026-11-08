@@ -578,8 +578,16 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
   // 目录被删、header 缺 cwd 都会抛错），补不上的不影响聊天本体（按 sessionId 恢复，不走工作区），
   // 只是侧栏还显示「未分组」。host.js 的授权通知也认 ws.sessionIds，补挂上了通知才能照常转进 QQ。
   let workspaceHealed = false
-  async function healWorkspace() {
-    if (workspaceHealed || disposed) return 0
+  let healing = null
+  // ensureWorkspace() 和 host boot 完成都会触发，可能撞在一起：共用同一个 in-flight promise，
+  // 别让两轮同时枚举再各自 attachSession（真 registry 的 attachSession 是追加，会挂出重复的 sessionId）。
+  function healWorkspace() {
+    if (workspaceHealed || disposed) return Promise.resolve(0)
+    if (healing) return healing
+    healing = healOnce().finally(() => { healing = null })
+    return healing
+  }
+  async function healOnce() {
     const reg = dsh.workspaceRegistry || dsh.get('workspaceRegistry')
     // registry 初始化完成前 list() 会直接抛（真实实现：workspace registry is not started yet），
     // 抛错等同于「还没就绪」：不算跑过，等下个触发点再试
@@ -607,8 +615,9 @@ export function createHub({ dsh, getConfig, log, onebot, stickers, tts, buildToo
       }
     }
     if (n) log.info(`自愈：把 ${n} 个掉出「${WORKSPACE_TITLE}」的 QQ 会话重新挂了回去`)
-    // once 标志只在「这轮确实跑完」时置位：中途被卸载、或整轮全败都留着下次再试
-    if (!stopped && !(failed > 0 && n === 0)) workspaceHealed = true
+    // once 标志只在「这轮全部挂上」时置位：中途被卸载、或有任何一条没挂上都留着下次再试
+    // （已经挂上的会被上面的 includes 跳过，重试只是把漏掉的那几条再试一遍，很便宜）。
+    if (!stopped && failed === 0) workspaceHealed = true
     return n
   }
 

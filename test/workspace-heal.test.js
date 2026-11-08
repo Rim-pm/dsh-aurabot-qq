@@ -108,6 +108,29 @@ test('卸载后自愈直接返回 0，不碰注册表', async (t) => {
   assert.equal(fake.registry.attachCalls.length, 0)
 })
 
+test('并发触发只跑一轮：共用同一个 in-flight，不会挂出重复的 sessionId', async (t) => {
+  const { hub, fake, ws } = setup(t, { chats: chatsOf('sid-a', 'sid-b') })
+  // 挂载放慢，保证两次调用真的重叠（ensureWorkspace 和 host boot 撞在一起就是这个场景）
+  fake.registry.attachBehavior = () => new Promise((r) => setTimeout(r, 20))
+  const [a, b] = await Promise.all([hub.healWorkspace(), hub.healWorkspace()])
+  assert.equal(fake.registry.attachCalls.length, 2, '每个会话只该挂一次')
+  assert.equal(a, 2)
+  assert.equal(b, 2, '后到的调用拿到同一轮的结果')
+  assert.deepEqual([...ws.sessionIds].sort(), ['sid-a', 'sid-b'])
+})
+
+test('部分失败不消耗 once：下次触发只补挂漏掉的那条', async (t) => {
+  const { hub, fake, ws } = setup(t, { chats: chatsOf('sid-a', 'sid-b') })
+  fake.registry.attachBehavior = (sid) => { if (sid === 'sid-b') throw new Error('cwd 对不上') }
+  assert.equal(await hub.healWorkspace(), 1)
+  assert.deepEqual(ws.sessionIds, ['sid-a'])
+  fake.registry.attachBehavior = null
+  assert.equal(await hub.healWorkspace(), 1, '只补挂上次失败的那条')
+  assert.deepEqual([...ws.sessionIds].sort(), ['sid-a', 'sid-b'])
+  assert.equal(fake.registry.attachCalls.length, 3, 'sid-a 不重复挂')
+  assert.equal(await hub.healWorkspace(), 0, '全部挂上后才算跑过')
+})
+
 test('ensureWorkspace 会顺手触发一次自愈', async (t) => {
   const { hub, fake, ws } = setup(t, { chats: chatsOf('sid-a', 'sid-b') })
   assert.equal((await hub.ensureWorkspace()).id, ws.id)
