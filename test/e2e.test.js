@@ -134,7 +134,9 @@ before(async () => {
     stickers: { autoChance: 0 },
     // 大多数用例要的是「每次都回」，刹车放宽；558/559 专门测一段一回和刹车
     group: { interjectChance: 0, burstMax: 50, overrides: { 557: { interjectChance: 1, minRelevance: 0, minRecentMessages: 0, cooldownSec: 0, quietHours: [0, 0] }, 559: { burstMax: 2 } } },
-    diary: { enabled: true },
+    // 日记的定时 tick 会随机挑时间自动写一篇，和用例里手动写的混在一起（绝对下标/条数断言就会飘）。
+    // 用例只需要「手动写一篇」这条路径，所以把每日次数设成 0，别让后台自己发。
+    diary: { enabled: true, timesPerDay: 0 },
     qzoneSocial: { friendChance: 1, ownerChance: 1, intervalMin: 1440 },
     merge: { waitSec: 0.4, maxSec: 3, groupWaitSec: 0.4, groupMaxSec: 3 },
     files: { enabled: true, maxMB: 1, dirs: [] },
@@ -680,11 +682,13 @@ test('空间日记：手动写一篇（仅自己可见），配今天画的图�
   const painting = savePainting(png, '日记配图测试', { now: new Date() })
   // 只统计这次调用里产生的投递：前一条消息的回复可能还在异步发送，
   // 用「调用前后全局条数」判断会偶发失败（就是那个 27 !== 26 的老毛病）
+  const qzoneBefore = mock.sent('send_qzone_msg').length
+  const qzoneSizeBefore = mock.qzone.size
   const { result, sent } = await api.hub.capture(() => fake.call('/diary/run', { visibility: 'self' }))
   const r = result.json()
   assert.equal(r.ok, true, r.message)
   assert.equal(r.images, 1, '今天画了图，日记应该配一张')
-  const q = mock.sent('send_qzone_msg')[0]
+  const q = mock.sent('send_qzone_msg')[qzoneBefore]
   assert.equal(q.params.ugc_right, 64)
   assert.match(q.params.content, /白米饭/)
   assert.equal(q.params.images.length, 1, '说说带了一张图')
@@ -692,14 +696,15 @@ test('空间日记：手动写一篇（仅自己可见），配今天画的图�
   assert.deepEqual(sent, [], '日记那一轮没转发到聊天里')
   const d = (await fake.call('/qzone/delete', { tid: r.tid })).json()
   assert.equal(d.ok, true)
-  assert.equal(mock.qzone.size, 0)
+  assert.equal(mock.qzone.size, qzoneSizeBefore)
 
   // 面板关掉「日记配图」：只发文字
   await fake.call('/save', { diary: { attachImage: false } })
+  const n2 = mock.sent('send_qzone_msg').length
   const r2 = (await api.hub.capture(() => fake.call('/diary/run', { visibility: 'self' }))).result.json()
   assert.equal(r2.ok, true, r2.message)
   assert.equal(r2.images, 0)
-  const q2 = mock.sent('send_qzone_msg')[1]
+  const q2 = mock.sent('send_qzone_msg')[n2]
   assert.equal(q2.params.images, undefined, '关掉后不带图')
   await fake.call('/qzone/delete', { tid: r2.tid })
 
@@ -707,10 +712,11 @@ test('空间日记：手动写一篇（仅自己可见），配今天画的图�
   const painting2 = savePainting(png, '日记配图失败测试', { now: new Date() })
   mock.state.failQzoneImage = true
   try {
+    const n3 = mock.sent('send_qzone_msg').length
     const r3 = (await api.hub.capture(() => fake.call('/diary/run', { visibility: 'self' }))).result.json()
     assert.equal(r3.ok, true, '配图失败也要把日记发出去')
     assert.equal(r3.images, 0, '最后没配成图')
-    const q3 = mock.sent('send_qzone_msg')[2]
+    const q3 = mock.sent('send_qzone_msg')[n3]
     assert.equal(q3.params.images, undefined, '退回只发文字的说说')
     await fake.call('/qzone/delete', { tid: r3.tid })
   } finally {
@@ -901,7 +907,7 @@ test('画作编号：换头像 / 存表情都能用，而且不靠文件路径',
   // 上一条用例在这个聊天里画过图，画作编号已经登记
   mock.push(priv(OWNER, text('画作换头像测试')))
   const a = await lastCall('画作换头像测试')
-  assert.equal(a.result.ok, true, JSON.stringify(a.result))
+  assert.equal(a.result.ok, true, JSON.stringify(a.result) + ' 本轮工具：' + (a.toolNames || []).join(','))
   const call = mock.sent('set_qq_avatar').at(-1)
   const file = String(call.params.file)
   assert.match(file, /^base64:\/\/|avatar-/i, '用画作换头像：交的是图片数据，不是模型给的路径')
@@ -909,7 +915,7 @@ test('画作编号：换头像 / 存表情都能用，而且不靠文件路径',
   const before = (await fake.call('/stickers')).json().items.length
   mock.push(priv(OWNER, text('存画作表情测试')))
   const b = await lastCall('存画作表情测试')
-  assert.equal(b.result.ok, true, JSON.stringify(b.result))
+  assert.equal(b.result.ok, true, JSON.stringify(b.result) + ' 本轮工具：' + (b.toolNames || []).join(','))
   const items = (await fake.call('/stickers')).json().items
   assert.equal(items.length, before + 1, '自己画的图能收进表情库')
   assert.ok(items.some((i) => i.name === '自画像'), '名字用她给的那个')
@@ -924,7 +930,7 @@ test('换头像：主人发来的图也能用，不能被「她的画作」抢�
   const n = mock.sent('set_qq_avatar').length
   mock.push(priv(OWNER, text('刚才那张换头像测试')))
   const c = await lastCall('刚才那张换头像测试')
-  assert.equal(c.result.ok, true, JSON.stringify(c.result))
+  assert.equal(c.result.ok, true, JSON.stringify(c.result) + ' 本轮工具：' + (c.toolNames || []).join(','))
   assert.equal(mock.sent('set_qq_avatar').length, n + 1, '真的调了换头像')
   const call = mock.sent('set_qq_avatar').at(-1)
   const file = String(call.params.file)
@@ -958,26 +964,33 @@ test('表情包她自己整理：改名、改标签（同步到 QQ 收藏备注�
   assert.ok(target)
   const mods = mock.sent('modify_custom_face').length
   mock.push(priv(OWNER, text(`表情改名测试 把「${target.name}」改个名`)))
-  await until(() => fake.turns.at(-1)?.userText.includes('表情改名测试') && fake.turns.at(-1).toolCalls.length)
-  assert.match(fake.turns.at(-1).toolCalls[0].result.message, /改好了/)
+  const renamed = await lastCall('表情改名测试')
+  assert.match(renamed.result.message, /改好了/)
   const after = (await fake.call('/stickers')).json().items.find((i) => i.md5 === target.md5)
   assert.equal(after.name, '改过的名字')
   assert.deepEqual(after.tags, ['开心'])
   if (target.emojiId) await until(() => mock.sent('modify_custom_face').length > mods)
   mock.push(priv(OWNER, text('表情删除测试')))
-  await until(() => fake.turns.at(-1)?.userText.includes('表情删除测试') && fake.turns.at(-1).toolCalls.length)
-  assert.match(fake.turns.at(-1).toolCalls[0].result.message, /删掉了/)
+  const removed = await lastCall('表情删除测试')
+  assert.match(removed.result.message, /删掉了/)
   assert.equal((await fake.call('/stickers')).json().items.some((i) => i.md5 === target.md5), false)
 })
 
 test('翻聊天记录：读当前聊天更早的消息', async () => {
   mock.state.history = [{ time: 1700000000, user_id: 777, sender: { user_id: 777, nickname: '老张' }, message: [{ type: 'text', data: { text: '上周说好去吃火锅' } }] }]
   mock.push(priv(OWNER, text('翻聊天记录看看')))
-  await until(() => fake.turns.at(-1)?.userText.includes('翻聊天记录') && fake.turns.at(-1).toolCalls.length)
-  assert.match(fake.turns.at(-1).toolCalls[0].result.message, /老张：上周说好去吃火锅/)
+  const c = await lastCall('翻聊天记录')
+  assert.match(c.result.message, /老张：上周说好去吃火锅/)
 })
 
-const lastCall = (word) => until(() => { const t = fake.turns.at(-1); return t?.userText.includes(word) && t.toolCalls.length ? t.toolCalls[0] : null })
+// 只看真正的 QQ 聊天轮次：后台系统轮次（写日记 / 空间互动 / 整理记忆）的提示词里会带上当天聊天片段，
+// 里面同样有「改昵称测试」这种字眼，按 at(-1) 取会捞到系统会话（那里没有 qq_* 工具）-> 假红。
+const isChatTurn = (t) => Boolean(t?.source?.speaker?.chat)
+const lastCall = (word) => until(() => {
+  const t = fake.turns.filter(isChatTurn).at(-1)
+  if (!t?.userText.includes(word) || !t.toolCalls.length) return null
+  return { ...t.toolCalls[0], toolNames: t.toolNames, turnText: t.userText }
+})
 
 test('#6 改资料：默认仅主人私聊，昵称 / 签名 / 头像走 SnowLuma 对应动作', async () => {
   mock.push(priv(OWNER, text('改昵称测试')))
