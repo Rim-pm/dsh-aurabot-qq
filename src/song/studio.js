@@ -796,7 +796,7 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, onSu
     const cached = join(work(), 'cache', key + '.mp3')
     if (existsSync(cached)) {
       log.info(`翻唱：「${job.title}」做过了，直接用缓存`)
-      return { file: cached, voice: voice?.id, pitch, dir }
+      return { file: cached, voice: voice.id, pitch, dir }
     }
     current.stage = '截取要唱的那一段'
     const part = await cutFirst(song, dir)
@@ -822,7 +822,7 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, onSu
     mkdirSync(join(work(), 'cache'), { recursive: true })
     copyFileSync(out, cached)
     pruneCache(join(work(), 'cache'), 40)
-    return { file: cached, voice: voice?.id, pitch, dir }
+    return { file: cached, voice: voice.id, pitch, dir }
   }
 
   async function pump() {
