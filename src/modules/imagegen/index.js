@@ -66,7 +66,8 @@ export default {
       // 能看图时把原图放进工具结果（image 块），她当轮就能看见自己画了什么
       render: drawResultBlocks,
       execute: async ({ prompt, shape, image }) => {
-        if (api.config().imageGen.ownerOnly && !hub.turnSendersAllOwner(sessionId)) return { ok: false, message: '画图只给主人画哦' }
+        const ownerRequest = hub.turnSendersAllOwner(sessionId) || (chat.kind === 'group' && hub.turnDirectFromOwner?.(sessionId))
+        if (api.config().imageGen.ownerOnly && !ownerRequest) return { ok: false, message: '画图只给主人画哦；群里请主人单独 @ 我或引用回复我提出请求，多人同时提出请求时请分开发送。' }
         if (image && api.config().imageGen.img2img === false) return { ok: false, message: '参考图功能已关闭' }
         const startedAt = Date.now()
         const reference = await resolveDrawImage(image, { hub, chat })
