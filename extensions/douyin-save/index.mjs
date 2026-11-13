@@ -26,6 +26,12 @@ const WORKSPACE = join(homedir(), 'Aurabot', 'qq-chats')
 const MSG_CHARS = 1500
 /** 文字稿太长当文件发时，聊天里留的开头预览。 */
 const PREVIEW_CHARS = 500
+/** 自动转存过的链接记多久：这段时间里主人说「这个」，指的就是它。 */
+const RECENT_MS = 30 * 60 * 1000
+/** 同一条链接刚发过就不重复发（链接和「你看看这个」并成一条时，模型容易再调一次工具）。 */
+const DEDUPE_MS = 2 * 60 * 1000
+/** 主人明说要再发一遍时，上面的去重让路。 */
+const RESEND_RE = /再发|重发|重新发|再来一遍|再发一次|再发一遍/
 
 let seq = 0
 
@@ -257,6 +263,14 @@ export function wantsRead(text) {
   return /转写|转文字|文字稿|字幕|讲了什么|讲了啥|说了什么|说啥|总结|摘要|概括|评论|热评|留言/.test(String(text || ''))
 }
 
+/**
+ * 这句话是不是在跟主人聊那条视频（而不是单纯要文件）。
+ * 抖音分享文案里自带「看看【…】」，所以不能拿裸「看看」当信号，得是「你看看」「看看这个」这种。
+ */
+export function chatIntent(text) {
+  return /你看看|看看这个|看看那条|看下这个|看一下这个|你觉得|你怎么看|怎么样|好看吗|什么感觉|有意思吗|评价一下|说说这个|聊聊/.test(String(text || ''))
+}
+
 /** 解析 /dy 的参数：默认是转存，开头有「转写 / 评论」这类词就换成对应的活。 */
 export function parseCommand(arg) {
   const raw = String(arg || '').trim()
@@ -421,7 +435,7 @@ async function deliverTranscript(api, chat, text, meta, settings) {
 export default {
   id: 'douyin-save',
   name: '抖音 / B站链接转存',
-  version: '0.4.0',
+  version: '0.5.0',
   api: 1,
   description: '主人发来抖音 / B站链接时，把视频 / 图集取下来直接发回 QQ；明确要的时候还能读文字稿、读评论。下载服务按需启动、空闲自动关闭（走本机 DouYinDownload 的 MCP）',
   defaults: {
@@ -462,6 +476,24 @@ export default {
     let starting = null // 正在启动时共用一个 Promise，别并发拉两次 dtk start
     let idleTimer = null
     let busy = 0 // 正在处理的请求数：干活的时候绝不关服务
+
+    // 最近自动转存过的链接（按 chatId）：主人紧接着说「你看看这个」时，得让她知道指的是哪条
+    const recent = new Map()
+    const remember = (chatId, data, link) => {
+      recent.set(String(chatId), {
+        link,
+        title: oneLine(data.title, 60),
+        platform: String(data.platform || ''),
+        kind: String(data.kind || ''),
+        at: Date.now(),
+      })
+    }
+    const recentOf = (chatId) => {
+      const r = recent.get(String(chatId))
+      if (!r) return null
+      if (Date.now() - r.at > RECENT_MS) { recent.delete(String(chatId)); return null }
+      return r
+    }
 
     const idleMs = () => Math.max(0, Number(settings().idleMinutes) || 0) * 60000
 
@@ -562,7 +594,20 @@ export default {
       if (!data || !data.kind) {
         return { ok: false, message: data?.sec_uid ? '这是作者主页，不是单个作品' : '没解析出这个作品（可能是主页、直播或合集）' }
       }
-      return deliver(api, chat, data, settings())
+      const out = await deliver(api, chat, data, settings())
+      if (out.ok) remember(chat.chatId, data, link)
+      return { ...out, link, title: oneLine(data.title, 60), platform: String(data.platform || ''), kind: String(data.kind || '') }
+    }
+
+    /**
+     * 刚自动转存过的同一条链接，模型再调 douyin_save 就别重发了：
+     * 链接和「你看看这个」并成一条时，它很容易照着规则再发一遍。
+     */
+    const alreadySent = (chat, text) => {
+      const prev = recentOf(chat.chatId)
+      if (!prev || prev.link !== pickLink(text)) return null
+      if (Date.now() - prev.at >= DEDUPE_MS || RESEND_RE.test(String(text || ''))) return null
+      return { ok: true, message: `刚才已经发过《${prev.title || '这条'}》了，没重复发`, link: prev.link, title: prev.title, platform: prev.platform, kind: prev.kind }
     }
 
     /** 转存：先确认链接存在，再确保服务在跑（没开就自动起）。 */
@@ -637,14 +682,14 @@ export default {
       // 默认（readAuto 关）只认「主人明说」；开了才允许她自己判断值不值得读。
       const readHint = s.readAuto
         ? '主人问起视频讲了什么、或者想知道评论区怎么样时可以用；主人只发链接说要下载时不要用。'
-        : '只有主人明确说要「转写」「文字稿」「字幕」「总结」，或者问「这条讲了什么」时才用；主人只发链接、说要下载时绝对不要用。'
+        : '只有主人明确说要「转写」「文字稿」「字幕」「总结」，问「这条讲了什么」，或者拿着刚发来的链接说「你看看这个」「你觉得怎么样」时，才用；主人只发链接、说要下载时绝对不要用。'
       return [
         api.defineTool({
           name: 'douyin_save',
-          description: '把主人发来的抖音或 B站链接里的视频 / 图集取下来，直接发到这个聊天。主人发链接并说「下载」「发我」「存一下」时用；链接里是视频就发视频，是图文就发图。',
+          description: '把主人发来的抖音或 B站链接里的视频 / 图集取下来，直接发到这个聊天。主人发链接并说「下载」「发我」「存一下」时用；链接里是视频就发视频，是图文就发图。刚自动转存过同一条链接时不用再调，会直接告诉你不重复发。',
           properties: { url: { type: 'string', description: '抖音或 B站链接（含 v.douyin.com / b23.tv 短链），或者包含链接的整段分享文案' } },
           required: ['url'],
-          execute: async ({ url }) => save(chat, url),
+          execute: async ({ url }) => alreadySent(chat, url) || save(chat, url),
         }),
         api.defineTool({
           name: 'douyin_transcript',
@@ -688,20 +733,42 @@ export default {
       if (!pickLink(msg.text)) return false
       // 这条是在要文字稿 / 评论：别接管，交给她自己按工具描述去做
       if (wantsRead(msg.text)) return false
+      // 链接 + 「你看看这个」：先转存，再交给她接话（上下文里会带上这条）
+      const talk = chatIntent(msg.text)
       try {
         const r = await save(msg, msg.text)
         if (r.ok) api.log.info('链接已自动转存：' + r.message)
         else api.log.info('链接没转成：' + r.message)
+        if (!r.ok && !talk) {
+          await api.sendText(msg.chatId, `这个链接没转成：${r.message}`).catch(() => {})
+          return true
+        }
       } catch (error) {
         api.log.warn('链接自动转存失败：', error.message)
         return false
       }
-      return true
+      return !talk
+    })
+
+    // 自动转存完，主人接着说「你看看这个」：把刚才那条塞进上下文，她才知道在说哪条
+    api.context(({ chat }) => {
+      if (!chat || chat.kind !== 'private') return ''
+      if (chat.chatId !== 'private:' + String(api.config().ownerQQ || '')) return ''
+      const r = recentOf(chat.chatId)
+      if (!r) return ''
+      const what = r.kind === 'image_album' ? '图集' : '视频'
+      const name = r.platform === 'bilibili' ? 'B站' : '抖音'
+      return `刚才主人发的那条${name}${what}已经自动转存、发到这个聊天里了${r.title ? `：《${r.title}》` : ''}（${r.link}）。`
+        + '如果主人这会儿说「这个」「你看看这个」「你觉得怎么样」，指的就是它：'
+        + '可以直接用 douyin_transcript 读文字稿、douyin_comments 看评论，看完用自己的话说说感受，别只把文字稿贴一遍。'
+        + '媒体已经发过了，别再调 douyin_save 重复发一遍。'
     })
 
     api.rule((kind) => (kind === 'private'
       ? '你会把抖音 / B站链接里的东西发出来：主人发来链接、说要下载或发给他时，用 douyin_save 把视频 / 图集直接发过去，别只贴链接。'
+        + '如果上下文里说这条链接已经自动转存过了，就别再调 douyin_save 重发。'
         + '主人明确说要文字稿、或者问这条讲了什么，才用 douyin_transcript；明确说想看评论、热评，才用 douyin_comments。'
+        + '主人说「你看看这个」「你觉得怎么样」时，是想听你的看法：可以用 douyin_transcript / douyin_comments 看看内容，再用你自己的口吻聊两句，别只复述文字稿。'
         + '主人只发链接时，不要主动读稿、不要主动读评论。'
       : ''))
   },

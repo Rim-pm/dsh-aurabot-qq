@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import mod, {
   pickLink, platformOf, apiKeyOf, parseMcpResponse, mcpCall, settleTask,
-  splitText, parseCommand, formatComments, transcriptText, wantsRead,
+  splitText, parseCommand, formatComments, transcriptText, wantsRead, chatIntent,
   serviceBase, serviceUp,
 } from './index.mjs'
 
@@ -236,6 +236,18 @@ test('wantsRead：正常说话里要文字稿 / 评论也认得出', () => {
   assert.equal(wantsRead(''), false)
 })
 
+test('chatIntent：抖音分享文案自带的「看看」不算想聊天', () => {
+  const share = '9.28 复制打开抖音，看看【从未有人善待我的图文作品】 https://v.douyin.com/VmHpd7y0p9E/ 10/19 fBg:/ :7pm t@E.UL'
+  assert.equal(chatIntent(share), false)
+  assert.equal(chatIntent('https://v.douyin.com/abc/'), false)
+  assert.equal(chatIntent('下载发我'), false)
+  assert.equal(chatIntent('你看看这个'), true)
+  assert.equal(chatIntent('看看这个 https://v.douyin.com/abc/'), true)
+  assert.equal(chatIntent('你觉得怎么样'), true)
+  assert.equal(chatIntent('这条好看吗'), true)
+  assert.equal(chatIntent(''), false)
+})
+
 test('「收到链接就自动发」开着时，要转写 / 评论的消息要让路（不能被吞掉）', async () => {
   const box = fakeApi({ settings: { auto: true } })
   const owner = (text) => ({ chatId: 'private:1', kind: 'private', userId: '1', text })
@@ -246,13 +258,101 @@ test('「收到链接就自动发」开着时，要转写 / 评论的消息要�
   assert.equal(await box.onMessage(owner('转写一下，没链接')), false, '没链接本来也不接管')
 })
 
+test('auto 开着：转存失败要告诉主人，不能悄悄吞掉', async () => {
+  const original = globalThis.fetch
+  globalThis.fetch = async () => { throw new Error('ECONNREFUSED') }
+  try {
+    const box = fakeApi({ settings: { auto: true, autoStart: false, mcpUrl: 'http://127.0.0.1:1/mcp/', apiKey: 'k' } })
+    const handled = await box.onMessage({ chatId: 'private:1', kind: 'private', userId: '1', text: 'https://v.douyin.com/abc/' })
+    assert.equal(handled, true)
+    assert.equal(box.sent.length, 1)
+    assert.match(box.sent[0], /没转成/)
+    assert.match(box.sent[0], /没在运行/)
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
 test('「收到链接就自动发」关着时一律不接管', async () => {
   const box = fakeApi({ settings: { auto: false } })
   assert.equal(await box.onMessage({ chatId: 'private:1', kind: 'private', userId: '1', text: 'https://v.douyin.com/abc/' }), false)
 })
 
-// ---------- 按需启停 ----------
+/** 假的一整套：/readyz 就绪、parse_url 给一条视频、媒体随便几个字节。 */
+function fakeService({ title = '测试视频', kind = 'video' } = {}) {
+  const original = globalThis.fetch
+  const calls = []
+  globalThis.fetch = async (url, init) => {
+    const u = String(url)
+    if (u.endsWith('/readyz')) return new Response('{"status":"ok"}', { status: 200 })
+    if (u.includes('/mcp')) {
+      const body = JSON.parse(init.body)
+      calls.push(body.params.name)
+      const text = body.params.name === 'parse_url'
+        ? JSON.stringify({ status: 'ok', data: { kind, platform: 'douyin', content_id: '1', title, media: { video: { urls: ['http://127.0.0.1:1/media.mp4'] } } } })
+        : JSON.stringify({ status: 'ok' })
+      return new Response('event: message\ndata: ' + JSON.stringify({ jsonrpc: '2.0', id: body.id, result: { content: [{ type: 'text', text }] } }) + '\n', { status: 200 })
+    }
+    return new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { 'content-type': 'video/mp4' } })
+  }
+  return { calls, restore: () => { globalThis.fetch = original } }
+}
 
+test('auto 开着：链接 +「你看看这个」先转存，再把话交给她（上下文带这条）', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dy-auto-'))
+  const f = fakeService()
+  try {
+    const box = fakeApi({ settings: { auto: true, mcpUrl: 'http://127.0.0.1:1/mcp/', apiKey: 'k' }, config: { workspaceDir: dir } })
+    const handled = await box.onMessage({ chatId: 'private:1', kind: 'private', userId: '1', text: '你看看这个 https://v.douyin.com/abc/' })
+    assert.equal(handled, false, '想聊：交给她')
+    assert.ok(f.calls.includes('parse_url'), '得先转存')
+    const ctx = box.context({ chat: { chatId: 'private:1', kind: 'private' } })
+    assert.match(ctx, /自动转存/)
+    assert.match(ctx, /测试视频/)
+    assert.match(ctx, /douyin_transcript/)
+  } finally {
+    f.restore()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('auto 开着：光发链接就自己转存完，不惊动模型', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dy-auto-'))
+  const f = fakeService()
+  try {
+    const box = fakeApi({ settings: { auto: true, mcpUrl: 'http://127.0.0.1:1/mcp/', apiKey: 'k' }, config: { workspaceDir: dir } })
+    const handled = await box.onMessage({ chatId: 'private:1', kind: 'private', userId: '1', text: 'https://v.douyin.com/abc/' })
+    assert.equal(handled, true)
+    assert.match(box.context({ chat: { chatId: 'private:1', kind: 'private' } }), /测试视频/)
+    assert.equal(box.context({ chat: { chatId: 'private:2', kind: 'private' } }), '', '别的聊天不掺和')
+  } finally {
+    f.restore()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('auto 转存完，模型再调 douyin_save 不会重复发；说「再发一遍」才放行', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dy-auto-'))
+  const f = fakeService()
+  try {
+    const box = fakeApi({ settings: { auto: true, mcpUrl: 'http://127.0.0.1:1/mcp/', apiKey: 'k' }, config: { workspaceDir: dir } })
+    const chat = { chatId: 'private:1', kind: 'private' }
+    await box.onMessage({ ...chat, userId: '1', text: 'https://v.douyin.com/abc/' })
+    const tool = box.factory({ chat: ownerChat, level: 'full' })[0]
+    const again = await tool.execute({ url: 'https://v.douyin.com/abc/' }, {})
+    assert.equal(again.ok, true)
+    assert.match(again.message, /没重复发/)
+    assert.equal(f.calls.filter((n) => n === 'parse_url').length, 1, '没有第二次解析 / 发送')
+
+    const forced = await tool.execute({ url: 'https://v.douyin.com/abc/ 再发一遍' }, {})
+    assert.match(forced.message, /视频发出去了/)
+  } finally {
+    f.restore()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// ---------- 按需启停 ----------
 test('serviceBase：从 MCP 地址推到控制台根地址', () => {
   assert.equal(serviceBase('http://127.0.0.1:8000/mcp/'), 'http://127.0.0.1:8000')
   assert.equal(serviceBase('http://127.0.0.1:8000/mcp'), 'http://127.0.0.1:8000')
@@ -305,17 +405,18 @@ test('按需启停的默认值：自动启动开、空闲 30 分钟关', () => {
 
 // ---------- 挂载与设置 ----------
 
-function fakeApi({ settings = {}, sent = [], files = [] } = {}) {
-  const box = { factory: null, rule: null, command: null, onMessage: null, sent, files }
+function fakeApi({ settings = {}, sent = [], files = [], config = {} } = {}) {
+  const box = { factory: null, rule: null, command: null, onMessage: null, context: null, sent, files }
   box.api = {
     id: mod.id,
-    config: () => ({ ownerQQ: '1', workspaceDir: '' }),
+    config: () => ({ ownerQQ: '1', workspaceDir: '', ...config }),
     settings: () => ({ ...mod.defaults, ...settings }),
     defineTool: (d) => d,
     tool: (fn) => { box.factory = fn },
     command: (c) => { box.command = c },
     on: (event, fn) => { if (event === 'message') box.onMessage = fn },
     rule: (fn) => { box.rule = fn },
+    context: (fn) => { box.context = fn },
     log: { info() {}, warn() {}, error() {}, debug() {} },
     sendText: async (chatId, text) => { sent.push(text) },
     sendImage: async () => {},
