@@ -32,6 +32,15 @@ const RECENT_MS = 30 * 60 * 1000
 const DEDUPE_MS = 2 * 60 * 1000
 /** 主人明说要再发一遍时，上面的去重让路。 */
 const RESEND_RE = /再发|重发|重新发|再来一遍|再发一次|再发一遍/
+/** quiet 模式（不往聊天里发）一次给模型多少字：多了白烧 token，后面省略。 */
+const QUIET_CHARS = 3000
+/** douyin_look 一次给模型看多少：文字稿最多这么多字（后面省略）。 */
+const LOOK_CHARS = 1200
+/** douyin_look 图集最多把几张图交给她看（每张都要占视觉 token，别贪多）。 */
+const LOOK_IMAGES = 3
+/** 交给她看的图缩到多大：图集原图常常 2~4 MB，不缩会占满上下文。 */
+const LOOK_SIDE = 768
+const LOOK_BYTES = 300 * 1024
 
 let seq = 0
 
@@ -250,6 +259,23 @@ export function splitText(text, size = MSG_CHARS) {
   return out
 }
 
+/**
+ * 截到 max 字以内，尽量断在句子 / 换行处；返回正文和还剩多少字（给模型看时别一次灌几千字）。
+ * 不超长就原样返回，more 为 0。
+ */
+export function cutText(text, max) {
+  const s = String(text || '').trim()
+  const limit = Math.max(100, Number(max) || QUIET_CHARS)
+  if (s.length <= limit) return { text: s, more: 0 }
+  const window = s.slice(0, limit)
+  const cut = Math.max(
+    window.lastIndexOf('。'), window.lastIndexOf('！'), window.lastIndexOf('？'),
+    window.lastIndexOf('\n'), window.lastIndexOf('；'),
+  )
+  const end = cut >= limit * 0.5 ? cut + 1 : limit
+  return { text: s.slice(0, end).trim(), more: s.length - end }
+}
+
 const MODE_WORDS = [
   { mode: 'comments', re: /^(评论|热评|留言)/ },
   { mode: 'transcript', re: /^(转写|转文字|文字稿|文字|字幕|总结|摘要|概括)/ },
@@ -333,6 +359,20 @@ async function toJpeg(file, out, ffmpeg) {
   }
 }
 
+/** 是不是 webp（看文件头）：webp 很多模型接口不认，交给模型看之前得转成 jpeg。 */
+function isWebp(buf) {
+  return Boolean(buf && buf.length > 12 && buf[0] === 0x52 && buf[1] === 0x49 && buf[8] === 0x57)
+}
+
+/** 看文件头猜图片 MIME（面板缩略图的 data URL 用）。猜不出按 jpeg。 */
+function sniffImage(buf) {
+  if (!buf || buf.length < 4) return 'image/jpeg'
+  if (isWebp(buf)) return 'image/webp'
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png'
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return 'image/gif'
+  return 'image/jpeg'
+}
+
 /** 把作品里的媒体发到聊天里，返回一句给模型看的结果。 */
 async function deliver(api, chat, data, settings) {
   const dir = join(String(api.config()?.workspaceDir || '').trim() || WORKSPACE, '_douyin_tmp', stamp())
@@ -400,6 +440,19 @@ async function deliver(api, chat, data, settings) {
   }
 }
 
+/**
+ * douyin_look 的工具结果：一段文字 +（图集时）几张 image 块。
+ * 图块是宿主登记过的附件块，原样透传；没有就只回文字。
+ */
+export function lookResultBlocks(_args, value) {
+  const text = value && value.ok === false ? '✗ ' + (value.message || '没成功') : (value && value.message) || '✓'
+  const blocks = [{ type: 'text', text }]
+  for (const img of (value && Array.isArray(value.images) ? value.images : [])) {
+    if (img && img.attachment) blocks.push({ ...img, type: 'image' })
+  }
+  return blocks
+}
+
 /** 一条消息装不下就分几条发，别被网关截断。 */
 async function sendLong(api, chat, text) {
   const parts = splitText(text, MSG_CHARS)
@@ -435,8 +488,9 @@ async function deliverTranscript(api, chat, text, meta, settings) {
 export default {
   id: 'douyin-save',
   name: '抖音 / B站链接转存',
-  version: '0.5.0',
+  version: '0.7.0',
   api: 1,
+  panel: 'panel.js',
   description: '主人发来抖音 / B站链接时，把视频 / 图集取下来直接发回 QQ；明确要的时候还能读文字稿、读评论。下载服务按需启动、空闲自动关闭（走本机 DouYinDownload 的 MCP）',
   defaults: {
     mcpUrl: 'http://127.0.0.1:8000/mcp/',
@@ -450,6 +504,10 @@ export default {
     readAuto: false,
     transcriptChars: 6000,
     commentCount: 10,
+    quietRead: false,
+    lookComments: 0,
+    lookTranscript: true,
+    lookImages: 3,
     autoStart: true,
     idleMinutes: 30,
   },
@@ -465,6 +523,10 @@ export default {
     { key: 'readAuto', label: '允许她自己判断读稿 / 读评论', type: 'switch', hint: '关着（默认）时只有主人明说要转写、要看评论，或者敲 /dy 转写，她才会做；只发链接永远只发媒体' },
     { key: 'transcriptChars', label: '文字稿多少字以内直接发', type: 'number', min: 500, max: 20000, step: 500, hint: '超过就当 txt 文件发，聊天里留一段开头' },
     { key: 'commentCount', label: '读几条评论', type: 'number', min: 1, max: 30, step: 1 },
+    { key: 'quietRead', label: '读稿 / 读评论时默认不刷进聊天', type: 'switch', hint: '开着时 douyin_transcript / douyin_comments 默认 quiet：内容只交给她，她自己决定怎么说；关着（默认）时照旧直接发到聊天。她每次调用时仍可以自己覆盖' },
+    { key: 'lookComments', label: '「你看看这个」默认顺带看几条热评', type: 'number', min: 0, max: 30, step: 1, hint: '0 = 默认不看（省时间也省 token）；她这次想多看会自己加' },
+    { key: 'lookTranscript', label: '「你看看这个」默认读文字稿', type: 'switch', hint: '关掉后她默认只看标题 / 图，需要时才读稿（视频转写要几十秒）' },
+    { key: 'lookImages', label: '图集最多给她看几张', type: 'number', min: 1, max: 9, step: 1, hint: '每张都占视觉 token；默认 3 张，缩到 768px' },
     { key: 'autoStart', label: '服务没开就自动启动', type: 'switch', hint: '关掉后服务没运行时会直接告诉你「先跑 dtk start」' },
     { key: 'idleMinutes', label: '空闲多久自动关闭服务', type: 'number', min: 0, max: 1440, step: 5, hint: '分钟；0 = 一直开着。关掉能省下 WSL 那 2~3 GB，下次用会自己再起来' },
   ],
@@ -616,13 +678,8 @@ export default {
       return withService(() => saveNow(chat, text))
     }
 
-    /**
-     * 读文字稿：先让服务端把视频存一份（同一个作品第二次是复用的），
-     * 再调本地 ASR 转写，最后按长短决定直接发还是当文件发。
-     */
-    const transcriptNow = async (chat, text) => {
-      const s = settings()
-      const { data } = await resolve(text)
+    /** 视频 → 文字稿正文（不发聊天）。失败时给一句能看懂的 message。 */
+    const transcriptOf = async (data) => {
       if (String(data.kind) === 'image_album') return { ok: false, message: '这是图集，没有声音可以转' }
       const hasVideo = Boolean((data.media?.video?.urls || []).length || data.media?.video?.url)
       if (!hasVideo) return { ok: false, message: '没取到播放地址（可能要登录才能看，或者这条已经失效）' }
@@ -642,39 +699,270 @@ export default {
       const body = transcriptText(tr)
       if (!body) return { ok: false, message: '这个视频里没识别出人声（可能只有 BGM）' }
 
-      const meta = {
-        title: data.title,
+      return {
+        ok: true,
+        body,
         dur: mmss(Number(data.duration_ms) || Number(tr.data?.duration_ms) || 0),
       }
-      const sent = await deliverTranscript(api, chat, body, meta, s)
+    }
+
+    /**
+     * 读文字稿：先让服务端把视频存一份（同一个作品第二次是复用的），
+     * 再调本地 ASR 转写，最后按长短决定直接发还是当文件发。
+     * quiet: true 时不往聊天里发，把正文放进返回值交给模型自己看（她要在回复里聊内容时用）。
+     */
+    const transcriptNow = async (chat, text, { quiet = false } = {}) => {
+      const s = settings()
+      const { data } = await resolve(text)
+      const r = await transcriptOf(data)
+      if (!r.ok) return r
+      const meta = { title: data.title, dur: r.dur }
       const title = meta.title ? `：《${oneLine(meta.title, 30)}》` : ''
-      return { ok: true, message: `文字稿发过去了${title}（${body.length} 字${meta.dur ? '，' + meta.dur : ''}${sent.via === 'file' ? '，全文在 txt 里' : ''}）` }
+      if (quiet) {
+        const cut = cutText(r.body, QUIET_CHARS)
+        return {
+          ok: true,
+          message: `${meta.title ? `《${oneLine(meta.title, 60)}》` : '这个视频'}的文字稿${meta.dur ? `（${meta.dur}）` : ''}，共 ${r.body.length} 字${cut.more ? `，后面还有 ${cut.more} 字没给你` : ''}：\n\n${cut.text}`,
+          title: oneLine(data.title, 60),
+          dur: meta.dur,
+        }
+      }
+      const sent = await deliverTranscript(api, chat, r.body, meta, s)
+      return { ok: true, message: `文字稿发过去了${title}（${r.body.length} 字${meta.dur ? '，' + meta.dur : ''}${sent.via === 'file' ? '，全文在 txt 里' : ''}）` }
     }
 
     /** 转写：同样先确认链接，再确保服务在跑。 */
-    const transcript = async (chat, text) => {
+    const transcript = async (chat, text, opts = {}) => {
       if (!pickLink(text)) return { ok: false, message: '这段话里没有抖音 / B站链接' }
-      return withService(() => transcriptNow(chat, text))
+      return withService(() => transcriptNow(chat, text, opts))
     }
 
-    /** 读评论：默认热度最高的那几条，带点赞数。 */
-    const commentsNow = async (chat, text) => {
-      const s = settings()
-      const { data } = await resolve(text)
-      const n = Math.max(1, Math.min(30, Number(s.commentCount) || 10))
+    /** 读评论（不发聊天），返回整理好的那段话。 */
+    const commentsOf = async (data, count) => {
+      const n = Math.max(1, Math.min(30, Number(count) || 10))
       const out = await call('list_comments', { platform: data.platform, content_id: data.content_id, count: n }, 90000)
       if (out.status === 'pending') return { ok: false, message: '评论还在取，过一会儿再让我看看' }
       if (out.status === 'error') return { ok: false, message: '评论没取到：' + (out.message || '未知原因') }
       const body = formatComments(out, { max: n, title: String(data.title || '') })
       if (!body) return { ok: false, message: '这条还没人评论' }
-      await sendLong(api, chat, body)
-      return { ok: true, message: `评论发过去了（${(out.data?.items || []).length} 条）` }
+      return { ok: true, body, count: (out.data?.items || []).length }
     }
 
-    const comments = async (chat, text) => {
-      if (!pickLink(text)) return { ok: false, message: '这段话里没有抖音 / B站链接' }
-      return withService(() => commentsNow(chat, text))
+    /** 读评论：默认热度最高的那几条，带点赞数。quiet 时不发聊天，正文交给模型。 */
+    const commentsNow = async (chat, text, { quiet = false } = {}) => {
+      const s = settings()
+      const { data } = await resolve(text)
+      const r = await commentsOf(data, s.commentCount)
+      if (!r.ok) return r
+      if (quiet) {
+        const cut = cutText(r.body, QUIET_CHARS)
+        return { ok: true, message: `${cut.text}${cut.more ? `\n（后面还有 ${cut.more} 字没给你）` : ''}`, count: r.count, title: oneLine(data.title, 60) }
+      }
+      await sendLong(api, chat, r.body)
+      return { ok: true, message: `评论发过去了（${r.count} 条）` }
     }
+
+    const comments = async (chat, text, opts = {}) => {
+      if (!pickLink(text)) return { ok: false, message: '这段话里没有抖音 / B站链接' }
+      return withService(() => commentsNow(chat, text, opts))
+    }
+
+    /** 图集里的图取下来（最多 n 张），给模型看用。 */
+    const albumImages = async (data, n) => {
+      const media = data.media || {}
+      const list = (media.images || []).slice(0, Math.max(1, Number(n) || LOOK_IMAGES))
+      const referer = REFERER[String(data.platform || '')] || REFERER.douyin
+      const out = []
+      for (const img of list) {
+        const url = (img.urls && img.urls[0]) || img.url
+        if (!url) continue
+        try {
+          const got = await grab(url, { referer })
+          if (got.buf?.length) out.push(got.buf)
+        } catch (error) {
+          api.log.debug('图集里有一张没取到（不影响其它）：', error.message)
+        }
+      }
+      return out
+    }
+
+    /**
+     * 一次把这条东西看清楚：标题 / 类型 / 时长 / 文字稿 / 热评，图集还能真看图。
+     * 全程不往聊天里发东西 —— 主人说「你看看这个」时，她要的是看法，不是一堆文件。
+     */
+    const lookNow = async (chat, text, { comments: wantComments = 0, transcript: wantTranscript = true, images: wantImages = LOOK_IMAGES } = {}) => {
+      const s = settings()
+      const { data } = await resolve(text)
+      const kind = String(data.kind || '')
+      const media = data.media || {}
+      const album = kind === 'image_album' || (Array.isArray(media.images) && media.images.length)
+      const dur = mmss(Number(data.duration_ms) || 0)
+      const head = [
+        data.title ? `《${oneLine(data.title, 60)}》` : '（没有标题）',
+        `${data.platform === 'bilibili' ? 'B站' : '抖音'}${album ? '图集' : '视频'}${dur ? '，' + dur : ''}`,
+      ].join('\n')
+      const parts = [head]
+      const out = { ok: true, title: oneLine(data.title, 60), platform: String(data.platform || ''), kind, link: pickLink(text) }
+      if (album) out.images = []
+      let trouble = ''
+
+      if (album) {
+        const total = (media.images || []).length
+        if ((await canSee(chat)) !== true) {
+          trouble = '你现在的模型看不了图'
+          parts.push(`图集共 ${total} 张（你现在的模型看不了图，只能看到标题）`)
+        } else {
+          const bufs = await albumImages(data, Math.max(1, Math.min(9, Number(wantImages) || LOOK_IMAGES)))
+          if (!bufs.length) trouble = '图集里的图一张都没取到'
+          else {
+            const img = imgLib()
+            for (const buf of bufs) {
+              const block = img ? await lookImageBlock(img, buf, s.ffmpeg) : null
+              if (block) out.images.push(block)
+            }
+            if (!out.images.length) trouble = '图取到了，但这次没能交给你看'
+            else parts.push(`图集共 ${total} 张，给你看了前 ${out.images.length} 张（图在上面）`)
+          }
+        }
+      } else if (wantTranscript !== false) {
+        const r = await transcriptOf(data)
+        if (r.ok) {
+          const cut = cutText(r.body, LOOK_CHARS)
+          parts.push(`文字稿${r.dur ? `（${r.dur}）` : ''}，共 ${r.body.length} 字${cut.more ? `，这里只给你前 ${cut.text.length} 字` : ''}：\n${cut.text}`)
+        } else trouble = r.message
+      }
+
+      const n = Math.max(0, Math.min(30, Number(wantComments) || 0))
+      if (n > 0) {
+        const r = await commentsOf(data, n)
+        if (r.ok) {
+          const cut = cutText(r.body, LOOK_CHARS)
+          parts.push(`热评：\n${cut.text}${cut.more ? `\n（后面还有 ${cut.more} 字没给你）` : ''}`)
+        } else if (!trouble) trouble = r.message
+      }
+
+      if (trouble) parts.push(`（${trouble}）`)
+      out.message = parts.join('\n\n')
+      return out
+    }
+
+    const look = async (chat, text, opts) => {
+      if (!pickLink(text)) return { ok: false, message: '这段话里没有抖音 / B站链接' }
+      return withService(() => lookNow(chat, text, opts))
+    }
+
+    /** 当前会话的模型能不能看图；拿不到判断就当看不了（宁可不给图也别让整轮请求挂掉）。 */
+    const canSee = async (chat) => {
+      try {
+        const hub = api.core && api.core.hub
+        if (!hub || typeof hub.canSeeImages !== 'function') return false
+        return (await hub.canSeeImages(chat)) === true
+      } catch (error) {
+        return false
+      }
+    }
+
+    /** 内部缩图 / 附件登记工具；宿主没给就当没有（只给文字）。 */
+    const imgLib = () => {
+      try { return api.lib('core/img.js') } catch (error) { return null }
+    }
+
+    /**
+     * 一张图 → 能交给模型看的图片块。
+     * 抖音图集基本是 webp，很多模型接口不认，所以先自己转成 jpeg 再登记（转不了就原样试一次）。
+     */
+    const lookImageBlock = async (img, buf, ffmpegPath) => {
+      const opts = { ffmpegPath, maxSide: LOOK_SIDE, maxBytes: LOOK_BYTES, log: api.log }
+      if (isWebp(buf) && typeof img.shrinkImage === 'function') {
+        try {
+          const ffmpeg = typeof img.findFfmpeg === 'function' ? img.findFfmpeg(ffmpegPath) : ''
+          const jpg = await img.shrinkImage(buf, LOOK_SIDE, ffmpeg)
+          if (jpg) return await img.imageToolBlock(api.dsh, jpg, opts)
+        } catch (error) {
+          api.log.debug('图集的 webp 转 jpeg 没成，退回原图：', error.message)
+        }
+      }
+      return await img.imageToolBlock(api.dsh, buf, opts)
+    }
+
+    /**
+     * 面板试看：跟 douyin_look 一样把一条链接看清楚，但结果只回给面板（不发聊天、不登记附件），
+     * 图缩成小缩略图用 data URL 直接给浏览器看。
+     */
+    const previewNow = async (text, { comments: wantComments = 0, transcript: wantTranscript = true, images: wantImages = LOOK_IMAGES } = {}) => {
+      const { data, link } = await resolve(text)
+      const kind = String(data.kind || '')
+      const media = data.media || {}
+      const album = kind === 'image_album' || (Array.isArray(media.images) && media.images.length)
+      const out = {
+        ok: true,
+        link,
+        title: oneLine(data.title, 120),
+        platform: String(data.platform || ''),
+        kind,
+        dur: mmss(Number(data.duration_ms) || 0),
+        notes: [],
+      }
+      if (album) {
+        out.imageTotal = (media.images || []).length
+        const bufs = await albumImages(data, Math.max(1, Math.min(9, Number(wantImages) || LOOK_IMAGES)))
+        out.thumbs = []
+        for (const buf of bufs) {
+          const url = await thumbOf(buf)
+          if (url) out.thumbs.push(url)
+        }
+        if (!out.thumbs.length) out.notes.push('图一张都没取到')
+      } else if (wantTranscript !== false) {
+        const r = await transcriptOf(data)
+        if (r.ok) {
+          const cut = cutText(r.body, LOOK_CHARS)
+          out.transcript = cut.text
+          out.transcriptTotal = r.body.length
+          out.transcriptMore = cut.more
+          out.transcriptDur = r.dur || out.dur
+        } else out.notes.push(r.message)
+      }
+      const n = Math.max(0, Math.min(30, Number(wantComments) || 0))
+      if (n > 0) {
+        const r = await commentsOf(data, n)
+        if (r.ok) {
+          const cut = cutText(r.body, LOOK_CHARS)
+          out.comments = cut.text
+          out.commentsCount = r.count
+          out.commentsMore = cut.more
+        } else out.notes.push(r.message)
+      }
+      return out
+    }
+
+    /** 缩略图：缩到 360px 再转 data URL；缩不了但本身不大就原样给。 */
+    const thumbOf = async (buf) => {
+      const img = imgLib()
+      let small = null
+      if (img && typeof img.shrinkImage === 'function') {
+        try {
+          const ffmpeg = typeof img.findFfmpeg === 'function' ? img.findFfmpeg(settings().ffmpeg) : ''
+          small = await img.shrinkImage(buf, 360, ffmpeg)
+        } catch (error) {
+          api.log.debug('面板缩略图没缩成：', error.message)
+        }
+      }
+      const use = small || (buf.length <= 400 * 1024 ? buf : null)
+      if (!use) return ''
+      return `data:${small ? 'image/jpeg' : sniffImage(use)};base64,${use.toString('base64')}`
+    }
+
+    /** 面板「试看」：只读，不发 QQ、不改配置。 */
+    api.route('/look', async (req) => {
+      const body = await api.core.http.body(req)
+      const text = String(body.url || body.text || '')
+      if (!pickLink(text)) return { ok: false, message: '这段话里没有抖音 / B站链接' }
+      return withService(() => previewNow(text, {
+        comments: body.comments === undefined ? 0 : body.comments,
+        transcript: body.transcript === undefined ? true : body.transcript === true,
+        images: body.images === undefined ? settings().lookImages : body.images,
+      }))
+    })
 
     api.tool(({ chat, level }) => {
       if (chat.kind === 'system' || level !== 'full') return []
@@ -683,28 +971,54 @@ export default {
       const readHint = s.readAuto
         ? '主人问起视频讲了什么、或者想知道评论区怎么样时可以用；主人只发链接说要下载时不要用。'
         : '只有主人明确说要「转写」「文字稿」「字幕」「总结」，问「这条讲了什么」，或者拿着刚发来的链接说「你看看这个」「你觉得怎么样」时，才用；主人只发链接、说要下载时绝对不要用。'
+      const urlProp = { type: 'string', description: '抖音或 B站链接（含 v.douyin.com / b23.tv 短链），或者包含链接的整段分享文案' }
+      const quietOn = s.quietRead === true
+      const quietProp = {
+        type: 'boolean',
+        description: `默认 ${quietOn ? 'true（不发聊天，内容只给你）' : 'false（直接把结果发到这个聊天）'}。不想让主人看到这一屏原文时就传 true，只把内容拿给你自己看。`,
+      }
+      const lookComments = Math.max(0, Math.min(30, Number(s.lookComments) || 0))
+      const lookTranscript = s.lookTranscript !== false
+      const lookImages = Math.max(1, Math.min(9, Number(s.lookImages) || LOOK_IMAGES))
       return [
         api.defineTool({
           name: 'douyin_save',
           description: '把主人发来的抖音或 B站链接里的视频 / 图集取下来，直接发到这个聊天。主人发链接并说「下载」「发我」「存一下」时用；链接里是视频就发视频，是图文就发图。刚自动转存过同一条链接时不用再调，会直接告诉你不重复发。',
-          properties: { url: { type: 'string', description: '抖音或 B站链接（含 v.douyin.com / b23.tv 短链），或者包含链接的整段分享文案' } },
+          properties: { url: urlProp },
           required: ['url'],
           execute: async ({ url }) => alreadySent(chat, url) || save(chat, url),
         }),
         api.defineTool({
           name: 'douyin_transcript',
-          description: '把主人发来的抖音或 B站链接里的视频转成文字，直接把文字稿发到这个聊天。转写要先把视频存到本机服务、再跑语音识别，通常几十秒，长视频更久。' + readHint,
-          properties: { url: { type: 'string', description: '抖音或 B站链接（含 v.douyin.com / b23.tv 短链），或者包含链接的整段分享文案' } },
+          description: `把主人发来的抖音或 B站链接里的视频转成文字。默认${quietOn ? '不发聊天、只把文字稿交给你自己看' : '把文字稿直接发到这个聊天'}；quiet 反过来时按 quiet 说的做。转写要先把视频存到本机服务、再跑语音识别，通常几十秒，长视频更久。图集没有声音，别调这个。` + readHint,
+          properties: { url: urlProp, quiet: quietProp },
           required: ['url'],
           slow: true,
-          execute: async ({ url }) => transcript(chat, url),
+          execute: async ({ url, quiet }) => transcript(chat, url, { quiet: quiet === undefined ? quietOn : quiet === true }),
         }),
         api.defineTool({
           name: 'douyin_comments',
-          description: '把主人发来的抖音或 B站视频下面的评论读出来，发到这个聊天（带点赞数）。' + readHint,
-          properties: { url: { type: 'string', description: '抖音或 B站链接（含 v.douyin.com / b23.tv 短链），或者包含链接的整段分享文案' } },
+          description: `把主人发来的抖音或 B站视频下面的评论读出来（带点赞数）。默认${quietOn ? '不发聊天、只把评论交给你自己看' : '直接发到这个聊天'}；quiet 反过来时按 quiet 说的做。` + readHint,
+          properties: { url: urlProp, quiet: quietProp },
           required: ['url'],
-          execute: async ({ url }) => comments(chat, url),
+          execute: async ({ url, quiet }) => comments(chat, url, { quiet: quiet === undefined ? quietOn : quiet === true }),
+        }),
+        api.defineTool({
+          name: 'douyin_look',
+          description: '看一条抖音 / B站链接里的东西：一次拿到标题、类型、时长、文字稿和热评，图集还能真看图。全程不往聊天里发任何东西，内容只交给你自己看。主人说「你看看这个」「你觉得怎么样」「这条讲了什么」时优先用这个，看完用自己的话跟他聊，别把内容原样贴出来。',
+          properties: {
+            url: urlProp,
+            comments: { type: 'integer', description: `顺带看几条热评，0 = 不看（默认 ${lookComments}）`, minimum: 0, maximum: 30 },
+            transcript: { type: 'boolean', description: `视频要不要读文字稿（默认 ${lookTranscript ? 'true' : 'false'}）；图集本来就没声音，会自动跳过` },
+          },
+          required: ['url'],
+          slow: '我看看这条讲什么，稍等一下。',
+          render: lookResultBlocks,
+          execute: async ({ url, comments, transcript }) => look(chat, url, {
+            comments: comments === undefined ? lookComments : comments,
+            transcript: transcript === undefined ? lookTranscript : transcript,
+            images: lookImages,
+          }),
         }),
       ]
     })
@@ -730,11 +1044,18 @@ export default {
     api.on('message', async (msg) => {
       if (!settings().auto) return false
       if (!msg || msg.chatId !== 'private:' + String(api.config().ownerQQ || '')) return false
-      if (!pickLink(msg.text)) return false
+      const link = pickLink(msg.text)
+      if (!link) return false
       // 这条是在要文字稿 / 评论：别接管，交给她自己按工具描述去做
       if (wantsRead(msg.text)) return false
       // 链接 + 「你看看这个」：先转存，再交给她接话（上下文里会带上这条）
       const talk = chatIntent(msg.text)
+      // 同一条链接刚发过就别再发一遍（分享文案会重复触发），但主人明说「再发一遍」时照发
+      const prev = recentOf(msg.chatId)
+      if (prev && prev.link === link && Date.now() - prev.at < DEDUPE_MS && !RESEND_RE.test(String(msg.text || ''))) {
+        api.log.info(`同一条链接 ${DEDUPE_MS / 60000} 分钟内已经发过，这次不重复发`)
+        return !talk
+      }
       try {
         const r = await save(msg, msg.text)
         if (r.ok) api.log.info('链接已自动转存：' + r.message)
@@ -760,15 +1081,18 @@ export default {
       const name = r.platform === 'bilibili' ? 'B站' : '抖音'
       return `刚才主人发的那条${name}${what}已经自动转存、发到这个聊天里了${r.title ? `：《${r.title}》` : ''}（${r.link}）。`
         + '如果主人这会儿说「这个」「你看看这个」「你觉得怎么样」，指的就是它：'
-        + '可以直接用 douyin_transcript 读文字稿、douyin_comments 看评论，看完用自己的话说说感受，别只把文字稿贴一遍。'
+        + '用 douyin_look 看一眼（能拿到标题、时长、文字稿、热评，图集还能真看图），然后用你自己的话说说感受，别只把文字稿贴一遍。'
+        + '想单独看评论就加 comments；想单独要文字稿就加 transcript。'
         + '媒体已经发过了，别再调 douyin_save 重复发一遍。'
     })
 
     api.rule((kind) => (kind === 'private'
       ? '你会把抖音 / B站链接里的东西发出来：主人发来链接、说要下载或发给他时，用 douyin_save 把视频 / 图集直接发过去，别只贴链接。'
         + '如果上下文里说这条链接已经自动转存过了，就别再调 douyin_save 重发。'
-        + '主人明确说要文字稿、或者问这条讲了什么，才用 douyin_transcript；明确说想看评论、热评，才用 douyin_comments。'
-        + '主人说「你看看这个」「你觉得怎么样」时，是想听你的看法：可以用 douyin_transcript / douyin_comments 看看内容，再用你自己的口吻聊两句，别只复述文字稿。'
+        + '主人说「你看看这个」「你觉得怎么样」时，是想听你的看法：用 douyin_look 看一眼内容，再用你自己的口吻聊两句，别只复述文字稿、也别把文字稿 / 评论列表原样贴进聊天。'
+        + '主人明确说要文字稿，才用 douyin_transcript（默认会发到聊天，只要自己看就加 quiet: true）；明确说想看评论、热评，才用 douyin_comments。'
+        + '图集没有声音，别调 douyin_transcript。'
+        + '跟主人说话时别提工具名，也别汇报「这是图集 / 没声音 / 没取到」这类过程，直接说你看到了什么、怎么想。'
         + '主人只发链接时，不要主动读稿、不要主动读评论。'
       : ''))
   },

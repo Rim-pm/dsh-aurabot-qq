@@ -10,7 +10,7 @@ const target = resolve(process.argv[2] || join(dataRoot, 'modules', 'douyin-save
 if (resolve(source).toLowerCase() === target.toLowerCase()) throw new Error('当前目录已是安装目录；更新请从 repo 里运行这个命令。')
 
 mkdirSync(target, { recursive: true })
-for (const name of ['README.md', 'package.json']) copyFileSync(join(source, name), join(target, name))
+for (const name of ['README.md', 'package.json', 'panel.js']) copyFileSync(join(source, name), join(target, name))
 // 入口最后换，避免模块在文件没齐的时候被热重载
 copyFileSync(join(source, 'index.mjs'), join(target, 'index.mjs.next'))
 renameSync(join(target, 'index.mjs.next'), join(target, 'index.mjs'))

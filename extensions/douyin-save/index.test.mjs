@@ -2,13 +2,14 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { defineTool } from '../../src/tools/tools.js'
 import mod, {
   pickLink, platformOf, apiKeyOf, parseMcpResponse, mcpCall, settleTask,
   splitText, parseCommand, formatComments, transcriptText, wantsRead, chatIntent,
-  serviceBase, serviceUp,
+  serviceBase, serviceUp, cutText, lookResultBlocks,
 } from './index.mjs'
 
 test('pickLink：从分享文案里挑出链接', () => {
@@ -278,22 +279,30 @@ test('「收到链接就自动发」关着时一律不接管', async () => {
   assert.equal(await box.onMessage({ chatId: 'private:1', kind: 'private', userId: '1', text: 'https://v.douyin.com/abc/' }), false)
 })
 
-/** 假的一整套：/readyz 就绪、parse_url 给一条视频、媒体随便几个字节。 */
-function fakeService({ title = '测试视频', kind = 'video' } = {}) {
+/** 假的一整套：/readyz 就绪、parse_url 给一条作品、媒体随便几个字节。 */
+function fakeService({ title = '测试视频', kind = 'video', images = 0, transcript = '大家好，今天讲三件事。', comments = [], imageBytes = null } = {}) {
   const original = globalThis.fetch
   const calls = []
+  const media = kind === 'image_album'
+    ? { images: Array.from({ length: images }, (_, i) => ({ urls: [`http://127.0.0.1:1/image-${i + 1}.jpg`] })) }
+    : { video: { urls: ['http://127.0.0.1:1/media.mp4'] } }
   globalThis.fetch = async (url, init) => {
     const u = String(url)
     if (u.endsWith('/readyz')) return new Response('{"status":"ok"}', { status: 200 })
     if (u.includes('/mcp')) {
       const body = JSON.parse(init.body)
-      calls.push(body.params.name)
-      const text = body.params.name === 'parse_url'
-        ? JSON.stringify({ status: 'ok', data: { kind, platform: 'douyin', content_id: '1', title, media: { video: { urls: ['http://127.0.0.1:1/media.mp4'] } } } })
-        : JSON.stringify({ status: 'ok' })
-      return new Response('event: message\ndata: ' + JSON.stringify({ jsonrpc: '2.0', id: body.id, result: { content: [{ type: 'text', text }] } }) + '\n', { status: 200 })
+      const name = body.params.name
+      calls.push(name)
+      let payload = { status: 'ok' }
+      if (name === 'parse_url') payload = { status: 'ok', data: { kind, platform: 'douyin', content_id: '1', title, duration_ms: 125000, media } }
+      else if (name === 'download_media') payload = { status: 'ok', download_id: 'd1' }
+      else if (name === 'transcribe_video') payload = { status: 'ok', data: { state: 'done', text: transcript } }
+      else if (name === 'list_comments') payload = { status: 'ok', data: { items: comments } }
+      return new Response('event: message\ndata: ' + JSON.stringify({ jsonrpc: '2.0', id: body.id, result: { content: [{ type: 'text', text: JSON.stringify(payload) }] } }) + '\n', { status: 200 })
     }
-    return new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { 'content-type': 'video/mp4' } })
+    const image = /\.(jpg|jpeg|png|webp)(\?|$)/i.test(u)
+    const body = image && imageBytes ? imageBytes : new Uint8Array([1, 2, 3])
+    return new Response(body, { status: 200, headers: { 'content-type': image ? 'image/jpeg' : 'video/mp4' } })
   }
   return { calls, restore: () => { globalThis.fetch = original } }
 }
@@ -309,7 +318,7 @@ test('auto 开着：链接 +「你看看这个」先转存，再把话交给她�
     const ctx = box.context({ chat: { chatId: 'private:1', kind: 'private' } })
     assert.match(ctx, /自动转存/)
     assert.match(ctx, /测试视频/)
-    assert.match(ctx, /douyin_transcript/)
+    assert.match(ctx, /douyin_look/)
   } finally {
     f.restore()
     rmSync(dir, { recursive: true, force: true })
@@ -346,6 +355,332 @@ test('auto 转存完，模型再调 douyin_save 不会重复发；说「再发�
 
     const forced = await tool.execute({ url: 'https://v.douyin.com/abc/ 再发一遍' }, {})
     assert.match(forced.message, /视频发出去了/)
+  } finally {
+    f.restore()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// ---------- quiet / douyin_look：读内容但不往聊天里刷屏 ----------
+
+test('cutText：不超长原样返回；超长断在句子处并报还剩多少字', () => {
+  assert.deepEqual(cutText('短句。', 100), { text: '短句。', more: 0 })
+  const long = '这是一句话。'.repeat(100)
+  const cut = cutText(long, 200)
+  assert.ok(cut.text.length <= 200)
+  assert.ok(cut.text.endsWith('。'))
+  assert.equal(cut.text.length + cut.more, long.length)
+})
+
+test('douyin_transcript quiet：不发聊天，文字稿进返回值', async () => {
+  const f = fakeService({ transcript: '第一句。第二句。' })
+  try {
+    const box = fakeApi({ settings: { mcpUrl: 'http://127.0.0.1:1/mcp/', apiKey: 'k' } })
+    const tool = box.factory({ chat: ownerChat, level: 'full' })[1]
+    const r = await tool.execute({ url: 'https://v.douyin.com/abc/', quiet: true }, {})
+    assert.equal(r.ok, true)
+    assert.match(r.message, /第一句。第二句。/)
+    assert.equal(box.sent.length, 0, 'quiet 时一句话都不该发进聊天')
+    assert.equal(box.files.length, 0)
+  } finally {
+    f.restore()
+  }
+})
+
+test('douyin_transcript 默认（quiet 没给）还是发聊天', async () => {
+  const f = fakeService({ transcript: '第一句。' })
+  try {
+    const box = fakeApi({ settings: { mcpUrl: 'http://127.0.0.1:1/mcp/', apiKey: 'k' } })
+    const tool = box.factory({ chat: ownerChat, level: 'full' })[1]
+    const r = await tool.execute({ url: 'https://v.douyin.com/abc/' }, {})
+    assert.equal(r.ok, true)
+    assert.match(box.sent.join('\n'), /第一句。/)
+  } finally {
+    f.restore()
+  }
+})
+
+test('douyin_comments quiet：评论进返回值，不刷进聊天', async () => {
+  const f = fakeService({ comments: [{ text: '好家伙', author: { nickname: '甲' }, digg_count: 3 }] })
+  try {
+    const box = fakeApi({ settings: { mcpUrl: 'http://127.0.0.1:1/mcp/', apiKey: 'k' } })
+    const tool = box.factory({ chat: ownerChat, level: 'full' })[2]
+    const r = await tool.execute({ url: 'https://v.douyin.com/abc/', quiet: true }, {})
+    assert.equal(r.ok, true)
+    assert.match(r.message, /好家伙/)
+    assert.equal(box.sent.length, 0)
+  } finally {
+    f.restore()
+  }
+})
+
+test('douyin_look 视频：一次给标题、时长、文字稿、热评，且不发聊天', async () => {
+  const f = fakeService({ transcript: '讲了三件事。', comments: [{ text: '说到心坎里了', author: { nickname: '乙' }, digg_count: 8 }] })
+  try {
+    const box = fakeApi({ settings: { mcpUrl: 'http://127.0.0.1:1/mcp/', apiKey: 'k' } })
+    const tool = box.factory({ chat: ownerChat, level: 'full' })[3]
+    const r = await tool.execute({ url: 'https://v.douyin.com/abc/', comments: 5 }, {})
+    assert.equal(r.ok, true)
+    assert.match(r.message, /《测试视频》/)
+    assert.match(r.message, /视频，2:05/)
+    assert.match(r.message, /讲了三件事。/)
+    assert.match(r.message, /说到心坎里了/)
+    assert.equal(box.sent.length, 0, '看内容时不许往聊天里刷')
+    assert.equal(box.files.length, 0)
+  } finally {
+    f.restore()
+  }
+})
+
+test('douyin_look 视频：comments 默认 0 就不去读评论', async () => {
+  const f = fakeService({ transcript: '只有口播。' })
+  try {
+    const box = fakeApi({ settings: { mcpUrl: 'http://127.0.0.1:1/mcp/', apiKey: 'k' } })
+    const tool = box.factory({ chat: ownerChat, level: 'full' })[3]
+    const r = await tool.execute({ url: 'https://v.douyin.com/abc/' }, {})
+    assert.equal(r.ok, true)
+    assert.ok(!f.calls.includes('list_comments'))
+  } finally {
+    f.restore()
+  }
+})
+
+test('douyin_look 图集：能看图时返回 image 块，不调转写', async () => {
+  const f = fakeService({ kind: 'image_album', images: 5 })
+  try {
+    const box = fakeApi({
+      settings: { mcpUrl: 'http://127.0.0.1:1/mcp/', apiKey: 'k' },
+      visual: true,
+      imageLib: { imageToolBlock: async (_dsh, buf) => ({ type: 'image', attachment: 'a-' + buf.length, mediaType: 'image/jpeg' }) },
+    })
+    const tool = box.factory({ chat: ownerChat, level: 'full' })[3]
+    const r = await tool.execute({ url: 'https://v.douyin.com/abc/' }, {})
+    assert.equal(r.ok, true)
+    assert.equal(r.images.length, 3, '最多给三张，别把上下文塞满')
+    assert.ok(!f.calls.includes('transcribe_video'), '图集没声音，不该去转写')
+    const blocks = tool.output.render({}, r)
+    assert.equal(blocks.filter((b) => b.type === 'image').length, 3)
+    assert.match(blocks[0].text, /图集共 5 张/)
+    assert.equal(box.sent.length, 0)
+  } finally {
+    f.restore()
+  }
+})
+
+test('douyin_look 图集：模型看不了图就如实说，不硬塞图片块', async () => {
+  const f = fakeService({ kind: 'image_album', images: 2 })
+  try {
+    const box = fakeApi({ settings: { mcpUrl: 'http://127.0.0.1:1/mcp/', apiKey: 'k' }, visual: false })
+    const tool = box.factory({ chat: ownerChat, level: 'full' })[3]
+    const r = await tool.execute({ url: 'https://v.douyin.com/abc/' }, {})
+    assert.equal(r.ok, true)
+    assert.deepEqual(r.images, [])
+    assert.match(r.message, /看不了图/)
+  } finally {
+    f.restore()
+  }
+})
+
+test('douyin_look 图集：webp 先转成 jpeg 再交给模型（模型接口不认 webp）', async () => {
+  const webp = Buffer.from([0x52, 0x49, 0x46, 0x46, 1, 2, 3, 4, 0x57, 0x45, 0x42, 0x50, 5, 6, 7, 8])
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 9, 9, 9, 9])
+  const f = fakeService({ kind: 'image_album', images: 2, imageBytes: webp })
+  try {
+    const seen = []
+    const box = fakeApi({
+      settings: { mcpUrl: 'http://127.0.0.1:1/mcp/', apiKey: 'k' },
+      visual: true,
+      imageLib: {
+        findFfmpeg: () => 'ffmpeg',
+        shrinkImage: async (buf) => { seen.push('shrink'); return buf[0] === 0x52 ? jpeg : null },
+        imageToolBlock: async (_dsh, buf) => { seen.push(buf[0] === 0xff ? 'jpeg' : 'raw'); return { type: 'image', attachment: 'a' + seen.length, mediaType: 'image/jpeg' } },
+      },
+    })
+    const tool = box.factory({ chat: ownerChat, level: 'full' })[3]
+    const r = await tool.execute({ url: 'https://v.douyin.com/abc/' }, {})
+    assert.equal(r.ok, true)
+    assert.equal(r.images.length, 2)
+    assert.deepEqual(seen, ['shrink', 'jpeg', 'shrink', 'jpeg'], '每张 webp 都要先转 jpeg 再登记')
+  } finally {
+    f.restore()
+  }
+})
+
+test('douyin_look 图集：转不了 jpeg 时退回原图，别一张都不给', async () => {
+  const webp = Buffer.from([0x52, 0x49, 0x46, 0x46, 1, 2, 3, 4, 0x57, 0x45, 0x42, 0x50, 5, 6, 7, 8])
+  const f = fakeService({ kind: 'image_album', images: 1, imageBytes: webp })
+  try {
+    const box = fakeApi({
+      settings: { mcpUrl: 'http://127.0.0.1:1/mcp/', apiKey: 'k' },
+      visual: true,
+      imageLib: {
+        findFfmpeg: () => '',
+        shrinkImage: async () => null,
+        imageToolBlock: async (_dsh, buf) => ({ type: 'image', attachment: 'a-' + buf.length, mediaType: 'image/webp' }),
+      },
+    })
+    const tool = box.factory({ chat: ownerChat, level: 'full' })[3]
+    const r = await tool.execute({ url: 'https://v.douyin.com/abc/' }, {})
+    assert.equal(r.images.length, 1)
+  } finally {
+    f.restore()
+  }
+})
+
+test('lookResultBlocks：没图只回文字；失败加 ✗', () => {
+  assert.deepEqual(lookResultBlocks({}, { ok: true, message: '看到了' }), [{ type: 'text', text: '看到了' }])
+  assert.match(lookResultBlocks({}, { ok: false, message: '没取到' })[0].text, /✗ 没取到/)
+})
+
+// ---------- 默认值设置项 ----------
+
+test('设置项：看图 / 读稿 / 评论的默认值都有，且兜底值合理', () => {
+  assert.equal(mod.defaults.lookComments, 0)
+  assert.equal(mod.defaults.lookTranscript, true)
+  assert.equal(mod.defaults.lookImages, 3)
+  assert.equal(mod.defaults.quietRead, false)
+  for (const key of ['lookComments', 'lookTranscript', 'lookImages', 'quietRead']) {
+    assert.ok(mod.settings.some((s) => s.key === key), `设置面板要有 ${key}`)
+  }
+})
+
+test('douyin_look 没给参数时按设置里的默认值走：读评论、限制图片张数', async () => {
+  const f = fakeService({
+    kind: 'image_album',
+    images: 5,
+    comments: [{ text: '沙发', digg_count: 9, author: { nickname: '甲' } }],
+  })
+  try {
+    const box = fakeApi({
+      settings: { mcpUrl: 'http://127.0.0.1:1/mcp/', apiKey: 'k', lookComments: 2, lookImages: 2 },
+      visual: true,
+      imageLib: { imageToolBlock: async () => ({ type: 'image', attachment: 'a', mediaType: 'image/jpeg' }) },
+    })
+    const tool = box.factory({ chat: ownerChat, level: 'full' })[3]
+    const r = await tool.execute({ url: 'https://v.douyin.com/abc/' }, {})
+    assert.equal(r.ok, true)
+    assert.equal(r.images.length, 2, '按 lookImages 只给两张')
+    assert.match(r.message, /热评/, 'lookComments=2 时默认读评论')
+    assert.ok(f.calls.includes('list_comments'))
+  } finally {
+    f.restore()
+  }
+})
+
+test('douyin_look：设置里关了读稿，默认就不转写；显式 transcript:true 还是读', async () => {
+  const f = fakeService({ transcript: '不该出现。' })
+  try {
+    const box = fakeApi({ settings: { mcpUrl: 'http://127.0.0.1:1/mcp/', apiKey: 'k', lookTranscript: false } })
+    const tool = box.factory({ chat: ownerChat, level: 'full' })[3]
+    const off = await tool.execute({ url: 'https://v.douyin.com/abc/' }, {})
+    assert.doesNotMatch(off.message, /不该出现/)
+    assert.ok(!f.calls.includes('transcribe_video'))
+
+    const on = await tool.execute({ url: 'https://v.douyin.com/abc/', transcript: true }, {})
+    assert.match(on.message, /不该出现/)
+    assert.ok(f.calls.includes('transcribe_video'))
+  } finally {
+    f.restore()
+  }
+})
+
+test('quietRead 开着：douyin_transcript 默认不发聊天，显式 quiet:false 才发', async () => {
+  const f = fakeService({ transcript: '安静地读完。' })
+  try {
+    const quietBox = fakeApi({ settings: { mcpUrl: 'http://127.0.0.1:1/mcp/', apiKey: 'k', quietRead: true }, config: { workspaceDir: tmpdir() } })
+    const quietTool = quietBox.factory({ chat: ownerChat, level: 'full' })[1]
+    const r = await quietTool.execute({ url: 'https://v.douyin.com/abc/' }, {})
+    assert.equal(r.ok, true)
+    assert.match(r.message, /安静地读完/)
+    assert.deepEqual(quietBox.sent, [], 'quietRead 默认就不刷聊天')
+
+    const loudBox = fakeApi({ settings: { mcpUrl: 'http://127.0.0.1:1/mcp/', apiKey: 'k', quietRead: true }, config: { workspaceDir: tmpdir() } })
+    const loudTool = loudBox.factory({ chat: ownerChat, level: 'full' })[1]
+    await loudTool.execute({ url: 'https://v.douyin.com/abc/', quiet: false }, {})
+    assert.ok(loudBox.sent.length, '显式 quiet:false 要照旧发到聊天')
+  } finally {
+    f.restore()
+  }
+})
+
+// ---------- 面板 ----------
+
+test('模块声明了 panel.js，且文件真的存在（install 会一起拷过去）', () => {
+  assert.equal(mod.panel, 'panel.js')
+  assert.ok(existsSync(new URL('./panel.js', import.meta.url)), 'panel.js 要跟 index.mjs 放一起')
+})
+
+test('面板 /look：贴链接就返回标题和文字稿，不发聊天', async () => {
+  const f = fakeService({ title: '试看标题', transcript: '面板里看到的稿子。' })
+  try {
+    const box = fakeApi({ settings: { mcpUrl: 'http://127.0.0.1:1/mcp/', apiKey: 'k' }, config: { workspaceDir: tmpdir() } })
+    const r = await box.routes['/look']({ body: { url: 'https://v.douyin.com/abc/' } })
+    assert.equal(r.ok, true)
+    assert.equal(r.title, '试看标题')
+    assert.match(r.transcript, /面板里看到的稿子/)
+    assert.deepEqual(box.sent, [], '预览不能往聊天里发东西')
+  } finally {
+    f.restore()
+  }
+})
+
+test('面板 /look：没链接就回一句人话', async () => {
+  const box = fakeApi()
+  const r = await box.routes['/look']({ body: { url: '随便说说' } })
+  assert.equal(r.ok, false)
+  assert.match(r.message, /没有抖音 \/ B站链接/)
+})
+
+test('面板 /look：图集给缩略图 data URL，不给附件块', async () => {
+  const f = fakeService({ kind: 'image_album', images: 2, imageBytes: Buffer.from([0xff, 0xd8, 0xff, 1, 2, 3]) })
+  try {
+    const box = fakeApi({
+      settings: { mcpUrl: 'http://127.0.0.1:1/mcp/', apiKey: 'k' },
+      imageLib: {
+        findFfmpeg: () => 'ffmpeg',
+        shrinkImage: async (buf) => buf,
+        imageToolBlock: async () => null,
+      },
+    })
+    const r = await box.routes['/look']({ body: { url: 'https://v.douyin.com/abc/' } })
+    assert.equal(r.ok, true)
+    assert.equal(r.thumbs.length, 2)
+    assert.match(r.thumbs[0], /^data:image\//)
+  } finally {
+    f.restore()
+  }
+})
+
+// ---------- 自动钩子：同一条链接别重复发 ----------
+
+test('auto 开着：同一条链接连着发两次，只转存一次', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dy-auto-'))
+  const f = fakeService()
+  try {
+    const box = fakeApi({ settings: { auto: true, mcpUrl: 'http://127.0.0.1:1/mcp/', apiKey: 'k' }, config: { workspaceDir: dir } })
+    const owner = (text) => ({ chatId: 'private:1', kind: 'private', userId: '1', text })
+    assert.equal(await box.onMessage(owner('https://v.douyin.com/abc/')), true)
+    assert.equal(await box.onMessage(owner('https://v.douyin.com/abc/')), true, '重复的链接也照样不惊动模型')
+    assert.equal(f.calls.filter((n) => n === 'parse_url').length, 1, '第二次不该再解析 / 再发一遍')
+
+    const talk = await box.onMessage(owner('你看看这个 https://v.douyin.com/abc/'))
+    assert.equal(talk, false, '想聊的时候交给她')
+    assert.equal(f.calls.filter((n) => n === 'parse_url').length, 1, '想聊也别重发媒体')
+  } finally {
+    f.restore()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('auto 开着：明说「再发一遍」就去重让路', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dy-auto-'))
+  const f = fakeService()
+  try {
+    const box = fakeApi({ settings: { auto: true, mcpUrl: 'http://127.0.0.1:1/mcp/', apiKey: 'k' }, config: { workspaceDir: dir } })
+    const owner = (text) => ({ chatId: 'private:1', kind: 'private', userId: '1', text })
+    await box.onMessage(owner('https://v.douyin.com/abc/'))
+    await box.onMessage(owner('再发一遍 https://v.douyin.com/abc/'))
+    assert.equal(f.calls.filter((n) => n === 'parse_url').length, 2)
   } finally {
     f.restore()
     rmSync(dir, { recursive: true, force: true })
@@ -405,14 +740,15 @@ test('按需启停的默认值：自动启动开、空闲 30 分钟关', () => {
 
 // ---------- 挂载与设置 ----------
 
-function fakeApi({ settings = {}, sent = [], files = [], config = {} } = {}) {
-  const box = { factory: null, rule: null, command: null, onMessage: null, context: null, sent, files }
+function fakeApi({ settings = {}, sent = [], files = [], config = {}, visual = false, imageLib = null } = {}) {
+  const box = { factory: null, rule: null, command: null, onMessage: null, context: null, sent, files, routes: {} }
   box.api = {
     id: mod.id,
     config: () => ({ ownerQQ: '1', workspaceDir: '', ...config }),
     settings: () => ({ ...mod.defaults, ...settings }),
-    defineTool: (d) => d,
+    defineTool,
     tool: (fn) => { box.factory = fn },
+    route: (path, handler) => { box.routes[path] = handler },
     command: (c) => { box.command = c },
     on: (event, fn) => { if (event === 'message') box.onMessage = fn },
     rule: (fn) => { box.rule = fn },
@@ -421,7 +757,16 @@ function fakeApi({ settings = {}, sent = [], files = [], config = {} } = {}) {
     sendText: async (chatId, text) => { sent.push(text) },
     sendImage: async () => {},
     sendFile: async (chatId, file, name) => { files.push({ file, name }) },
-    core: { onebot: { call: async () => ({}) } },
+    dsh: {},
+    lib: (key) => {
+      if (key !== 'core/img.js') throw new Error('没有这个内部文件')
+      return imageLib || { imageToolBlock: async () => null }
+    },
+    core: {
+      onebot: { call: async () => ({}) },
+      hub: { canSeeImages: async () => visual },
+      http: { body: async (req) => req?.body || {} },
+    },
   }
   mod.setup(box.api)
   return box
@@ -429,13 +774,15 @@ function fakeApi({ settings = {}, sent = [], files = [], config = {} } = {}) {
 
 const ownerChat = { chatId: 'private:1', kind: 'private' }
 
-test('setup：群聊 / 系统会话没有工具，主人私聊有三个', () => {
+test('setup：群聊 / 系统会话没有工具，主人私聊有四个', () => {
   const box = fakeApi()
   assert.deepEqual(box.factory({ chat: { chatId: 'group:1', kind: 'group' }, level: 'social' }), [])
   assert.deepEqual(box.factory({ chat: { chatId: 'system', kind: 'system' }, level: 'full' }), [])
   const tools = box.factory({ chat: ownerChat, level: 'full' })
-  assert.deepEqual(tools.map((t) => t.name), ['douyin_save', 'douyin_transcript', 'douyin_comments'])
+  assert.deepEqual(tools.map((t) => t.name), ['douyin_save', 'douyin_transcript', 'douyin_comments', 'douyin_look'])
   assert.equal(tools[1].slow, true, '转写要几十秒，得挂慢工具提示')
+  assert.ok(tools[3].slow, '看图也要几十秒，得挂慢工具提示')
+  assert.equal(typeof tools[3].output.render, 'function', 'douyin_look 要能往结果里带图')
 })
 
 test('setup：readAuto 关着时，工具描述只认「主人明说」', () => {
@@ -462,7 +809,9 @@ test('setup：规则只进私聊，且点明读稿 / 读评论要主人明说', 
   assert.match(rule, /douyin_save/)
   assert.match(rule, /douyin_transcript/)
   assert.match(rule, /douyin_comments/)
+  assert.match(rule, /douyin_look/)
   assert.match(rule, /不要主动读稿/)
+  assert.match(rule, /别提工具名/, '别让她在聊天里报工具名 / 失败原因')
 })
 
 test('setup：/dy 默认走转存；没链接时说清楚', async () => {
