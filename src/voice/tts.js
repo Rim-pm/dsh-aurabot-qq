@@ -200,6 +200,90 @@ async function gptsovitsSynth(text, c) {
   return saveAudio(await fetchAudio(`${base}/tts?${q}`, { method: 'GET' }), 32000)
 }
 
+/**
+ * Breeze 语音（BreezeBlue / 本机自建）。两种模式：
+ *   cloud（默认）：`POST {url}/v1/text-to-speech/{音色id}?output_format=…&delivery=sync`
+ *                   带 `xi-api-key`，body `{ text, model_id, language_code?, instructions?, voice_settings? }`
+ *   local        ：`POST {url}/v1/audio/speech`（say-model/breeze_infer 那套）multipart 表单：
+ *                   text / instruction / cfg_scale / seed，返回音频字节
+ */
+export async function breezeSynth(text, c = {}) {
+  const base = String(c.url || 'https://api.breeze.blue').replace(/\/+$/, '')
+  if (c.mode === 'local') return breezeLocal(text, c, base)
+  const key = String(c.key || '').trim()
+  const voiceId = String(c.voiceId || '').trim()
+  if (!key) throw new Error('Breeze 没填 API Key（brz_ 开头）')
+  if (!voiceId) throw new Error('Breeze 没填音色 id（voc_ 开头）')
+  const format = String(c.outputFormat || 'mp3_24000_128')
+  const url = `${base}/v1/text-to-speech/${encodeURIComponent(voiceId)}`
+    + `?output_format=${encodeURIComponent(format)}&delivery=sync`
+  // 云端只用「硬音色 id」：不发 instructions、也不发 voice_settings。
+  // 理由：描述一开就是按描述生成，音色会往描述漂（官方还规定 guidance>1 时 speaker boost 被忽略）。
+  // 想要别的音色就去 breezeblue.ai 做好、把新的 voc_ id 填进来，比在本地写描述稳得多。
+  // 语气/描述只在本地自建（breeze_infer 的 voice design）里用。
+  const body = { text, model_id: String(c.model || 'breeze-tts-2') }
+  if (c.languageCode) body.language_code = String(c.languageCode)
+  const timeout = Number(c.timeoutMs) || 60000
+  let r
+  try {
+    r = await fetch(url, {
+      method: 'POST',
+      headers: { 'xi-api-key': key, accept: 'application/json, audio/*', 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeout),
+    })
+  } catch (error) {
+    throw new Error(`Breeze 连不上（${base}）：${error.message}`)
+  }
+  if (!r.ok) {
+    const detail = (await r.text().catch(() => '')).slice(0, 160)
+    const hint = r.status === 401 ? '：Key 不对或已撤销' : r.status === 402 ? '：额度不够' : r.status === 429 ? '：撞频率限制了' : ''
+    throw new Error(`Breeze HTTP ${r.status}${hint}：${detail}`)
+  }
+  const type = r.headers.get('content-type') || ''
+  if (!/^audio\//i.test(type)) {
+    const detail = (await r.text().catch(() => '')).slice(0, 160)
+    throw new Error(`Breeze 没返回音频（content-type=${type || '空'}）：${detail}`)
+  }
+  const buf = Buffer.from(await r.arrayBuffer())
+  if (buf.length < 400) throw new Error('Breeze 返回的音频太短：' + buf.length + ' 字节')
+  // mp3_24000_128 / mp3_44100_128 这种格式名里带采样率
+  const rate = Number((/mp3_(\d+)/.exec(format) || [])[1]) || 24000
+  return saveAudio(buf, rate)
+}
+
+/** 本机 breeze_infer 那套：multipart 表单（text / instruction / cfg_scale / seed），返回音频字节。 */
+async function breezeLocal(text, c, base) {
+  if (!base) throw new Error('没填 Breeze 本地服务地址')
+  const form = new FormData()
+  form.set('text', text)
+  if (c.instructions) form.set('instruction', String(c.instructions))
+  const cfgScale = Number(c.guidanceScale)
+  if (Number.isFinite(cfgScale) && cfgScale > 0) form.set('cfg_scale', String(cfgScale))
+  const timeout = Number(c.timeoutMs) || 60000
+  let r
+  try {
+    r = await fetch(`${base}/v1/audio/speech`, { method: 'POST', body: form, signal: AbortSignal.timeout(timeout) })
+  } catch (error) {
+    throw new Error(`Breeze 本地服务连不上（${base}）：${error.message}`)
+  }
+  if (!r.ok) {
+    const detail = (await r.text().catch(() => '')).slice(0, 160)
+    // 本地服务一次只跑一个请求，撞上就有 409
+    const hint = r.status === 409 ? '：本地正在合成上一句，等它说完再试' : ''
+    throw new Error(`Breeze 本地 HTTP ${r.status}${hint}：${detail}`)
+  }
+  const type = r.headers.get('content-type') || ''
+  if (type && !/^(audio\/|application\/octet-stream)/i.test(type)) {
+    const detail = (await r.text().catch(() => '')).slice(0, 160)
+    throw new Error(`Breeze 本地没返回音频（content-type=${type}）：${detail}`)
+  }
+  const buf = Buffer.from(await r.arrayBuffer())
+  if (buf.length < 400) throw new Error('Breeze 本地返回的音频太短：' + buf.length + ' 字节')
+  const rate = Number(c.sampleRate) || 24000
+  return saveAudio(buf, rate)
+}
+
 /** 请求头文本 → 对象。一行一个「Key: Value」，空行和 # 开头的行忽略。 */
 function parseHeaderText(raw) {
   const out = {}
@@ -277,6 +361,182 @@ export async function httpSynth(text, c) {
   return saveAudio(buf, c.sampleRate || 24000)
 }
 
+// ---------------------------------------------------------------- 豆包语音（火山引擎）预设
+// 地址、请求头、请求体全部写死在这里，面板上只让人填 API Key、选音色。
+// 坑：v3 接口返回的不是一个 JSON，是「一堆 JSON 首尾相连」（音频一块一块放在 data 里，
+// 最后一段 code=20000000 表示结束）。所以不能 JSON.parse 整段，得一段段扒出来拼回去。
+
+// 走代理网关或自测时可以用环境变量指到别的地方
+const VOLCANO_URL = process.env.AURABOT_VOLCANO_URL || 'https://openspeech.bytedance.com/api/v3/tts/unidirectional'
+
+/** 按大括号配平，从一串连着的 JSON 里切出每个完整对象。 */
+function splitJsonObjects(raw) {
+  const out = []
+  let depth = 0
+  let start = -1
+  let inStr = false
+  let esc = false
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i]
+    if (inStr) {
+      if (esc) esc = false
+      else if (ch === '\\') esc = true
+      else if (ch === '"') inStr = false
+      continue
+    }
+    if (ch === '"') { inStr = true; continue }
+    if (ch === '{') { if (depth === 0) start = i; depth++ }
+    else if (ch === '}') {
+      depth--
+      if (depth === 0 && start >= 0) { out.push(raw.slice(start, i + 1)); start = -1 }
+    }
+  }
+  return out
+}
+
+/** 音色 id → 模型版本。2.0 音色 id 里带 uranus，其余都是 1.0；混用会报 speaker permission denied。 */
+export function volcanoResourceFor(voiceType) {
+  return /uranus/i.test(String(voiceType || '')) ? 'seed-tts-2.0' : 'seed-tts-1.0'
+}
+
+/** 火山的错误码翻成人话，直接显示在面板/日志上。 */
+function volcanoHint(code, message) {
+  const m = String(message || '')
+  const n = Number(code) || 0
+  // 这个码不只代表「填错」：刚开通语音合成、或者刚建的 Key，火山要过几分钟才认，也会回它
+  if (n === 45000010 || /Invalid X-Api-Key/i.test(m)) return 'API Key 没被认出来：先确认是「语音技术 → 设置 → API Key」页复制的（方舟/大模型的 Key 不通用）、没被禁用；刚开通服务或刚建 Key 的话，等几分钟再试一次'
+  // 1.0 和 2.0 是两个产品，只开通一个的话，换到另一种音色就会撞上这条
+  if (n === 45000030 || /resource not granted/i.test(m)) return '这个音色要的模型没开通（45000030）：id 带 uranus 的是 2.0，带 moon / mars 的是 1.0，两种要在「开通管理」里分别开通。账号只开了一个的话，换回另一种音色，或者去控制台把另一个也开了（开通后等几分钟生效）'
+  if (n === 55000000 || /mismatched with speaker/i.test(m)) return '音色和模型版本对不上：id 里带 uranus / vv 的要配 seed-tts-2.0，带 moon / mars 的配 seed-tts-1.0'
+  if (n === 40402003 || /TTSExceededTextLimit/i.test(m)) return '这段文字太长，火山一次念不完，拆成几段发'
+  if (/concurrency|quota/i.test(m)) return '火山的并发额度用完了，等几秒再试'
+  return ''
+}
+
+export async function volcanoSynth(text, c) {
+  const apiKey = String(c.apiKey || '').trim()
+  if (!apiKey) throw new Error('豆包语音：还没填 API Key')
+  const speaker = String(c.voiceType || 'zh_female_vv_uranus_bigtts')
+  // 音色和模型版本必须配对，所以没显式指定时就按音色自己认：id 带 uranus 的是 2.0，其余是 1.0
+  const resourceId = String(c.resourceId || '').trim() || volcanoResourceFor(speaker)
+  const speed = Number(c.speedRatio) || 1
+
+  const audioParams = { format: 'mp3', sample_rate: 24000 }
+  // 语速 1.0 就不传，省得某些音色不认这个字段
+  if (Math.abs(speed - 1) > 0.001) audioParams.speech_rate = Math.round((speed - 1) * 100)
+
+  const r = await fetch(VOLCANO_URL, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'X-Api-Key': apiKey,
+      'X-Api-Resource-Id': resourceId,
+      'X-Api-Request-Id': randomUUID(),
+    },
+    body: JSON.stringify({
+      user: { uid: 'aurabot' },
+      req_params: { text, speaker, audio_params: audioParams },
+    }),
+    signal: AbortSignal.timeout(120000),
+  })
+
+  const raw = await r.text()
+  if (!r.ok) {
+    let j = null
+    try { j = JSON.parse(raw) } catch (e) {}
+    const code = (j && j.header && j.header.code) || (j && j.code)
+    const msg = (j && j.header && j.header.message) || (j && j.message) || raw
+    throw new Error(volcanoHint(code, msg) || `豆包语音 HTTP ${r.status}：${String(msg).slice(0, 160)}`)
+  }
+
+  const parts = []
+  let firstError = ''
+  for (const seg of splitJsonObjects(raw)) {
+    let j = null
+    try { j = JSON.parse(seg) } catch (e) { continue }
+    const h = j.header && typeof j.header === 'object' ? j.header : j
+    const code = h.code
+    // 0 = 音频块，20000000 = 结束；别的码都算失败
+    if (code && code !== 0 && code !== 20000000 && !firstError) firstError = `${code} ${h.message || ''}`
+    if (typeof j.data === 'string' && j.data.length > 20) parts.push(Buffer.from(j.data, 'base64'))
+  }
+
+  if (!parts.length) {
+    const sp = firstError.indexOf(' ')
+    const code = sp > 0 ? firstError.slice(0, sp) : '0'
+    const msg = sp > 0 ? firstError.slice(sp + 1) : firstError
+    throw new Error(volcanoHint(code, msg) || `豆包语音没返回音频：${raw.slice(0, 160)}`)
+  }
+
+  const buf = Buffer.concat(parts)
+  if (buf.length < 400) throw new Error('豆包语音返回的音频太短：' + raw.slice(0, 160))
+  return saveAudio(buf, 24000)
+}
+
+// MiniMax 语音：`POST /v1/t2a_v2`（Bearer Key），音频是 hex 编码的 mp3。
+// 音色 ID 在开放平台「音色库」试听后复制，也可以填声音设计 / 快速复刻出来的自定义 id。
+
+function minimaxHint(code, message) {
+  const n = Number(code) || 0
+  const m = String(message || '')
+  if (n === 1004 || /login fail|authorization/i.test(m)) return 'MiniMax API Key 没被认出来：去开放平台「接口密钥」重新复制（sk-api- 开头），注意别带多余空格'
+  if (n === 1008 || /insufficient|balance/i.test(m)) return 'MiniMax 余额不足：去开放平台充值，或者先换回 edge-tts'
+  if (n === 1002 || n === 1039) return '撞到 MiniMax 的频率限制了：过几秒再试'
+  if (n === 2013) return 'MiniMax 参数不对：多半是 Voice ID 写错了（音色库右侧「复制 Voice ID」），也可能是这个音色不支持选中的情绪'
+  if (n === 1042) return '这段文字里不可见字符 / 非法字符太多，MiniMax 念不了：把表情或乱七八糟的符号去掉再发'
+  if (n === 1000 || n === 1001 || n === 1013 || n === 1024) return 'MiniMax 服务端出错了：过一会儿再试'
+  return ''
+}
+
+export async function minimaxSynth(text, c = {}) {
+  const apiKey = String(c.apiKey || '').trim()
+  if (!apiKey) throw new Error('MiniMax：还没填 API Key')
+  const base = String(c.baseUrl || 'https://api.minimax.cn').replace(/\/+$/, '')
+
+  const voiceSetting = {
+    voice_id: String(c.voiceId || '').trim() || 'Chinese (Mandarin)_Soft_Girl',
+    speed: Number(c.speed) || 1,
+    vol: 1,
+    pitch: Number.isFinite(Number(c.pitch)) ? Number(c.pitch) : 0,
+  }
+  // auto = 不传，交给 MiniMax 按文字自己匹配；填了具体值才当硬条件
+  const emotion = String(c.emotion || 'auto').trim()
+  if (emotion && emotion !== 'auto') voiceSetting.emotion = emotion
+
+  const r = await fetch(`${base}/v1/t2a_v2`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: 'Bearer ' + apiKey,
+    },
+    body: JSON.stringify({
+      model: String(c.model || 'speech-2.8-turbo'),
+      text,
+      stream: false,
+      voice_setting: voiceSetting,
+      audio_setting: { sample_rate: 32000, bitrate: 128000, format: 'mp3', channel: 1 },
+      output_format: 'hex',
+      // 她只讲中文：指定中文能提高多音字读对的概率；要念外语多的话这里改成 'auto'
+      language_boost: 'Chinese',
+    }),
+    signal: AbortSignal.timeout(120000),
+  })
+
+  const raw = await r.text()
+  let j = null
+  try { j = JSON.parse(raw) } catch (e) {}
+  const code = j && j.base_resp ? j.base_resp.status_code : undefined
+  if (code === undefined) throw new Error(`MiniMax HTTP ${r.status}：${raw.slice(0, 160)}`)
+  if (Number(code) !== 0) throw new Error(minimaxHint(code, j.base_resp.status_msg) || `MiniMax ${code}：${j.base_resp.status_msg || '未知错误'}`)
+
+  const hex = String((j.data && j.data.audio) || '')
+  // 正常是 hex；万一哪天回 base64，这里能拦住，别写出坏文件
+  if (!/^[0-9a-fA-F]+$/.test(hex) || hex.length < 800) throw new Error('MiniMax 没返回音频：' + raw.slice(0, 160))
+  const buf = Buffer.from(hex, 'hex')
+  if (buf.length < 400) throw new Error('MiniMax 返回的音频太短：' + buf.length + ' 字节')
+  return saveAudio(buf, 32000)
+}
+
 /** 说话语音的后处理：目前原样返回（RVC 换音色只用在翻唱上，语音条直接用 TTS 的声音）。 */
 export const voiceConverters = []
 
@@ -288,7 +548,7 @@ export async function textToSpeech(text, opt = {}, log) {
   if (!clean) throw new Error('没有要念的文字')
   let file = ''
   let engine = ''
-  const local = { cosyvoice: cosyvoiceSynth, gptsovits: gptsovitsSynth, http: httpSynth, rimtts: rimttsSynth }[opt.engine]
+  const local = { cosyvoice: cosyvoiceSynth, gptsovits: gptsovitsSynth, http: httpSynth, volcano: volcanoSynth, breeze: breezeSynth, minimax: minimaxSynth, rimtts: rimttsSynth }[opt.engine]
   if (local) {
     const c = opt[opt.engine] || {}
     try {

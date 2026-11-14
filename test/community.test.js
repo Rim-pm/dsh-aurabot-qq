@@ -61,6 +61,21 @@ function setup(packs, { cfg = {}, revoked = [], status = [] } = {}) {
   return { c, cfg: () => config }
 }
 
+test('registry 地址：配置 ext.market.registryUrl 优先于内置，并暴露 registryUrl()', async () => {
+  const config = { ext: { market: { registryUrl: 'https://self-host.example.com/index.json' } } }
+  const seen = []
+  const fetcher = async (url) => { seen.push(url); if (url.endsWith('index.json')) return { ok: true, json: async () => ({ schema: 1, assetsBase: 'https://x/', modules: [] }) }; return { ok: true, arrayBuffer: async () => Buffer.from('') } }
+  const c = createCommunity({ mods: { status: () => [], sync: async () => {}, stop: () => true }, getConfig: () => config, setConfig() {}, log: { info() {}, warn() {} }, version: '1.2.0', fetcher })
+  assert.equal(c.registryUrl(), 'https://self-host.example.com/index.json')
+  await c.list()
+  assert.equal(seen[0], 'https://self-host.example.com/index.json')
+})
+
+test('registry 地址：配置为空时回落内置默认', async () => {
+  const c = createCommunity({ mods: { status: () => [], sync: async () => {}, stop: () => true }, getConfig: () => ({}), setConfig() {}, log: { info() {}, warn() {} }, version: '1.2.0', fetcher: async () => ({ ok: true, json: async () => ({ schema: 1, modules: [] }) }) })
+  assert.equal(c.registryUrl(), 'https://raw.githubusercontent.com/aureth-labs/dsh-aurabot-qq-mods/registry/index.json')
+})
+
 before(async () => {
   root = mkdtempSync(join(tmpdir(), 'aurabot-community-'))
   process.env.AURABOT_DATA_DIR = root
@@ -218,11 +233,13 @@ test('测试版：版本比较、更新通道、市场最低版本', async () =>
   assert.equal(u.compareVersions('1.1.24', '1.1.24'), 0)
   assert.equal(compareVersions('1.2.0', '1.2.0-beta.1'), 0)
   const urls = []
-  const check = u.createUpdateChecker({ pkg: { version: '1.2.0-beta.1', repository: 'https://github.com/a/b' }, fetchImpl: async (url) => { urls.push(url); return { ok: true, json: async () => ({ version: '1.2.0-beta.2' }) } } })
+  const feed = '<feed><entry><updated>2026-11-01T00:00:00Z</updated><link rel="alternate" href="https://github.com/a/b/releases/tag/v1.2.0-beta.2"/><title>beta</title></entry></feed>'
+  const check = u.createUpdateChecker({ pkg: { version: '1.2.0-beta.1', repository: 'https://github.com/a/b' }, fetchImpl: async (url) => { urls.push(url); return { ok: true, text: async () => feed } } })
   const r = await check({ force: true })
-  assert.match(urls[0], /\/beta\/package\.json$/)
+  assert.match(urls[0], /releases\.atom$/)
   assert.equal(r.newer, true)
-  assert.match(r.command, /github:a\/b#beta$/)
+  assert.equal(r.latest, '1.2.0-beta.2')
+  assert.match(r.command, /#v1\.2\.0-beta\.2$/)
   assert.equal(u.channelOf('1.2.0'), 'main')
 })
 
@@ -240,11 +257,18 @@ test('安装：id 必须是白名单（防被篡改索引/调用方越目录写�
   }
 })
 
-test('安装：替换内置必须确认，索引 replacesBuiltin 漏填也拦（按真实内置目录判断）', async () => {
+test('安装：替换内置必须确认，索引 replacesBuiltin 漏填也拦（按已注册内置判断）', async () => {
   const p = pack('memory', '9.9.9')
-  const { c } = setup([p])
+  const { c } = setup([p], { status: [{ id: 'memory', builtin: true }] })
   const r = await c.install('memory')
   assert.equal(r.ok, false)
   assert.equal(r.needConfirm, true)
   assert.match(String(r.message), /替换内置/)
+})
+
+test('安装：内置目录残留但未注册（群管）不再要求确认', async () => {
+  const p = pack('group-admin', '1.0.0')
+  const { c } = setup([p])
+  const r = await c.install('group-admin')
+  assert.equal(r.ok, true)
 })

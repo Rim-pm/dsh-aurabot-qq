@@ -2,6 +2,8 @@
 
 export const DEFAULT_GROUP_POLICY = {
   wakeWords: ['大肥鱼', '肥鱼'],
+  proactiveEnabled: true, // 无人叫时主动加入话题
+  engagedEnabled: null, // null 保留旧设置：插话概率 > 0 时才允许窗口内接话
   interjectChance: 0.15, // 普通消息的基础插话概率（话题越相关越高，最高 80%）
   cooldownSec: 90, // 两次插话至少间隔
   maxPerHour: 6, // 每群每小时插话上限
@@ -14,6 +16,7 @@ export const DEFAULT_GROUP_POLICY = {
   engagedMax: 6, // 没人再叫她时最多连着接几次。该不该停由她自己判断，这里只防失控
   burstMax: 8, // 安全刹车：burstWindowSec 秒内她最多说这么多次，超了就歇着（明确被叫到除外），只防失控
   burstWindowSec: 120,
+  mustMaxPerHour: 100, // 每群每小时 @/唤醒词必回次数上限，超过就不回（主人说话不受限，也不计入）；0 = 不限制
 }
 
 /**
@@ -57,6 +60,7 @@ export function inQuietHours(hour, quiet) {
  * @param {number[]} p.recentTimes  本群最近消息的时间戳（毫秒）
  * @param {number[]} p.interjectTimes  本群最近插话的时间戳（毫秒）
  * @param {number[]} [p.botReplyTimes]  她在本群最近每次说话的时间戳（毫秒）
+ * @param {number[]} [p.mustTimes]  本群最近因被 @/叫到而必回的时间戳（毫秒；主人的不计入）
  * @param {number} p.hour  当前小时
  * @param {() => number} [p.rand]
  * @returns {{reply: boolean, mode: 'must'|'interject'|'engaged'|'none', reason: string}}
@@ -71,13 +75,19 @@ export function decideGroupReply(p) {
   const atOther = !p.mentioned && p.atOthers === true
   const hit = atOther ? undefined : (pol.wakeWords || []).find((w) => w && text.includes(w))
   // 她刚说完，别人追一句「人呢」「不说话了」也算在问她。要她这几分钟确实说过话（burst > 0），
-  // 且这一条之前最近一条不是她——群里 A/B 正常聊天、B 回 A 一句「人呢」时别抢答
-  const shortAsk = Boolean(burst > 0 && !p.lastIsBot && !atOther && !p.atOthersAny && String(text).trim().length <= 12 &&
+  // 且这一条之前最近一条就是她——群里 A/B 正常聊天、B 回 A 一句「人呢」时别抢答
+  const shortAsk = Boolean(burst > 0 && p.lastIsBot && !atOther && !p.atOthersAny && String(text).trim().length <= 12 &&
     /[？?]|不说话了|人呢|跑了|去哪|怎么了|在吗|说话/.test(text))
   // 明确被叫到（@、引用、叫名字、被追问）不算她主动接话，刹车不拦；刹车只拦她自己想插话
   const calling = Boolean(p.mentioned || p.repliedToBot || hit || shortAsk)
   if (burst >= (pol.burstMax ?? 8) && !calling) {
     return { reply: false, mode: 'none', reason: `刚说了太多（${burst} 次），歇一会儿` }
+  }
+  // 每小时 @/唤醒词必回上限：这小时被叫的次数够多了就闭嘴。主人说话不受限（主人的必回也不计入）
+  const mustMax = Number(pol.mustMaxPerHour ?? 100)
+  const mustHour = (p.mustTimes || []).filter((t) => p.now - t < 3600_000).length
+  if (!p.fromOwner && mustMax > 0 && mustHour >= mustMax) {
+    return { reply: false, mode: 'none', reason: `这小时被叫了 ${mustHour} 次，回够了，歇一歇` }
   }
   if (p.mentioned) return { reply: true, mode: 'must', reason: '被 @' }
   if (p.repliedToBot) return { reply: true, mode: 'must', reason: '引用了她的消息' }
@@ -85,14 +95,17 @@ export function decideGroupReply(p) {
   if (shortAsk) return { reply: true, mode: 'must', reason: '刚说完被追问' }
   const rel = typeof p.relevance === 'number' ? p.relevance : 1
 
-  if (!(pol.interjectChance > 0)) return { reply: false, mode: 'none', reason: '插话关着' }
+  const engagedEnabled = typeof pol.engagedEnabled === 'boolean' ? pol.engagedEnabled : pol.interjectChance > 0
+  const proactiveEnabled = pol.proactiveEnabled !== false && pol.interjectChance > 0
+  if (!engagedEnabled && !proactiveEnabled) return { reply: false, mode: 'none', reason: '插话关着' }
   if (inQuietHours(p.hour, pol.quietHours)) return { reply: false, mode: 'none', reason: '静默时段' }
   const minRel = Number(pol.minRelevance) || 0
   // 已经加入了这个话题：接着聊（每段看完再回，不受冷却和每小时上限限制）。她说话会续上这个状态，
   // 她会看到自己接了几次、自己决定停不停，engagedMax 只是兜底
-  if (p.engagedUntil && p.now < p.engagedUntil && rel >= minRel && (p.engagedRun || 0) < (pol.engagedMax ?? 2)) {
+  if (engagedEnabled && p.engagedUntil && p.now < p.engagedUntil && rel >= minRel && (p.engagedRun || 0) < (pol.engagedMax ?? 2)) {
     return { reply: true, mode: 'engaged', reason: `正聊得起劲，接着说（相关度 ${rel.toFixed(2)}）` }
   }
+  if (!proactiveEnabled) return { reply: false, mode: 'none', reason: '主动加入话题关着' }
   const times = p.interjectTimes || []
   const lastHour = times.filter((t) => p.now - t < 3600_000).length
   if (lastHour >= pol.maxPerHour) return { reply: false, mode: 'none', reason: '这小时插话够多了' }

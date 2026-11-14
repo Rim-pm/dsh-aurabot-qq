@@ -72,7 +72,8 @@ function setup(t, { beforeDraw } = {}) {
 for (const direct of ['at', 'reply']) test(`主人明确 ${direct}，同批群友消息不误拦生图，其他工具仍按混合说话人处理`, async t => {
   const s = setup(t)
   const result = await s.batch(event(OWNER, '请画一张图', { [direct]: true }), event(OTHER, '普通闲聊'))
-  assert.match(result.message, /TEST_AUTHORIZED_NO_IMAGE_API/)
+  assert.match(result.message, /生图失败/)
+
   assert.equal(s.draws(), 1)
   assert.deepEqual(s.snapshots[0], { allOwner: false, directOwner: true })
   assert.equal(s.fake.turns[0].source.speaker.role, 'guest', '不把混合轮次标为 owner，也不扩大其他工具权限')

@@ -1,15 +1,19 @@
 // QQ 系统表情（小黄脸）：名字 ↔ 编号。她在回复里写 <face:捂脸>，发的时候换成 QQ 自带的表情，和文字在同一条消息里。
 // 目录从网关现取（SnowLuma 的 fetch_sys_faces，缓存一天）；接的是别的 OneBot、取不到时用下面这份常用的兜底。
 
-/** 常用的系统表情（名字 → 编号），取不到网关目录时用。 */
-export const COMMON_FACES = {
-  惊讶: 0, 撇嘴: 1, 色: 2, 发呆: 3, 得意: 4, 害羞: 6, 闭嘴: 7, 睡: 8, 大哭: 9, 尴尬: 10, 发怒: 11, 调皮: 12, 呲牙: 13, 微笑: 14,
-  难过: 15, 酷: 16, 抓狂: 18, 吐: 19, 偷笑: 20, 可爱: 21, 白眼: 22, 傲慢: 23, 困: 25, 惊恐: 26, 流汗: 27, 憨笑: 28, 奋斗: 30,
-  疑问: 32, 嘘: 33, 晕: 34, 再见: 39, 玫瑰: 63, 爱心: 66, 心碎: 67, 赞: 76, 擦汗: 97, 抠鼻: 98, 鼓掌: 99, 坏笑: 101, 哈欠: 104,
-  鄙视: 105, 委屈: 106, 快哭了: 107, 阴险: 108, 可怜: 111, 抱拳: 118, OK: 124, 无奈: 174, 斜眼笑: 178, 笑哭: 182, 点赞: 201,
-  托腮: 212, 捂脸: 264, 哦哟: 266, 头秃: 267, 暗中观察: 269, emm: 270, 吃瓜: 271, 我酸了: 273, 汪汪: 277, 敬礼: 282, 摸鱼: 285,
-  睁眼: 289, 拜托: 353, 裂开: 357,
-}
+import { FACE_TABLE } from './face-table.js'
+
+/**
+ * 系统表情（名字 → 编号），取不到网关目录时用。
+ * 以前这里只兜底 65 个常用表情，别人贴了个表里没有的，回应就只剩一个数字编号；
+ * 现在直接用 QQ 的整张表（329 条），同名的取第一个，优先客户端还显示的那些。
+ */
+export const COMMON_FACES = (() => {
+  const out = {}
+  for (const f of FACE_TABLE) if (!f.hide && out[f.name] === undefined) out[f.name] = Number(f.id)
+  for (const f of FACE_TABLE) if (out[f.name] === undefined) out[f.name] = Number(f.id)
+  return out
+})()
 
 /** 给她看的几个例子（提示词里用，别太长）。 */
 export const FACE_EXAMPLES = ['微笑', '呲牙', '偷笑', '捂脸', '斜眼笑', '笑哭', '吃瓜', '白眼', '委屈', '裂开', '摸鱼', '抱拳', '赞', 'OK']
@@ -41,7 +45,9 @@ export function buildFaceIndex(catalog) {
 
 const COMMON_INDEX = (() => {
   const byName = new Map(Object.entries(COMMON_FACES))
-  const byId = new Map(Object.entries(COMMON_FACES).map(([n, id]) => [String(id), n]))
+  // 编号 → 名字用整张表（含客户端已不显示的老表情），被贴了冷门表情也能翻出名字
+  const byId = new Map(FACE_TABLE.map((f) => [String(f.id), f.name]))
+  for (const [n, id] of Object.entries(COMMON_FACES)) if (!byId.has(String(id))) byId.set(String(id), n)
   return { byName, byId }
 })()
 
@@ -76,6 +82,26 @@ export const stripFaceTags = (text) => String(text ?? '').replace(FACE_TAG, '').
 /** 语音文本收尾：去掉 <voice> 标签、连续空格、首尾空白。 */
 const tidySpeech = (s) => String(s).replace(/<\/?voice>/g, '').replace(/[ \t]{2,}/g, ' ').trim()
 
+// 连着出现的符号（颜文字、省略号、感叹号堆）不念。起因 2026-11-06：Fish Audio 收到
+// 「那可不 有人给续着 我就谢天谢地了 (￣▽￣)」之后生成了 15.5 秒音频（同长度正常句子 3 秒），
+// 后半段全是拉长的气声，群里听起来就是乱码。把颜文字摘掉再合成，稳定回到 3 秒。
+// 规则只碰符号：两个以上连着才整段丢掉，单个标点留着（「3.5」的小数点、「，」「？」都要念对）。
+const SYMBOL_RUN = /[^\p{L}\p{N}\s]{2,}/gu
+// 颜文字专用字符：这些字符几乎只出现在颜文字里，单独一个也一并去掉（单个「▽」实测念得出来，
+// 但清掉更省事，而且它们不承担语义）。ω 和 Ω 都是希腊字母，不在上面那条的符号范围（\p{L}）里，得单列。
+// 括号也收进来：颜文字被擦掉之后剩下的半个括号 / 空括号，念出来只有「左括号」，没有意义。
+const KAOMOJI_CHAR = /[￣▽△▲･´｀＾﹏Ωﾟω()（）و✧☆★]/gu
+
+/** 念之前把符号串擦掉；擦完只剩标点（比如一条语音只有颜文字）就返回空串，由调用方改发文字。 */
+function stripUnspeakable (s) {
+  // 括号里成段的东西整块摘掉：只擦括号符号的话，TTS 会把「鳍耳竖起来」这类动作描写照念出来。
+  const out = String(s)
+    .replace(/[（(][^（）()]{0,40}[）)]/gu, ' ')
+    .replace(SYMBOL_RUN, ' ')
+    .replace(KAOMOJI_CHAR, ' ')
+  return /[\p{L}\p{N}]/u.test(out) ? out : ''
+}
+
 /**
  * 语音条要念的文字：去掉 QQ 小黄脸标签、表情包/戳一戳等格式标签、以及 emoji 图形符号，
  * 不然 TTS 会把「呲牙」这类表情名字甚至 emoji 直接念出来（用户反馈：发语音时表情被读出来）。
@@ -107,7 +133,7 @@ export function splitSpeakable (text) {
     last = m.index + m[0].length
   }
   spoken += raw.slice(last)
-  return { spoken: tidySpeech(spoken), extras: tidySpeech(extras) }
+  return { spoken: tidySpeech(stripUnspeakable(spoken)), extras: tidySpeech(extras) }
 }
 
 /** 系统表情对照：先用常用的，第一次用到时再去网关拉完整目录（一天刷新一次）。 */

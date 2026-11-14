@@ -41,6 +41,8 @@ export default {
       memory: () => api.use('memory'),
       // 载体分发用（面板里 carrier=pet 时推桌宠气泡；桌宠没开是 null，按离线回落处理）
       pet: () => api.use('pet'),
+      // 素材口：浏览型模块（rss-reader「自主上网」等）的素材按需取用；没装/没开是 null。
+      use: (id) => api.use(id),
       personaText: () => { try { return api.core.personas?.current?.() || '' } catch { return '' } },
     })
     api.every(60_000, () => purpose.tick(), '目的引擎')
@@ -55,7 +57,12 @@ export default {
       return { ok: true, message: `这轮结束：${r.outcome}` }
     })
     api.route('/purpose/status', async () => ({ ok: true, status: purpose.status(), state: purpose.state() }))
-    api.route('/purpose/preview', async () => ({ ok: true, preview: purpose.preview() }))
+    api.route('/purpose/preview', async () => ({ ok: true, preview: await purpose.preview() }))
+    // 代发决断面：宿主投递器在 broker 档发送前调用（见 purpose/module.js 的 brokerReview）。
+    // 模块不直接用它；host.js 的 wirePolicySources 经 use('purpose') 取到。
+    // （createPurpose 返回的对象方法都走闭包，无 this 依赖，直接透传即可。）
+    // 引擎自发发言的 §5.3 私有凭据注入点：宿主把 purpose 策略源对象交给引擎，
+    // 引擎投递时经 deliver 的 enginePolicy 路径 reserve/commit，不再被包装层门闸二次拦。
     // 驱动向量 → 提示层：把「最近比较想要什么」轻描淡写地写进每一轮的上下文（引擎关着时返回空）
     api.rule(() => purpose.drivesRule())
     return purpose

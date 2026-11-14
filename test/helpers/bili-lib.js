@@ -9,6 +9,7 @@ import * as llm from '../../src/core/llm.js'
 import * as img from '../../src/core/img.js'
 import * as net from '../../src/core/net.js'
 import * as reply from '../../src/chat/reply.js'
+import * as sessionBackoff from '../../src/chat/session-backoff.js'
 import * as tools from '../../src/tools/tools.js'
 
 const libs = {
@@ -18,6 +19,7 @@ const libs = {
   'core/img.js': img,
   'core/net.js': net,
   'chat/reply.js': reply,
+  'chat/session-backoff.js': sessionBackoff,
   'tools/tools.js': tools,
 }
 
