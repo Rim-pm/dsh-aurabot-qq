@@ -108,16 +108,17 @@ export function collectSources(api, settings, history = [], now = Date.now()) {
     pictures.push({ ...picture, recent: used.has(picture.id) })
   }
   if (settings.browsing) {
+    // B 站已经从内置模块拆成扩展 bili-observer，两个 id 都试一下。
     const platforms = [
-      ['bili', 'B站', ['watch', 'share']],
+      ['bili', 'B站', ['watch', 'share'], 'bili-observer'],
       ['xhs', '小红书', ['read', 'share']],
       ['douyin', '抖音', ['read', 'share']],
       ['taobao', '淘宝', ['select', 'share']],
       ['huashi6', '触站', ['read', 'share']],
     ]
-    for (const [id, platform, kinds] of platforms) {
+    for (const [id, platform, kinds, fallback] of platforms) {
       let rows = []
-      try { rows = api.use(id)?.state?.()?.history || [] } catch (error) { continue }
+      try { rows = api.use(id)?.state?.()?.history || (fallback ? api.use(fallback)?.state?.()?.history : []) || [] } catch (error) { continue }
       if (!Array.isArray(rows)) continue
       for (const row of rows.slice(0, 80)) {
         if (!row || typeof row !== 'object') continue

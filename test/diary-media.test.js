@@ -147,6 +147,16 @@ test('公开浏览只读取成功的公开作品，不取私信、搜索结果�
   assert.doesNotMatch(JSON.stringify(pool), /主人的秘密|私信中/)
 })
 
+test('B 站拆成扩展后，日记照样能读到 bili-observer 的浏览记录', () => {
+  const now = Date.now()
+  const history = [{ kind: 'watch', at: now, ok: true, title: '一个视频', bvid: 'BV1aaaaaaaaa', cover: 'https://example.com/cover.png' }]
+  const api = { use: (id) => id === 'bili-observer' ? { state: () => ({ history }) } : undefined }
+  const pool = collectSources(api, { browsing: true }, [], now)
+  assert.equal(pool.events.length, 1)
+  assert.equal(pool.pictures.length, 1)
+  assert.equal(pool.pictures[0].url, 'https://www.bilibili.com/video/BV1aaaaaaaaa')
+})
+
 test('模型只能从授权候选编号选图，不能注入路径或任意 URL', () => {
   for (const id of ['C:\\private.png', 'https://example.com/secret.png', '../../private']) {
     const draft = parseDraft(JSON.stringify({ text: '今天真好。', imageIds: [id] }), [], 140)

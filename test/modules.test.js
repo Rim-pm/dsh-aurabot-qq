@@ -119,7 +119,7 @@ test('自己写的模块加载了；同名的替换了内置的；关掉的内�
   assert.equal(diary.running, 'user')
   assert.equal(diary.builtin, true)
   assert.equal(diary.forkedFrom, '1.0.0', '记下了替换时内置模块的版本')
-  assert.equal((await mod('bili')).running, null)
+  assert.equal((await mod('bili')), undefined, '内置 B 站模块已经拆成扩展，不再是内置的')
   assert.equal((await mod('memory')).running, 'builtin')
   // 被替换的接口走自己写的；关掉模块的接口告诉面板「模块没开」
   assert.equal((await fake.call('/diary/history')).json().mine, true)
@@ -215,23 +215,12 @@ test('新建模块：从模板建，能直接跑', async () => {
   assert.equal((await fake.call('/modules/create', { id: 'Bad Id' })).json().ok, false)
 })
 
-test('复制 B 站模块：抽帧 / 截图库文件一起复制，用户模块能启动并提供图库路由', async () => {
-  await fake.call('/save', { modules: { bili: { enabled: true } } })
-  try {
-    const r = (await fake.call('/modules/fork', { id: 'bili' })).json()
-    assert.equal(r.ok, true, r.message)
-    assert.ok(existsSync(join(modDir('bili'), 'vision.js')))
-    assert.ok(existsSync(join(modDir('bili'), 'shots.js')))
-    const m = await mod('bili')
-    assert.equal(m.running, 'user', m.error)
-    assert.ok(m.tools.includes('qq_send_shot'))
-    assert.ok(m.tools.includes('qq_list_shots'))
-    const shots = (await fake.call('/bili/shots')).json()
-    assert.equal(shots.ok, true)
-    assert.deepEqual(shots.items, [])
-  } finally {
-    await fake.call('/save', { modules: { bili: { enabled: false } } })
-  }
+test('B 站已拆成扩展：内置模块列表里没有 bili，也不能再 fork 它', async () => {
+  const r = (await fake.call('/modules/fork', { id: 'bili' })).json()
+  assert.equal(r.ok, false)
+  assert.match(r.message, /没有这个内置模块/)
+  assert.ok(!existsSync(modDir('bili')))
+  assert.equal((await fake.call('/bili/state')).json().moduleOff, true)
 })
 
 test('模块设置里的密码不回传给面板', async () => {
