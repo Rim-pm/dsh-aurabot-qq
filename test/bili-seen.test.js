@@ -1,10 +1,11 @@
 // 判重表：老 seen 数组迁移、去重、2000 条滚动、倒序、状态只升不降。
+import './helpers/bili-lib.js'
 import { test, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { SEEN_LIMIT, loadSeen, markSeen, migrateSeen, normalizeSeen, pushSeen, saveSeen, seenFile, seenSet } from '../src/bili/seen.js'
+import { SEEN_LIMIT, loadSeen, markSeen, migrateSeen, normalizeSeen, pushSeen, saveSeen, seenFile, seenSet } from '../extensions/bili-observer/bili/seen.js'
 import { dataDir, writeJson } from '../src/core/store.js'
 
 const root = mkdtempSync(join(tmpdir(), 'aurabot-bili-seen-'))
@@ -79,7 +80,7 @@ test('落盘：文件不存在读到空表，写进去能读回来', () => {
 test('刷一轮：第一次跑先把 bili.json 的老 seen 迁进判重表，老视频不再看', async () => {
   fresh()
   const { normalize } = await import('../src/core/config.js')
-  const { createBili } = await import('../src/bili/duty.js')
+  const { createBili } = await import('../extensions/bili-observer/bili/duty.js')
   writeJson(dataDir('bili.json'), { day: '', seen: ['BV1aaaaaaaaa'], history: [] })
   const cfg = normalize({ enabled: true, dryRun: false, ownerQQ: '10000001', bili: { enabled: true, keywords: [], perRun: 5 } })
   const looked = []

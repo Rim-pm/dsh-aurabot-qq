@@ -1,4 +1,5 @@
 // 档位：解析、非法值兜底、worth 没有字幕 / 画面证据时降级成 ok。
+import './helpers/bili-lib.js'
 import { test, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync } from 'node:fs'
@@ -10,7 +11,7 @@ let normalize
 
 before(async () => {
   process.env.AURABOT_DATA_DIR = mkdtempSync(join(tmpdir(), 'aurabot-bili-tier-'))
-  duty = await import('../src/bili/duty.js')
+  duty = await import('../extensions/bili-observer/bili/duty.js')
   ;({ normalize } = await import('../src/core/config.js'))
 })
 

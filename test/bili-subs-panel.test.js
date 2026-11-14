@@ -1,12 +1,16 @@
-// B站订阅在面板上的接线：接口注册了没、工具是不是只有主人能用、配置项在不在。不访问真实 B 站。
+// B站订阅在扩展面板上的接线：接口注册了没、工具是不是只有主人能用、配置项在不在。不访问真实 B 站。
+// 模块已经搬进 extensions/bili-observer，这里用和 core/modules.js 一样的 api 面（tool/every/route/...）装它。
+import './helpers/bili-lib.js'
 import { test, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import biliModule from '../src/modules/bili/index.js'
+import biliModule from '../extensions/bili-observer/index.mjs'
 import { normalize } from '../src/core/config.js'
-import { createBili } from '../src/bili/duty.js'
+import { createBili } from '../extensions/bili-observer/bili/duty.js'
+
+const EXT = join(import.meta.dirname, '..', 'extensions', 'bili-observer')
 
 before(() => {
   process.env.AURABOT_DATA_DIR = mkdtempSync(join(tmpdir(), 'aurabot-bili-panel-'))
@@ -18,6 +22,7 @@ function boot({ owner = true, bili = {} } = {}) {
   const builders = []
   const timers = []
   const listeners = new Map()
+  const rules = []
   const hub = {
     turnHasOwner: () => owner,
     turnSendersAllOwner: () => owner,
@@ -31,21 +36,24 @@ function boot({ owner = true, bili = {} } = {}) {
     lazy: () => null,
     use: () => null,
     onDispose: () => {},
+    dsh: {},
+    ask: async () => ({ text: '' }),
     // 模块数据目录（弹幕历史等）：和 core/modules.js 的 dataDir 一样落在模块自己的目录里
     dataDir: (...parts) => {
-      const d = join(process.env.AURABOT_DATA_DIR, 'modules-data', 'bili')
+      const d = join(process.env.AURABOT_DATA_DIR, 'modules-data', 'bili-observer')
       mkdirSync(d, { recursive: true })
       return join(d, ...parts)
     },
     log: { info() {}, debug() {}, warn() {} },
     on: (event, fn) => { if (!listeners.has(event)) listeners.set(event, []); listeners.get(event).push(fn) },
+    rule: (fn) => rules.push(fn),
     tool: (fn) => builders.push(fn),
     every: (ms, fn, name) => timers.push(name),
     route: (p, fn) => routes.set(p, fn),
-    core: { hub, http: { body: async (req) => req.body || {}, query: () => ({}) } },
+    core: { hub, local: {}, listModels: async () => [], http: { body: async (req) => req.body || {}, query: () => ({}) } },
   })
   const chat = { kind: 'private', userId: '10000001', chatId: 'private:10000001' }
-  return { cfg, routes, builders, timers, listeners, chat }
+  return { cfg, routes, builders, timers, listeners, rules, chat }
 }
 
 test('面板接线：订阅的五个接口和定时任务都注册上了', () => {
@@ -116,13 +124,16 @@ test('升级提示：首次启动打一条观察者日志，第二次不再打',
     lazy: () => null,
     use: () => null,
     onDispose: () => {},
+    dsh: {},
+    ask: async () => ({ text: '' }),
     dataDir: (...parts) => join(dir, ...parts),
     log: { info: (m) => infos.push(m), debug() {}, warn() {} },
     on() {},
+    rule() {},
     tool() {},
     every() {},
     route() {},
-    core: { hub: { turnHasOwner: () => true, turnSendersAllOwner: () => true }, http: { body: async () => ({}), query: () => ({}) } },
+    core: { hub: { turnHasOwner: () => true, turnSendersAllOwner: () => true }, local: {}, listModels: async () => [], http: { body: async () => ({}), query: () => ({}) } },
   })
   const count = () => infos.filter((m) => /观察者模式/.test(m)).length
   bootOnce()
@@ -209,9 +220,13 @@ test('只要订阅：只剩三个订阅工具，看视频 / 截图 / 改资料�
   assert.equal(builders.length, 1, '改头像 / 签名的那个工具块整个删掉了')
 })
 
-test('内置模块：files 登记了 seen / report，而且每个路径都真实存在', () => {
-  for (const f of ['bili/seen.js', 'bili/report.js']) assert.ok(biliModule.files.includes(f), `files 缺 ${f}`)
-  for (const f of biliModule.files) assert.ok(existsSync(join(process.cwd(), 'src', f)), `files 里的 ${f} 在 src/ 下不存在`)
+test('扩展：bili/ 下的源码文件都在，且 index.mjs 引的那两个真实存在', () => {
+  for (const f of ['bili/seen.js', 'bili/report.js', 'bili/duty.js', 'bili/dynamics.js', 'bili/examples.js']) {
+    assert.ok(existsSync(join(EXT, f)), `扩展里缺 ${f}`)
+  }
+  const src = readFileSync(join(EXT, 'index.mjs'), 'utf8')
+  assert.ok(src.includes("from './bili/duty.js'"), 'index.mjs 要引扩展自己的 duty.js')
+  assert.ok(src.includes("from './bili/dynamics.js'"), 'index.mjs 要引扩展自己的 dynamics.js')
 })
 
 test('只要订阅：刷视频那条线整个不跑', async () => {
@@ -233,24 +248,20 @@ test('只要订阅：刷视频那条线整个不跑', async () => {
 })
 
 test('面板：判定用的模型能在 UI 上选，不用去手改 config.json', () => {
-  const client = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
-  const start = client.indexOf('function BiliSubs(')
-  const end = client.indexOf('function LocalApi(')
-  assert.ok(start >= 0 && end > start, '找不到 BiliSubs 组件')
-  const subs = client.slice(start, end)
-  assert.ok(subs.includes('判定用的模型'), '订阅页缺「判定用的模型」这一行')
-  assert.ok(subs.includes('bili.aiFilterModel'), '这一行没接到 bili.aiFilterModel')
-  assert.ok(subs.includes("get('/models')"), '模型列表要从 /models 读，不然选不出东西')
+  const panel = readFileSync(join(EXT, 'panel.js'), 'utf8')
+  assert.ok(panel.includes('判定用的模型'), '订阅页缺「判定用的模型」这一行')
+  assert.ok(panel.includes('bili.aiFilterModel'), '这一行没接到 bili.aiFilterModel')
+  assert.ok(panel.includes("call('/models')"), '模型列表要从 /models 读，不然选不出东西')
   // 判定那边两个字段都非空才生效（只填一半会静默退回聊天模型），所以面板必须一起写、一起清
-  assert.match(subs, /setPath\(setPath\(draft, 'bili\.aiFilterModel\.provider'/, '选模型时要一起写 provider')
-  assert.ok(subs.includes("'bili.aiFilterModel.model'"), '选模型时要一起写 model')
+  assert.match(panel, /setPath\(setPath\(draft, 'bili\.aiFilterModel\.provider'/, '选模型时要一起写 provider')
+  assert.ok(panel.includes("'bili.aiFilterModel.model'"), '选模型时要一起写 model')
   // 存的模型被删了 / 列表拉不到，都不能装作「跟随聊天模型」
-  assert.ok(subs.includes('fmGone'), '存过的模型不在列表里要提示')
-  assert.ok(subs.includes('modelsErr'), '拉不到模型列表要提示，不能只显示「跟随聊天模型」')
+  assert.ok(panel.includes('fmGone'), '存过的模型不在列表里要提示')
+  assert.ok(panel.includes('modelsErr'), '拉不到模型列表要提示，不能只显示「跟随聊天模型」')
 })
 
 test('面板：判定模型能不能看图由宿主模型元数据说了算，接进判定引擎', () => {
-  const src = readFileSync(new URL('../src/modules/bili/index.js', import.meta.url), 'utf8')
+  const src = readFileSync(join(EXT, 'index.mjs'), 'utf8')
   assert.ok(src.includes('canSeeImages'), '模块要把 canSeeImages 接进去')
   assert.match(src, /canSee:[\s\S]*canSeeImages/, 'createSubs 要拿到 canSee')
 })
@@ -277,16 +288,12 @@ test('刷B站模型：只拦 system:bili，没选就跟随聊天模型', () => {
 })
 
 test('面板：刷B站模型能在 UI 上选，接的是 bili.browseModel', () => {
-  const client = readFileSync(new URL('../client/client.js', import.meta.url), 'utf8')
-  const start = client.indexOf('function Bili(')
-  const end = client.indexOf('function ShotCell(')
-  assert.ok(start >= 0 && end > start, '找不到 Bili 组件')
-  const card = client.slice(start, end)
-  assert.ok(card.includes('刷 B 站用的模型'), '刷B站卡片缺模型下拉')
-  assert.ok(card.includes('bili.browseModel'), '这一行没接到 bili.browseModel')
-  assert.ok(card.includes("get('/models')"), '模型列表要从 /models 读')
-  assert.match(card, /setPath\(setPath\(draft, 'bili\.browseModel\.provider'/, '选模型时要一起写 provider')
-  assert.ok(card.includes("'bili.browseModel.model'"), '选模型时要一起写 model')
-  assert.ok(card.includes('bmGone'), '存过的模型不在列表里要提示')
-  assert.ok(card.includes('modelsErr'), '拉不到模型列表要提示')
+  const panel = readFileSync(join(EXT, 'panel.js'), 'utf8')
+  assert.ok(panel.includes('刷 B 站用的模型'), '刷B站卡片缺模型下拉')
+  assert.ok(panel.includes('bili.browseModel'), '这一行没接到 bili.browseModel')
+  assert.ok(panel.includes("call('/models')"), '模型列表要从 /models 读')
+  assert.match(panel, /setPath\(setPath\(draft, 'bili\.browseModel\.provider'/, '选模型时要一起写 provider')
+  assert.ok(panel.includes("'bili.browseModel.model'"), '选模型时要一起写 model')
+  assert.ok(panel.includes('bmGone'), '存过的模型不在列表里要提示')
+  assert.ok(panel.includes('modelsErr'), '拉不到模型列表要提示')
 })

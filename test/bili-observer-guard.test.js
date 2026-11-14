@@ -1,8 +1,9 @@
 // 观察者写闸门：observer 下评论 / 改资料一个请求都不发；like / fav 放行；social 放行全部。
 // 闸门在 api.js 里，和面板配置无关——配置填错了也不会真的发出去。
+import './helpers/bili-lib.js'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createBiliApi } from '../src/bili/api.js'
+import { createBiliApi } from '../extensions/bili-observer/bili/api.js'
 import { normalize } from '../src/core/config.js'
 
 const log = { info() {}, warn() {}, debug() {} }

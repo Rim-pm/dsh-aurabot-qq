@@ -1,4 +1,5 @@
 // 日报与归档：追加不覆盖、`### BV` 计数、因无字幕行、90 天清理、归档挑中的和跳过的都有。
+import './helpers/bili-lib.js'
 import { test, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs'
@@ -7,7 +8,7 @@ import { join } from 'node:path'
 import {
   appendDigest, appendReport, appendReportMarkdown, archiveLine, cleanupReports,
   countPicked, dateKey, digestMessage, lastNoSubtitle, parseReport, reportDates, reportsDir,
-} from '../src/bili/report.js'
+} from '../extensions/bili-observer/bili/report.js'
 
 const root = mkdtempSync(join(tmpdir(), 'aurabot-bili-report-'))
 process.env.AURABOT_DATA_DIR = root
@@ -96,7 +97,7 @@ test('dateKey：本地日期 YYYY-MM-DD', () => {
 test('日报摘要：到点推一次，当天 0 条不发，重启不重推', async () => {
   fresh()
   const { normalize } = await import('../src/core/config.js')
-  const { createBili } = await import('../src/bili/duty.js')
+  const { createBili } = await import('../extensions/bili-observer/bili/duty.js')
   const cfg = normalize({
     enabled: true, dryRun: false, ownerQQ: '10000001',
     speakUp: { awakeFrom: 0, awakeTo: 24 },

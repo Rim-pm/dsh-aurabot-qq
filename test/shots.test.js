@@ -1,4 +1,5 @@
 // 截图库 + 让她发截图这两条链路的测试。每条用例用自己的临时数据目录，互不干扰。
+import './helpers/bili-lib.js'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, existsSync, readdirSync, writeFileSync } from 'node:fs'
@@ -10,8 +11,8 @@ import { dataDir } from '../src/core/store.js'
 process.env.AURABOT_DATA_DIR = mkdtempSync(join(tmpdir(), 'aurabot-shots-'))
 const freshDir = () => { process.env.AURABOT_DATA_DIR = mkdtempSync(join(tmpdir(), 'aurabot-shots-')) }
 
-const { clockOf, pickShot, createShotStore, loadShots } = await import('../src/bili/shots.js')
-const { createBili } = await import('../src/bili/duty.js')
+const { clockOf, pickShot, createShotStore, loadShots } = await import('../extensions/bili-observer/bili/shots.js')
+const { createBili } = await import('../extensions/bili-observer/bili/duty.js')
 const { normalize } = await import('../src/core/config.js')
 
 test('clockOf：秒数转 mm:ss', () => {
@@ -267,15 +268,17 @@ test('自动截图：只发主人私聊、使用真实文件路径，试运行�
 
 test('B 站模块：截图库路由预览 / 删除、工具固定发当前会话、关闭后隐藏', async () => {
   freshDir()
-  const { default: module } = await import('../src/modules/bili/index.js')
+  const { default: module } = await import('../extensions/bili-observer/index.mjs')
   const { cfg, sent } = makeBili()
   const routes = new Map(), builders = []
   const fake = {
     config: () => cfg, lazy: () => null, log: { info() {}, warn() {}, debug() {} },
-    dataDir: (...parts) => dataDir('modules-data', 'bili', ...parts), onDispose() {},
-    on() {}, every() {}, tool: (build) => builders.push(build), route: (p, handler) => routes.set(p, handler),
+    dataDir: (...parts) => dataDir('modules-data', 'bili-observer', ...parts), onDispose() {},
+    on() {}, every() {}, rule() {}, tool: (build) => builders.push(build), route: (p, handler) => routes.set(p, handler),
+    dsh: {}, ask: async () => ({ text: '' }),
     core: {
       hub: { sendImage: async (chatId, src) => { sent.push({ chatId, src }); return { message_id: 8 } }, turnHasOwner: () => true, turnSendersAllOwner: () => true },
+      local: {}, listModels: async () => [],
       http: { query: (req) => req.query, body: async (req) => req.body, send: (_res, status, body, type) => ({ status, body, type }) },
     },
   }

@@ -1,9 +1,10 @@
+import './helpers/bili-lib.js'
 import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createBili } from '../src/bili/duty.js'
+import { createBili } from '../extensions/bili-observer/bili/duty.js'
 import { readJson, writeJson } from '../src/core/store.js'
 
 const root = mkdtempSync(join(tmpdir(), 'aurabot-bili-login-'))

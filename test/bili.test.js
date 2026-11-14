@@ -1,4 +1,5 @@
 // B 站：签名、Cookie / 链接 / 分享卡片解析、刷一轮（分享、记忆）、看你发来的视频。用假的 B 站和假的模型测。
+import './helpers/bili-lib.js'
 import { test, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync } from 'node:fs'
@@ -11,8 +12,8 @@ let normalize
 
 before(async () => {
   process.env.AURABOT_DATA_DIR = mkdtempSync(join(tmpdir(), 'aurabot-bili-'))
-  api = await import('../src/bili/api.js')
-  duty = await import('../src/bili/duty.js')
+  api = await import('../extensions/bili-observer/bili/api.js')
+  duty = await import('../extensions/bili-observer/bili/duty.js')
   ;({ normalize } = await import('../src/core/config.js'))
 })
 
@@ -161,7 +162,7 @@ test('B 站 Cookie 分两个框填：纯值、带前缀、整串都认；老配�
 })
 
 test('评论里的 @昵称 按昵称查到 mid 一起发，查不到的留作文字', async () => {
-  const { createBiliApi } = await import('../src/bili/api.js')
+  const { createBiliApi } = await import('../extensions/bili-observer/bili/api.js')
   const posts = []
   const json = (data) => ({ ok: true, status: 200, headers: { getSetCookie: () => [], get: () => '' }, json: async () => ({ code: 0, data }) })
   const fetchImpl = async (url, opts = {}) => {

@@ -1,6 +1,7 @@
+import './helpers/bili-lib.js'
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { loginSessionKey, recoverLoginPause } from '../src/bili/login-pause.js'
+import { loginSessionKey, recoverLoginPause } from '../extensions/bili-observer/bili/login-pause.js'
 const day = '2026-10-31'
 const key = loginSessionKey('SESSDATA=fake; bili_jct=csrf; buvid3=device')
 const state = (reason = 'B 站没登录或 Cookie 过期了') => ({ day, pauseDay: day, pauseReason: reason, comments: 2, replies: 1, history: [{ kind: 'error', text: '-101' }] })

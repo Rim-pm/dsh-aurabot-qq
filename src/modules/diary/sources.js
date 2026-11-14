@@ -4,8 +4,7 @@ import { createHash } from 'node:crypto'
 import { lstatSync, readdirSync, realpathSync, readFileSync } from 'node:fs'
 import { basename, extname, isAbsolute, join, relative, resolve } from 'node:path'
 import { stickerPath } from '../../features/stickers.js'
-import { loadShots, shotPath } from '../../bili/shots.js'
-import { dataDir } from '../../core/store.js'
+import { dataDir, readJson } from '../../core/store.js'
 import { clipText } from '../../core/text.js'
 
 export const clip = (value, max = 160) => clipText(String(value || '').replace(/[\r\n\t]+/g, ' ').trim(), max)
@@ -97,6 +96,13 @@ function sourceLink(platform, item) {
   return ''
 }
 
+// B 站抽帧图库已经跟着扩展走，这里只读它的索引，不引用扩展源码（扩展可能没装）。
+const shotFileOk = (file) => typeof file === 'string' && /^[a-f0-9]{12}\.jpg$/.test(file)
+function loadShotItems() {
+  const s = readJson(join(dataDir('bili-shots'), 'index.json'), () => ({ items: [] }))
+  return s && Array.isArray(s.items) ? s.items.filter((i) => i && shotFileOk(i.file)) : []
+}
+
 export function collectSources(api, settings, history = [], now = Date.now()) {
   const events = []
   const pictures = []
@@ -139,11 +145,11 @@ export function collectSources(api, settings, history = [], now = Date.now()) {
       }
     }
     // 只读已有 B 站视频抽帧，不调用会裁剪图库的 panel()，也不抓取桌面。
-    for (const item of loadShots().items.slice(0, 40)) {
+    for (const item of loadShotItems().slice(0, 40)) {
       const title = clip(item.title, 70)
       const url = sourceLink('B站', item)
       if (!url || !title || !publicText(title) || !(item.at >= now - 48 * 3600_000 && item.at <= now)) continue
-      add({ id: 'bili-shot:' + item.md5, kind: 'browsing', localShot: true, src: shotPath(item), root: dataDir('bili-shots'), caption: 'B站视频抽帧《' + title + '》', title, platform: 'B站', url, at: item.at })
+      add({ id: 'bili-shot:' + item.md5, kind: 'browsing', localShot: true, src: join(dataDir('bili-shots'), item.file), root: dataDir('bili-shots'), caption: 'B站视频抽帧《' + title + '》', title, platform: 'B站', url, at: item.at })
     }
   }
   if (settings.stickers) {

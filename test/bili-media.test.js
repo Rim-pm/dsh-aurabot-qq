@@ -1,4 +1,5 @@
 // 用真实 ffmpeg + 本机 HTTP 视频夹具验证抽帧；不连接 B 站或模型。
+import './helpers/bili-lib.js'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
@@ -7,7 +8,7 @@ import { mkdtempSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { once } from 'node:events'
-import { findFfmpeg, grabFrame } from '../src/bili/vision.js'
+import { findFfmpeg, grabFrame } from '../extensions/bili-observer/bili/vision.js'
 
 const ffmpeg = findFfmpeg()
 

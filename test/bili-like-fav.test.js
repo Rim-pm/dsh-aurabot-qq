@@ -1,12 +1,13 @@
 // 点赞和收藏：只对 worth 点赞、日上限、两个夹分开、没配夹子 / 没 bili_jct 不发请求。
+import './helpers/bili-lib.js'
 import { test, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createBili } from '../src/bili/duty.js'
+import { createBili } from '../extensions/bili-observer/bili/duty.js'
 import { normalize } from '../src/core/config.js'
-import { reportFile, dateKey } from '../src/bili/report.js'
+import { reportFile, dateKey } from '../extensions/bili-observer/bili/report.js'
 
 const root = mkdtempSync(join(tmpdir(), 'aurabot-bili-write-'))
 process.env.AURABOT_DATA_DIR = root

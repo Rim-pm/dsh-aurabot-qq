@@ -1,8 +1,9 @@
 // 读弹幕：deflate / zlib / 明文三种都解，实体还原，均匀采样，坏数据返回 []。
+import './helpers/bili-lib.js'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { deflateRawSync, deflateSync } from 'node:zlib'
-import { createBiliApi, decodeEntities, inflateDanmaku, parseDanmakuXml, pickDanmaku } from '../src/bili/api.js'
+import { createBiliApi, decodeEntities, inflateDanmaku, parseDanmakuXml, pickDanmaku } from '../extensions/bili-observer/bili/api.js'
 
 const xml = (items) => `<?xml version="1.0" encoding="UTF-8"?><i><chatserver>chat.bilibili.com</chatserver><chatid>9</chatid>${items.map((t) => `<d p="1.23,1,25,16777215,1700000000,0,abc,1">${t}</d>`).join('')}</i>`
 // fetch 的 arrayBuffer() 给的是干净的 ArrayBuffer；Buffer 可能来自共享内存池，要按 byteOffset 切

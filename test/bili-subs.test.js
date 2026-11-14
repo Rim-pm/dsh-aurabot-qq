@@ -1,4 +1,5 @@
 // B 站动态订阅：解析、游标、过滤器，以及「被风控也不漏」的那几条规则。用假的 B 站接口测。
+import './helpers/bili-lib.js'
 import { test, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -12,8 +13,8 @@ let dataDir
 
 before(async () => {
   process.env.AURABOT_DATA_DIR = mkdtempSync(join(tmpdir(), 'aurabot-bili-subs-'))
-  api = await import('../src/bili/api.js')
-  dyn = await import('../src/bili/dynamics.js')
+  api = await import('../extensions/bili-observer/bili/api.js')
+  dyn = await import('../extensions/bili-observer/bili/dynamics.js')
   ;({ normalize } = await import('../src/core/config.js'))
   ;({ dataDir } = await import('../src/core/store.js'))
 })

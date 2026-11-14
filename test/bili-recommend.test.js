@@ -1,4 +1,5 @@
 // 推荐流：解析、非视频过滤、失败回退热门、推荐流模式不调 chooseKeywords。
+import './helpers/bili-lib.js'
 import { test, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync } from 'node:fs'
@@ -11,8 +12,8 @@ let normalize
 
 before(async () => {
   process.env.AURABOT_DATA_DIR = mkdtempSync(join(tmpdir(), 'aurabot-bili-recommend-'))
-  api = await import('../src/bili/api.js')
-  duty = await import('../src/bili/duty.js')
+  api = await import('../extensions/bili-observer/bili/api.js')
+  duty = await import('../extensions/bili-observer/bili/duty.js')
   ;({ normalize } = await import('../src/core/config.js'))
 })
 

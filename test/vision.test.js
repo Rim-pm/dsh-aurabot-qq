@@ -1,10 +1,11 @@
 // 抽帧 + 视觉（B 站「看画面」）的纯逻辑测试。不联网、不调 ffmpeg。
+import './helpers/bili-lib.js'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import { EventEmitter } from 'node:events'
-import { frameTimes, pickVideoStream, findFfmpeg, visionState, lookWithVision, describeFrames, progressiveWindows, windowAt, frameArgs, grabFrame, hasProxy, withoutProxy } from '../src/bili/vision.js'
-import { digestOf } from '../src/bili/duty.js'
+import { frameTimes, pickVideoStream, findFfmpeg, visionState, lookWithVision, describeFrames, progressiveWindows, windowAt, frameArgs, grabFrame, hasProxy, withoutProxy } from '../extensions/bili-observer/bili/vision.js'
+import { digestOf } from '../extensions/bili-observer/bili/duty.js'
 
 test('frameTimes：跳过首尾 5%，均匀铺开，不重复', () => {
   const t = frameTimes(600, 6)

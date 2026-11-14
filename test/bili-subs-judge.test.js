@@ -1,5 +1,6 @@
 // B站动态的 AI 过滤：提示词、解析、摘要，以及「判不出来也不能吞动态」。
 // 全部用假模型 / 假 B 站，不联网。
+import './helpers/bili-lib.js'
 import { test, before } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -14,9 +15,9 @@ let dataDir
 
 before(async () => {
   process.env.AURABOT_DATA_DIR = mkdtempSync(join(tmpdir(), 'aurabot-bili-judge-'))
-  judge = await import('../src/bili/judge.js')
-  dyn = await import('../src/bili/dynamics.js')
-  examples = await import('../src/bili/examples.js')
+  judge = await import('../extensions/bili-observer/bili/judge.js')
+  dyn = await import('../extensions/bili-observer/bili/dynamics.js')
+  examples = await import('../extensions/bili-observer/bili/examples.js')
   ;({ normalize } = await import('../src/core/config.js'))
   ;({ dataDir } = await import('../src/core/store.js'))
 })
