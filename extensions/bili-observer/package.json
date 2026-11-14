@@ -1,0 +1,15 @@
+{
+  "name": "aurabot-bili-observer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Aurabot 用户扩展：B 站观察者。看视频（标题 / 简介 / 字幕 / 热评 / 弹幕）、定时刷推荐流、订阅 UP 主动态并私聊推送；只点赞和收藏，不评论、不发弹幕、不改资料。",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test index.test.mjs",
+    "install:module": "node scripts/install.mjs"
+  }
+}
