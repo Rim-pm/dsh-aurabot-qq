@@ -111,7 +111,10 @@ test('闸门：群里非主人说话时本机工具被收走', async () => {
   const { mkdtempSync } = await import('node:fs')
   const { tmpdir } = await import('node:os')
   const { join } = await import('node:path')
-  process.env.AURABOT_WORKSPACE = mkdtempSync(join(tmpdir(), 'aurabot-group-gate-'))
+  const root = mkdtempSync(join(tmpdir(), 'aurabot-group-gate-'))
+  // 数据目录也必须隔离：hub 会往 sessions.json 写会话映射，不隔离就会写进主人的真实数据。
+  process.env.AURABOT_WORKSPACE = join(root, 'ws')
+  process.env.AURABOT_DATA_DIR = root
   const { createFakeDsh } = await import('./helpers/fake-dsh.js')
   const { createHub } = await import('../src/chat/hub.js')
 
