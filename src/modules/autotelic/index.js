@@ -322,7 +322,7 @@ export default {
           description: '看看现在有哪些模块装着、开着（比如抖音、B站）。你只能看到清单——每个模块的具体能力要等主人逐个接给你。',
           properties: {},
           execute: async () => {
-            const want = ['douyin', 'bili', 'heybox', 'tophub', 'tieba-reader', 'pet', 'phone', 'song', 'imagegen', 'memory']
+            const want = ['douyin', 'bili-observer', 'heybox', 'tophub', 'tieba-reader', 'pet', 'phone', 'song', 'imagegen', 'memory']
             const rows = []
             for (const id of want) {
               let mod = null

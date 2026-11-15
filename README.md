@@ -51,7 +51,7 @@ QQ ⇄ SnowLuma（OneBot v11，你自己安装/已有机器人也行）⇄ Aurab
 | 🗣️ | **语音条 & 唱歌** | edge-tts / 豆包语音（火山，填个 API Key 就能挑音色）/ MiniMax 语音（填 Key + Voice ID，支持自定义音色和情绪）/ 本地 CosyVoice、GPT-SoVITS、任意 HTTP TTS；云端识别（硅基 SenseVoice / OpenAI Whisper）可选；翻唱可导入 RVC 音色，说话唱歌同一个声音 |
 | 😀 | **表情包** | 自动收表情、AI 起名打标签、按语境挑表情；商城表情原样发送 |
 | 📖 | **QQ 空间** | 结合当天聊天写空间日记；定期看评论、按人格回评论，逛好友动态 |
-| 📺 | **刷 B 站** | 从兴趣和记忆里挑视频看、读简介/字幕/热评、写评论、私聊分享；定时看别人回她的评论接着回 |
+| 📺 | **刷 B 站（扩展）** | 观察者模式：从兴趣和记忆里挑视频看、读简介/字幕/热评，只点赞收藏、私聊分享、盯 UP 主动态；不评论不发弹幕。装 `extensions/bili-observer` |
 | 🖼️ | **画图 & 本地接口** | 接内置生图或你自己的生图/语音/翻唱/识别服务，面板生成脚本、改完即生效 |
 | 🧠 | **长期记忆** | 记忆库、人物档案、相处经验、说话方式、空间日记都进上下文；可选**语义检索**（硅基 bge-m3 / 方舟豆包 / OpenAI / 本地 Ollama），按意思找旧记忆。支持导入旧档案、面板搜/改/删，自动记忆容量可调整（默认 3000 条）；见 [docs/EMBEDDING.md](docs/EMBEDDING.md) |
 | 🐟 | **桌面宠物（可选）** | 桌宠模块让她住在桌面上：待机动作、碎碎念、干活状态联动，永不打扰 QQ |
@@ -190,6 +190,7 @@ npm test        # 单元测试 + 假 DSH 宿主/模拟 OneBot 的端到端测试
 src/host.js            插件入口（宿主半边）：核心 + 面板接口 /aurabot/api/*
 src/core/modules.js    模块内核：加载、开关、替换、热重载、出错隔离
 src/modules/           内置模块 + 扩展接口 API.md + 类型 + 新模块模板
+extensions/            可选扩展（bili-observer 刷 B 站 / douyin-save 抖音转存 / weather 天气），各自带安装脚本
 src/chat/              消息中枢、群聊策略、回复解析、白名单与权限
 src/onebot/client.js   OneBot v11 客户端（HTTP + WS，自动重连）
 src/snowluma/          SnowLuma 管理（检测、启停、只注入机器人号）

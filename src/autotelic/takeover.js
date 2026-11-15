@@ -11,6 +11,7 @@
 //   · 压制靠写配置实现——浏览型模块每次运行都现读 settings，改了立即生效（不改它们一行代码）；
 //   · 探测式：扫在跑模块的配置，凡含 autoBrowse 的就是「有自主循环」的家族
 //     （douyin/bili/heybox/tieba-reader/phone 全是这个键；tophub 例外用 tourTimes/shareLimit）；
+//     模块 id 和配置键不同名的（bili-observer → bili）由 CONFIG_KEY 兜底；
 //   · **不关模块总开关**（enabled）——关了 `api.use('douyin')` 就拿不到，她的手就断了；
 //   · 恢复接管（2026-11-05 主人定）：重启后重新压制（幂等），不还原——接管是他的一次性职责移交。
 //
@@ -24,12 +25,19 @@ export const EXCEPTIONS = Object.freeze([
   { id: 'tophub', scope: 'ext', keys: [{ key: 'shareLimit', to: 0 }] },
 ])
 
+/** 模块 id 和配置键不一致的别名（B 站拆成扩展后模块 id 是 bili-observer，配置仍在顶层 bili）。 */
+const CONFIG_KEY = Object.freeze({ 'bili-observer': 'bili' })
+
+/** 模块 id → 配置键（默认同名）。 */
+const configKeyOf = (id) => CONFIG_KEY[id] || id
+
 /** 新旧模块的配置位置（douyin 在顶层、tophub 等在 ext.<id>；两个都查，兼容历史写法）。 */
 function configOf(getConfig, id) {
   const cfg = getConfig() || {}
+  const key = configKeyOf(id)
   const scopes = []
-  if (cfg[id] && typeof cfg[id] === 'object') scopes.push({ scope: '', value: cfg[id] })
-  if (cfg.ext?.[id] && typeof cfg.ext[id] === 'object') scopes.push({ scope: 'ext', value: cfg.ext[id] })
+  if (cfg[key] && typeof cfg[key] === 'object') scopes.push({ scope: '', value: cfg[key] })
+  if (cfg.ext?.[key] && typeof cfg.ext[key] === 'object') scopes.push({ scope: 'ext', value: cfg.ext[key] })
   return scopes
 }
 
@@ -75,9 +83,10 @@ export function probeTakeovers({ getConfig, liveIds = [], extra = [] } = {}) {
 
 /** 一份压制补丁：{id, scope, key} → 写配置用的 patch 片段（scope ''=顶层，'ext'=ext.<id>）。 */
 function patchOf(scope, id, key, value) {
+  const cfgKey = configKeyOf(id)
   return scope === 'ext'
-    ? { ext: { [id]: { [key]: value } } }
-    : { [id]: { [key]: value } }
+    ? { ext: { [cfgKey]: { [key]: value } } }
+    : { [cfgKey]: { [key]: value } }
 }
 
 /**

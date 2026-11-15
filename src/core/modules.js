@@ -251,7 +251,7 @@ function settleModuleCall(core, verdict, outcome, log) {
  *
  * broker 档 + 发往主人私聊的纯文本 → **改走宿主代发**（api.proactive.submit 的
  * hostDelegate 路径）：内容先进「目的引擎（代发决断）」会话过目，再由宿主统一投递。
- * 这样普通模块（douyin / tophub / bili……）不改一行代码，也会被引擎审查并留下会话记录；
+ * 这样普通模块（douyin-save / tophub / bili-observer……）不改一行代码，也会被引擎审查并留下会话记录；
  * 只有 broker 档这样走，gate 档与 pass 档行为不变。
  *
  * broker 档 + 发往主人私聊的**非文本**（图片 / 文件 / 语音 / 纯消息段，无可审文本）→

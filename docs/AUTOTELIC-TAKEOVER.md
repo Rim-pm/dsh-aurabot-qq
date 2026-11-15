@@ -7,6 +7,10 @@
 > 基线：`local/runtime` @ `4c362d0`；本机配置实测（douyin/bili `autoBrowse: true`，
 > `maxRunsPerDay: 11`；tophub `tourTimes: 09:30,21:00`）。
 >
+> **后续变更（B 站拆成扩展）**：B 站不再是内置模块 `bili`，而是扩展 `bili-observer`，但配置仍在顶层 `cfg.bili`。
+> `src/autotelic/takeover.js` 里的 `CONFIG_KEY` 负责把模块 id 映射回配置键，所以探测/压制/还原对 `bili-observer` 同样生效；
+> 文中的 `api.use('bili')` 现在应读作 `api.use('bili-observer')`。
+>
 > **主人定的两条口径（2026-11-04）**：
 > 1. 一键关闭**不自动做**——面板提供按钮，**主人手动点**；
 > 2. 接管的除了自主循环，还有**「兴趣」部分**——刷什么、什么有意思，这个决定权归主动引擎。

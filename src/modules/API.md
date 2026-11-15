@@ -286,7 +286,7 @@ api.tool(({ chat, level, sessionId }) => {
 ## 面板
 
 **自动表单**：写了 `settings`，面板会多一个这个模块的标签页，自动生成设置表单，用户改完点保存。
-定义里写了 `tab: '内置标签页'`（`voice` `stickers` `imagegen` `diary` `speakup` `mood` `song` `bili` `local` `group` `model` `persona` `access` `connect` `overview`），设置和面板就放进那一页的最下面，不单独占一页。比如给翻唱加功能的模块写 `tab: 'song'`。
+定义里写了 `tab: '内置标签页'`（`voice` `stickers` `imagegen` `diary` `speakup` `mood` `song` `local` `group` `model` `persona` `access` `connect` `overview`），设置和面板就放进那一页的最下面，不单独占一页。比如给翻唱加功能的模块写 `tab: 'song'`。
 
 定义里写 `navGroup: 'market'`，模块会在「模块」分组显示独立标签，和「已安装」「本地接口」并排。可用分组为 `home`、`self`、`express`、`platform`、`system`、`market`。同时填写 `tab` 时，支持 `navGroup` 的宿主优先使用独立标签，旧宿主仍使用 `tab`。
 
@@ -336,7 +336,6 @@ return function Panel({ settings, save, toast }) {
 | `diary` | 空间日记 | `writeDiary()` `post(正文, { images, visibility })` `remove(tid)` `history()` `nextTime()` |
 | `qzone-social` | 空间互动 | `run({ force })` `state()` |
 | `speakup` | 主动搭话 | `fire(原因)` `state()` |
-| `bili` | B 站（观察者，只读 + 点赞 / 收藏） | `watch(链接)` `run()` `account()` `state()` |
 | `song` | 翻唱 | `request({ song, pitch, chatId })` `search(关键词)` `status()` `install()` |
 
 人物记忆统一使用 `features/memory-store.js` 的 `load/save`，不另建名单或记忆文件。`memory.deletePerson(qq, { keepNoMemory?: boolean })` 删除画像、关于该人的事实及跟进、相关事实引用、涉及他的关系、个人梗概、相处经验、说话习惯、短期摘要和标签，并用 `hub.forgetChatLog(qq)` 把旧流水标为已忘；只提到他名字的别人的事实保留。主人不能删除。`forgetChatLog(qq, query?)` 省略 query 表示整个人，传关键词仍是原来的局部遗忘。

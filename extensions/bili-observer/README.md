@@ -35,6 +35,8 @@ AI 过滤默认关。关着就是原样转发，不花 token；开着会先让�
 
 ## 安装
 
+从仓库的 `extensions/bili-observer` 目录：
+
 ```sh
 npm run install:module
 ```
