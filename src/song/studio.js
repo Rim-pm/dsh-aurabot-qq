@@ -10,6 +10,7 @@ import { createHash } from 'node:crypto'
 import { dataDir, readJson, writeJson } from '../core/store.js'
 import { searchSongs, songUrl, account } from './netease.js'
 import { readZip } from './zip.js'
+import { SongClipError, validateSongClip, selectedWindow, clipCacheParts, clipLabel, clipFade } from './segment.js'
 
 export const APPLIO_REPO = 'https://github.com/IAHispano/Applio.git'
 export const APPLIO_COMMIT = 'c817f1f83f689ef72e0dfeb1c17ae990b9248506'
@@ -403,6 +404,22 @@ export function explainSongError(message) {
   return m
 }
 
+class SongDeliveryError extends Error {}
+
+/** 对聊天和模型只给固定的人话；报错原文留在日志和本机翻唱面板。 */
+export function songFailureReason(error) {
+  if (error instanceof SongClipError || error instanceof SongDeliveryError) return error.message
+  const m = String(error?.message || '')
+  if (/没有人声|都没有人声/.test(m)) return '这次没有检测到人声，请换个片段或歌曲版本。'
+  if (/网易云上没搜到/.test(m)) return '没搜到这首歌，请检查歌名或补上歌手。'
+  if (/会员|版权限制/.test(m)) return '这个歌曲版本暂时下载不了，请换一个版本，或请主人检查音乐账号设置。'
+  if (/没有可用的音色|没有导入音色/.test(m)) return '还没有可用音色，请主人在翻唱面板选择或导入音色。'
+  if (/No module named|ModuleNotFoundError|翻唱环境不完整|环境还没装好/.test(m)) return '翻唱环境不完整，请主人在翻唱面板检查安装。'
+  if (/out of memory|OutOfMemoryError|not enough memory/i.test(m)) return '处理这段歌的内存不够，请缩短片段或关闭占用较大的程序。'
+  if (/timeout|timed? out|超时|处理时间太长/i.test(m)) return '这次处理超时了，请缩短片段后再试。'
+  return '这次翻唱没完成，详细原因请主人查看翻唱面板。'
+}
+
 export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, say, onSung, local }) {
   const cfg = () => getConfig().song
   const P = () => pathsOf(cfg().root || defaultRoot())
@@ -467,7 +484,7 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, say,
       voice: cfg().voice,
       install: { ...install, log: install.log.slice(-30) },
       current: current ? { ...current } : null,
-      queue: queue.map((q) => ({ query: q.query, chatId: q.chatId })),
+      queue: queue.map((q) => ({ query: q.query, chatId: q.chatId, ...(q.clip ? { clip: q.clip } : {}) })),
       history: history.slice(0, 10),
       message: !voices.length ? '还没有音色：在下面「音色模型」里导入你有权使用的 RVC 模型（.pth 或 zip）' : ready ? (cfg().enabled ? '可以点歌了' : '准备好了，打开开关就能用') : '还差一些组件，点「一键安装」',
     }
@@ -515,18 +532,34 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, say,
         if (existsSync(join(p.applio, 'core.py'))) return note('  已经有了，跳过')
         // 直接下代码压缩包（固定版本），不需要电脑上装 git
         const zip = join(p.root, 'downloads', 'applio.zip')
-        // 用环境里的 Python 下（断了能接着下、走系统代理）；万一不行再用 PowerShell 下
-        try {
-          await fetchFile(p.python, zip, [`https://github.com/IAHispano/Applio/archive/${APPLIO_COMMIT}.zip`, `https://codeload.github.com/IAHispano/Applio/zip/${APPLIO_COMMIT}`], note, log, (done, total) => {
-            install.progress = { kind: 'file', name: 'Applio', done, total }
-          })
-        } catch (error) {
-          note('  换个方式再下一次')
-          await fetchWithProgress(`https://github.com/IAHispano/Applio/archive/${APPLIO_COMMIT}.zip`, zip)
-        }
         const tmp = join(p.root, 'downloads', 'applio-src')
+        const urls = [`https://github.com/IAHispano/Applio/archive/${APPLIO_COMMIT}.zip`, `https://codeload.github.com/IAHispano/Applio/zip/${APPLIO_COMMIT}`]
+        const downloadApplio = async () => {
+          // 以前中断留下的同名 zip 可能能过 existsSync，但内容不完整；先按 zip 头判断，坏包直接丢掉。
+          try {
+            if (existsSync(zip) && (!statSync(zip).size || readFileSync(zip).subarray(0, 2).toString() !== 'PK')) rmSync(zip, { force: true })
+          } catch { try { rmSync(zip, { force: true }) } catch {} }
+          try {
+            await fetchFile(p.python, zip, urls, note, log, (done, total) => {
+              install.progress = { kind: 'file', name: 'Applio', done, total }
+            })
+          } catch (error) {
+            note('  换个方式再下一次')
+            await fetchWithProgress(urls[0], zip)
+          }
+        }
+        await downloadApplio()
         rmSync(tmp, { recursive: true, force: true })
-        await expandZip(zip, tmp)
+        try {
+          await expandZip(zip, tmp)
+        } catch (error) {
+          // Expand-Archive 失败通常是下载不完整/镜像返回了 HTML：清掉坏包重下一次，不能一直拿坏包重试。
+          rmSync(tmp, { recursive: true, force: true })
+          rmSync(zip, { force: true })
+          note('  压缩包不完整，已清理并重新下载')
+          await downloadApplio()
+          await expandZip(zip, tmp)
+        }
         const inner = readdirSync(tmp).find((n) => existsSync(join(tmp, n, 'core.py')))
         if (!inner) throw new Error('下载的 Applio 压缩包不完整')
         rmSync(p.applio, { recursive: true, force: true })
@@ -790,10 +823,10 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, say,
   }
 
   /** 先截出要发的那一段再处理：分离和换声都只算这一段，快一倍多。返回 {file, cut, length}。 */
-  async function cutFirst(song, dir) {
+  async function cutFirst(song, dir, clip) {
     const c = cfg()
     const dur = await ffprobeDuration(song)
-    const w = clipWindow(dur, Number(c.maxVoiceSec) || 120, c.clipStart)
+    const w = clip ? selectedWindow(dur, clip) : clipWindow(dur, Number(c.maxVoiceSec) || 120, c.clipStart)
     if (!dur || (w.start === 0 && w.length >= dur)) return { file: song, cut: false, length: dur }
     const out = join(dir, 'part.wav')
     await run(P().ffmpeg, ['-y', '-hide_banner', '-loglevel', 'error', '-ss', String(w.start), '-t', String(w.length), '-i', song, '-ar', '44100', out], { log })
@@ -804,7 +837,7 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, say,
   async function fade(mixed, dir, length) {
     const out = join(dir, 'voice.mp3')
     await run(P().ffmpeg, ['-y', '-hide_banner', '-loglevel', 'error', '-i', mixed,
-      '-af', `afade=t=in:d=1.5,afade=t=out:st=${Math.max(0, length - 3)}:d=3`, '-b:a', '128k', out], { log })
+      '-af', clipFade(length), '-b:a', '128k', out], { log })
     return out
   }
 
@@ -815,26 +848,30 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, say,
     const pitch = Number.isFinite(Number(job.pitch)) ? Math.max(-24, Math.min(24, Math.round(Number(job.pitch)))) : Number(c.pitch) || 0
     const dir = join(work(), Date.now().toString(36))
     mkdirSync(dir, { recursive: true })
+    job.workDir = dir
     current.stage = '下载歌曲'
     const song = job.file || (await download(job, dir))
+    current.title = job.title || job.query
     // 同一首歌、同一个音色、音高和截取方式做过的，直接复用
     // v2：0.6.2 起才检查有没有人声，之前缓存的可能是只有伴奏的成品，一律不用
-    const key = createHash('md5').update(['v2', job.songKey || song, local?.active('song') ? 'local:' + (voice?.id || '') : voice.id, pitch, c.maxVoiceSec, c.clipStart, ...(job.acapella ? ['acapella'] : [])].join('|')).digest('hex').slice(0, 16)
+    const key = createHash('md5').update(['v2', job.songKey || song, local?.active('song') ? 'local:' + (voice?.id || '') : voice.id, pitch, ...clipCacheParts(job.clip, c), ...(job.acapella ? ['acapella'] : [])].join('|')).digest('hex').slice(0, 16)
     const cached = join(work(), 'cache', key + '.mp3')
     if (existsSync(cached)) {
       log.info(`翻唱：「${job.title}」做过了，直接用缓存`)
       return { file: cached, voice: voice.id, pitch, dir }
     }
     current.stage = '截取要唱的那一段'
-    const part = await cutFirst(song, dir)
+    const part = await cutFirst(song, dir, job.clip)
     current.stage = '分离人声和伴奏'
     const { vocals, inst } = await separate(part.file, dir)
     // 纯音乐 / 伴奏版分不出人声：换下一首候选重做，不然发出去只有伴奏
     const vol = await meanVolume(vocals)
     if (vol < VOCAL_MIN_DB) {
       log.info(`翻唱：「${job.title}」几乎没有人声（${vol.toFixed(0)} dB），像是纯音乐`)
-      try { rmSync(dir, { recursive: true, force: true }) } catch (error) {}
-      if (!job.file) markNoVocals(job.songKey)
+      if (!c.keepWork) try { rmSync(dir, { recursive: true, force: true }) } catch (error) {}
+      if (job.clip) throw new SongClipError('这段没有检测到人声，可能是前奏或间奏；请换个开始位置或增加时长。')
+      // 仅凭一个片段不能认定整首歌没有人声。
+      if (!job.file && !part.cut) markNoVocals(job.songKey)
       if (job.file || job.songId) throw new Error('这首没有人声（像是纯音乐或伴奏版），换一首吧')
       job.skip = [...(job.skip || []), job.songKey]
       if (job.skip.length >= 3) throw new Error(`搜到的几版「${job.query}」都没有人声，换个说法试试（比如带上歌手名）`)
@@ -856,6 +893,7 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, say,
   function noticeFail(job, error, why) {
     const title = job.title || job.query
     const now = Date.now()
+    for (const [id, item] of failNoticed) if (now - item.at >= FAIL_NOTICE_GAP) failNoticed.delete(id)
     const last = failNoticed.get(job.chatId)
     if (last && now - last.at < FAIL_NOTICE_GAP) {
       log.info(`翻唱失败提示刚发过（${Math.round((now - last.at) / 1000)} 秒前），这次不重复：「${title}」`)
@@ -863,13 +901,13 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, say,
     }
     failNoticed.set(job.chatId, { at: now, why })
     // 模型那边彻底挂了也得让人听到一句，不能一声不吭；这句只是兜底，不是原来的模板
-    const plain = `「${title}」这次没唱成，回头再试试？`
-    if (!say) {
+    const plain = `「${title}」：${songFailureReason(error)}`
+    if (!say || error instanceof SongClipError || error instanceof SongDeliveryError) {
       Promise.resolve(sendText?.(job.chatId, plain)).catch(() => {})
       return
     }
     Promise.resolve()
-      .then(() => say({ chatId: job.chatId, title, query: job.query, why, error: String(error?.message || '') }))
+      .then(() => say({ chatId: job.chatId, title, query: job.query, why: songFailureReason(error), error: songFailureReason(error) }))
       .catch((e) => {
         log.warn('翻唱失败提示没说出来，退回一句短的：', e?.message || e)
         Promise.resolve(sendText?.(job.chatId, plain)).catch(() => {})
@@ -879,23 +917,27 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, say,
   async function pump() {
     if (current || !queue.length) return
     const job = queue.shift()
-    current = { query: job.query, title: job.query, chatId: job.chatId, stage: '排队', startedAt: Date.now() }
+    current = { query: job.query, title: job.query, chatId: job.chatId, stage: '排队', startedAt: Date.now(), ...(job.clip ? { clip: job.clip } : {}) }
     log.info(`翻唱开始：「${job.query}」→ ${job.chatId}`)
     try {
       const r = await process1(job)
       current.stage = '发送'
-      await sendVoiceFile(job.chatId, r.file, `[${job.acapella ? '清唱' : '翻唱'}] ${job.title || job.query}`)
-      history.unshift({ at: Date.now(), title: job.title || job.query, voice: r.voice, pitch: r.pitch, ok: true, message: `用时 ${Math.round((Date.now() - current.startedAt) / 1000)} 秒` })
-      log.info(`翻唱完成：「${job.title || job.query}」`)
-      onSung?.(job.title || job.query, job.chatId)
-      if (!cfg().keepWork) try { rmSync(r.dir, { recursive: true, force: true }) } catch (error) {}
+      const delivery = await sendVoiceFile(job.chatId, r.file, `[${job.acapella ? '清唱' : '翻唱'}] ${job.title || job.query}`)
+      // 老的自定义发送回调可不返回值；显式未发出和等待补发不能记成已送达。
+      if (delivery === null || delivery === false) throw new SongDeliveryError('翻唱已制作，但语音发送未确认，请先查看目标聊天，避免重复点歌。')
+      const queued = delivery?.queued === true
+      history.unshift({ at: Date.now(), title: job.title || job.query, voice: r.voice, pitch: r.pitch, ...(job.clip ? { clip: job.clip } : {}), ok: true, ...(queued ? { queued: true } : {}), message: queued ? '已制作并交给补发队列；请在目标聊天确认送达' : `用时 ${Math.round((Date.now() - current.startedAt) / 1000)} 秒` })
+      log.info(`翻唱${queued ? '等待补发' : '完成'}：「${job.title || job.query}」`)
+      if (!queued) onSung?.(job.title || job.query, job.chatId)
     } catch (error) {
       const why = explainSongError(error.message)
-      history.unshift({ at: Date.now(), title: job.title || job.query, ok: false, message: why })
+      history.unshift({ at: Date.now(), title: job.title || job.query, ...(job.clip ? { clip: job.clip } : {}), ok: false, message: why })
       log.warn(`翻唱失败：「${job.query}」：`, error.message)
       // 说什么由她自己定：原来那句固定文案对谁、什么原因都一样，听着不像她说的
       noticeFail(job, error, why)
     } finally {
+      // 下载、分离、换声或发送失败也释放本次工作文件；不碰原文件和成品缓存。
+      try { if (job.workDir && !cfg().keepWork) rmSync(job.workDir, { recursive: true, force: true }) } catch (error) { log.warn('翻唱临时文件未清理：', error.message) }
       history = history.slice(0, 20)
       current = null
       pump()
@@ -903,17 +945,27 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, say,
   }
 
   /** 点一首：马上返回，做好了自己发到聊天里。 */
-  function request({ song, songId, file, pitch, voice, chatId, acapella }) {
+  function request(options) {
+    try { return enqueue(options) }
+    catch (error) {
+      log.warn('翻唱点歌未完成：', error?.message || error)
+      return { ok: false, message: '点歌未完成，请先查看翻唱面板的任务状态再重试；详细原因已记录在本机日志。' }
+    }
+  }
+
+  function enqueue({ song, songId, file, pitch, voice, chatId, acapella, startSec, durationSec }) {
     const c = cfg()
     if (!c.enabled) return { ok: false, message: '翻唱还没打开（面板「翻唱」标签里开）' }
+    const selection = validateSongClip({ startSec, durationSec }, c.maxVoiceSec)
+    if (!selection.ok) return selection
     const st = status()
     if (!st.ready) return { ok: false, message: '翻唱环境还没装好：' + st.message }
     if (!song && !songId && !file) return { ok: false, message: '要说唱哪首歌' }
     if (queue.length >= 5) return { ok: false, message: '排队的歌太多了，等会儿再点' }
-    queue.push({ query: song || basename(file || ''), songId, file, pitch, voice, chatId, acapella: Boolean(acapella) })
+    queue.push({ query: song || basename(file || ''), songId, file, pitch, voice, chatId, acapella: Boolean(acapella), clip: selection.clip })
     const ahead = queue.length - 1 + (current ? 1 : 0)
     pump()
-    return { ok: true, message: `开始准备「${song || basename(file || '')}」，大概要两三分钟${ahead ? `（前面还有 ${ahead} 首）` : ''}，做好了会直接发语音` }
+    return { ok: true, message: `已接下「${song || basename(file || '')}」${selection.clip ? `（${clipLabel(selection.clip)}）` : ''}${ahead ? `，前面还有 ${ahead} 首` : ''}。制作时间取决于片段长度和电脑性能，做好会发语音。` }
   }
 
   return {

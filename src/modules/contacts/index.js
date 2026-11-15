@@ -36,9 +36,10 @@ export function planWhitelist(cfg, { action, kind, id }) {
   if (k === 'private' && act === 'add' && n === String(cfg.botQQ || '')) return { ok: false, message: '这是我自己的号，不用加' }
   const list = (k === 'private' ? cfg.allow?.private : cfg.allow?.groups) || []
   const has = list.map(String).includes(n)
+  const modeNote = k === 'group' && (cfg.group?.moduleOnlyGroups || []).includes(n) ? '；仍为仅模块，@ 也不触发 AI。要恢复 AI 聊天，请修改群响应模式' : ''
   if (act === 'add') {
-    if (has) return { ok: true, message: `${label} ${n} 已经在${listName}里了` }
-    return { ok: true, changed: true, message: `${label} ${n} 加进${listName}了`, next: [...list.map(String), n] }
+    if (has) return { ok: true, message: `${label} ${n} 已经在${listName}里了${modeNote}` }
+    return { ok: true, changed: true, message: `${label} ${n} 加进${listName}了${modeNote}`, next: [...list.map(String), n] }
   }
   if (!has) return { ok: true, message: `${label} ${n} 本来就不在${listName}里` }
   return { ok: true, changed: true, message: `${label} ${n} 从${listName}移出了`, next: list.map(String).filter((x) => x !== n) }
@@ -217,7 +218,7 @@ export default {
       }
       if (profileToolVisible(cfg, 'whitelist', chat)) tools.push(defineTool({
         name: 'qq_whitelist',
-        description: '改白名单：action 填 add（加进）或 remove（移出），kind 填 private（某个 QQ 号可以私聊你）或 group（某个群你会理），id 填 QQ 号或群号。主人不能被移出。',
+        description: '改白名单：action 填 add（加进）或 remove（移出），kind 填 private（某个 QQ 号可以私聊你）或 group（允许群消息交给模块；是否 AI 接话另看群响应模式），id 填 QQ 号或群号。主人不能被移出。群模式用 qq_group_settings 查询或修改；仅模块限制不因重新加白而解除。',
         properties: { action: str('add 加进 / remove 移出'), kind: str('private 私聊的人 / group 群'), id: str('QQ 号或群号（数字）') },
         required: ['action', 'kind', 'id'],
         execute: guarded('whitelist', chat, sessionId, async (args, c) => {

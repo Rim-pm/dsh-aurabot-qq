@@ -849,9 +849,13 @@ export function createMemoryStore({ dsh, getConfig, hub, log, fetchImpl, setConf
     if (transaction) transaction = s
     else storage.save(s)
     cache = null
+    noMemoryCache = null
   }
   let forgetVersion = 0
   let cache = null // { stamp, idx }
+  // 「不再记住」的 QQ 集合。rememberedItem/Row 会按聊天流水的每一行调用；
+  // 默认参数如果每次都 load()，就会在热路径里反复整库读 SQLite（几百上千行 = 几百上千次读库）。
+  let noMemoryCache = null
   const index = () => {
     const s = load()
     const cfg = getConfig()
@@ -863,13 +867,25 @@ export function createMemoryStore({ dsh, getConfig, hub, log, fetchImpl, setConf
 
   const isOwner = (qq) => Boolean(getConfig().ownerQQ) && String(qq) === String(getConfig().ownerQQ)
   // 不再记住只有画像上的这一个标记；主人即使读到旧脏数据也不会被屏蔽。
-  function remembers(qq, state = load()) {
-    return !qq || isOwner(qq) || (state.profiles?.[String(qq)]?.noMemory !== true && !blocked?.(String(qq)))
+  // 不传 state 时只读一次画像构建 noMemory 集合，之后逐行判断 O(1)；
+  // 传 state 的调用方（事务快照/批量处理）仍以传入快照为准。
+  function remembers(qq, state = null) {
+    if (!qq || isOwner(qq)) return true
+    let noMemory
+    if (state) noMemory = state.profiles?.[String(qq)]?.noMemory === true
+    else {
+      if (!noMemoryCache) {
+        const s = load()
+        noMemoryCache = new Set(Object.entries(s.profiles || {}).filter(([, p]) => p?.noMemory === true).map(([id]) => id))
+      }
+      noMemory = noMemoryCache.has(String(qq))
+    }
+    return !noMemory && !blocked?.(String(qq))
   }
-  function rememberedItem(item, state = load()) {
+  function rememberedItem(item, state = null) {
     return remembers(item.about, state) && (!String(item.chatId || '').startsWith('private:') || remembers(String(item.chatId).slice(8), state))
   }
-  function rememberedRow(row, state = load()) {
+  function rememberedRow(row, state = null) {
     const interaction = Array.isArray(row.interaction) ? row.interaction : []
     return rememberedItem(row, state) && (row.who === 'bot' ? interaction.every((qq) => remembers(qq, state)) : remembers(row.uid, state))
   }

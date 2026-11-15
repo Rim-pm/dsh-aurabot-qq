@@ -40,6 +40,20 @@ test('心情理由记录发生时间，重启后按分钟/小时展示，三小�
   assert.doesNotMatch(restored.contextLine(), /因为|调侃|存图/)
 })
 
+test('心情模型提示明确区分玩笑调侃与真恶意', async (t) => {
+  let system = ''
+  const dsh = { get: () => null, llm: { async *stream(params) {
+    system = String(params.system || '')
+    yield { type: 'text-delta', text: '{"delta":0,"reason":"玩笑","confidence":0.9}' }
+    yield { type: 'finish', reason: { kind: 'completed' } }
+  } } }
+  const { mood } = setup(t, { judge: true }, dsh)
+  await mood.judge({ userText: '讨厌~笨蛋', reply: '嘿嘿' })
+  assert.match(system, /开玩笑|调侃/)
+  assert.match(system, /傲娇|亲昵/)
+  assert.match(system, /明确恶意|攻击|羞辱/)
+})
+
 test('模型判断未达到阈值，不把旧理由刷新为现在发生', async (t) => {
   let answer = { delta: 1, reason: '不重要的新话', confidence: 1 }
   const dsh = { get: () => null, llm: { async *stream() {

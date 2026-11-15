@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { dataDir } from '../core/store.js'
 import { FACE_EXAMPLES } from '../chat/faces.js'
+import { deleteLook } from './persona-look.js'
 
 const BUNDLED = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'personas')
 const dir = () => dataDir('personas')
@@ -110,7 +111,10 @@ export function savePersona(id, { name, tags, body }) {
 }
 
 export function deletePersona(id) {
-  const f = join(dir(), `${safeId(id)}.md`)
+  const sid = safeId(id)
+  if (!sid || sid !== id) throw new Error('人格 id 无效')
+  const f = join(dir(), `${sid}.md`)
+  deleteLook(sid)
   if (existsSync(f)) unlinkSync(f)
 }
 
@@ -146,6 +150,11 @@ export function isSelfName(value, cfg) {
     })
 }
 
+/** 正文、外貌与生图共享同一个回退人格。 */
+export function resolvePersonaId(currentId) {
+  return currentPersona(currentId)?.id || ''
+}
+
 /** 当前人格正文；找不到就退回第一个，再不行给一句兜底，保证提示词变量永远有值。 */
 export function currentPersonaText(currentId) {
   const p = currentPersona(currentId)
@@ -170,7 +179,7 @@ export function rulesText(kind, cfg, { off = new Set(), extra = [] } = {}) {
     '- 像真人打字一样：一条消息里可以有两三句，句与句用逗号、句号连着写；真想分开发就在句尾换行（也可以用 |||），一次最多两三条，别刷屏。',
     '- 对方明确让你发语音时，一定要把要说的话放进 <voice></voice>。平时想发语音也这样写。',
     // 表情包关着就不教她发（#31：以前关了照样写 <sticker:…>）
-    ...(off.has('stickers') || cfg.stickers?.enabled === false ? [] : ['- 想发表情包，写 <sticker:标签>（标签可以是 开心、卖萌、生气、委屈、无语、嘲讽、疑惑、早晚安，或你记得的表情名字）。']),
+    ...(off.has('stickers') || cfg.stickers?.enabled === false ? [] : ['- 想发表情包，写 <sticker:标签>（标签可以是 开心、卖萌、生气、委屈、无语、嘲讽、疑惑、早晚安，或你记得的表情名字）。' + (cfg.stickers?.limitTagged ? ' 回复附带的表情会按设置概率省略，不要为了补发而调用工具；对方明确索要表情时才用 qq_send_sticker 单独发送。' : '')]),
     '- 在群里要真 @ 某人（对方会收到提醒），写 <at:QQ号>；不知道 QQ 号就写 @群名片，能对上群里唯一一个人才会变成真 @。',
     // QQ 自带的小黄脸：夹在文字里发
     ...(cfg.stickers?.faces === false ? [] : [`- 想在文字里夹 QQ 自带的小黄脸表情，写 <face:名字>，比如 ${FACE_EXAMPLES.map((n) => `<face:${n}>`).join(' ')}；只能用 QQ 系统表情里有的名字，别每句都加。别人发来的小黄脸会写成「[名字]」。`]),
@@ -189,7 +198,7 @@ export function rulesText(kind, cfg, { off = new Set(), extra = [] } = {}) {
   // 只在功能真的能用时告诉她，免得答应了做不到
   const who = (ownerOnly) => (ownerOnly ? `只给${owner}` : '')
   const g = cfg.imageGen || {}
-  if (!off.has('imagegen') && ((g.enabled && g.baseUrl && g.model) || cfg.local?.image)) common.push(`- 你会画画：${g.ownerOnly && cfg.capabilityAllow?.image?.length ? '主人和获得授权的私聊对象可以' : who(g.ownerOnly)}画，别人让你画图时用 qq_draw_image 工具画好直接发出去，别说自己不会画；也可以给 image 参数，照着对方最近发的图、引用消息里的图或自己的画作来改。`)
+  if (!off.has('imagegen') && ((g.enabled && g.baseUrl && g.model) || cfg.local?.image)) common.push(`- 你会画画：${g.ownerOnly && cfg.capabilityAllow?.image?.length ? '主人和获得授权的私聊对象可以' : who(g.ownerOnly)}画，别人让你画图时用 qq_draw_image 工具画好直接发出去，别说自己不会画；也可以给 image 参数，照着对方最近发的图、引用消息里的图或自己的画作来改；画自己时填 self，优先参考人设图。`)
   const s = cfg.song || {}
   if (!off.has('song') && s.enabled) common.push(`- 你会唱歌：${s.ownerOnly && cfg.capabilityAllow?.song?.length ? '主人和获得授权的私聊对象可以' : who(s.ownerOnly)}唱，别人点歌时用 qq_song_cover 工具，用你自己的声音翻唱，做好会自动发语音条，别说自己不会唱。`)
   for (const line of extra) if (line) common.push(String(line).startsWith('-') ? String(line) : '- ' + line)

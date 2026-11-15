@@ -159,6 +159,32 @@ test('会话事件在调用方异步链之外到达时，回复记到会话所�
   assert.equal(api.hub.personaOf(shokoSession), 'shoko')
 })
 
+test('人设图与外貌按会话人格读取，提示词遵循异步上下文人格', async () => {
+  const { personaScope } = await import('../src/persona/personas.js')
+  const { saveAppearance, saveLookImage } = await import('../src/persona/persona-look.js')
+  const png = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buffer.alloc(64)])
+  const other = Buffer.concat([png, Buffer.from([1])])
+  saveAppearance('dafeiyu', '蓝色短发')
+  saveAppearance('shoko', '银色长发')
+  saveLookImage('dafeiyu', png)
+  saveLookImage('shoko', other)
+  const probeDir = join(dataDir, 'modules', 'look-probe')
+  mkdirSync(probeDir, { recursive: true })
+  writeFileSync(join(probeDir, 'index.mjs'), "export default { id: 'look-probe', name: '外貌探针', api: 1, setup(api) { return api.core.personas } }")
+  const personas = await until(() => api.modules.use('look-probe'))
+  await use('shoko')
+  assert.equal(personas.look(rootSession).appearance, '蓝色短发')
+  assert.deepEqual(personas.look(rootSession).image, png)
+  assert.equal(personas.look(shokoSession).appearance, '银色长发')
+  assert.deepEqual(personas.look(shokoSession).image, other)
+  assert.equal(personas.look().appearance, '银色长发')
+  personaScope.run('dafeiyu', () => {
+    assert.equal(personas.look().appearance, '蓝色短发')
+    assert.match(fake.variables.get('aurabot_persona')(), /蓝色短发/)
+    assert.doesNotMatch(fake.variables.get('aurabot_persona')(), /银色长发/)
+  })
+})
+
 test('不再记住某人：对所有人格生效', async () => {
   await use('shoko')
   assert.equal((await fake.call('/profiles/save', { qq: FRIEND, text: '一起打游戏的朋友' })).json().ok, true)

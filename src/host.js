@@ -1,3 +1,4 @@
+import { validMemberFilter } from './chat/member-filter.js'
 // Aurabot · 宿主半边（DSH 插件入口）
 //
 // 让 DSH 里的 AI 以独立 QQ 号「大肥鱼」住在 QQ 里：
@@ -36,10 +37,11 @@ import { dataDir, ensureDir } from './core/store.js'
 import { initUsage, usageReport } from './core/usage.js'
 import { createUpdateChecker, changelogSection, hostEnv, updatePlan, repoOf } from './core/update.js'
 import { parseCommand, runCommand, createMutes, commandList } from './chat/commands.js'
-import { isOwner } from './chat/access.js'
+import { isOwner, groupResponseMode } from './chat/access.js'
 import { changePermissions, changePrivateWhitelist, privatePermissionCatalog } from './chat/permission-policy.js'
 import { canUseDelegatedCommand, delegatedCommandKey, runPersonalModelCommand } from './chat/delegated-commands.js'
-import { listPersonas, readPersona, savePersona, deletePersona, currentPersonaText, rulesText, seedPersonas, safeId, dataOwner, claimPending, hasRootData, personaDataDir } from './persona/personas.js'
+import { listPersonas, readPersona, savePersona, deletePersona, currentPersonaText, resolvePersonaId, rulesText, seedPersonas, safeId, dataOwner, claimPending, hasRootData, personaDataDir, personaNow } from './persona/personas.js'
+import { readLook, lookImage, lookImages, lookReferences, configureLookImage, lookMime, saveLookImage, deleteLookImage, saveAppearance, appearanceBlock, describeLook } from './persona/persona-look.js'
 import { createModules, API_VERSION } from './core/modules.js'
 import { createCommunity, REGISTRY_URL, GITEE_MIRROR } from './core/community.js'
 import { createApprovalRelay } from './security/approval.js'
@@ -193,7 +195,10 @@ export function apply(ctx) {
   const rulesOpts = (kind) => (mods ? { off: mods.builtinOff(), extra: mods.rules(kind) } : {})
   // 扩展模块能整段改写人格和规则（同步：提示词变量不能等）
   const rewrite = (event, text, ...args) => { const r = mods ? mods.filterSync(event, text, ...args) : text; return typeof r === 'string' ? r : r === null ? '' : text }
-  variable('aurabot_persona', () => rewrite('persona', currentPersonaText(cfg.persona.current)))
+  variable('aurabot_persona', () => {
+    const id = resolvePersonaId(personaNow(cfg))
+    return rewrite('persona', currentPersonaText(id) + appearanceBlock(id))
+  })
   variable('aurabot_rules_private', () => {
     const base = rewrite('rules', rulesText('private', cfg, rulesOpts('private')), 'private')
     // 危险命令确认开着时补一句：被拦下要如实告诉主人，别绕着写
@@ -342,7 +347,8 @@ export function apply(ctx) {
   async function flushOutbox () {
     if (onebotState !== 'connected' || !loginOk) return
     try {
-      const r = await outbox.flush((action, params, opts) => onebot.call(action, params, { ...opts, retries: 0 }))
+      const r = await outbox.flush((action, params, opts) => onebot.call(action, params, { ...opts, retries: 0 }),
+        item => !item.incomingReply || item.action !== 'send_group_msg' || groupResponseMode(cfg, item.params?.group_id) === 'chat')
       if (r.sent || r.dropped || r.left) log.info(`补发队列：成功 ${r.sent}，丢弃 ${r.dropped}，剩余 ${r.left}`)
     } catch (error) {
       logger.child('onebot').warn('补发队列出错：', error.message)
@@ -488,8 +494,8 @@ export function apply(ctx) {
         if (cmd.ext.sensitive === true && !markSensitive(cmd.name)) return ''
         return String((await cmd.ext.run(cmd.arg, msg)) ?? '')
       }
-      if (cmd.name === 'permissions' && !markSensitive(cmd.name)) return ''
-      return runCommand(cmd, msg, { getConfig, setConfig, mutes, hub, mood: use('mood'), memory: use('memory'), qzone: use('diary'), song: use('song'), listModels, reasoningFor: (provider, model) => modelReasoning(ctx, provider, model, { refresh: true }), defaultModel: () => defaultModel(ctx, { model: {} }), extraCommands: mods.commands() })
+      if (['permissions', 'groupsettings'].includes(cmd.name) && !markSensitive(cmd.name)) return ''
+      return runCommand(cmd, msg, { getConfig, setConfig, mutes, hub, onebot, ownerStillCurrent, log: logger, mood: use('mood'), memory: use('memory'), qzone: use('diary'), song: use('song'), listModels, reasoningFor: (provider, model) => modelReasoning(ctx, provider, model, { refresh: true }), defaultModel: () => defaultModel(ctx, { model: {} }), extraCommands: mods.commands() })
     },
     isMuted: (chatId) => mutes.muted(chatId),
     moodEffects: () => use('mood')?.effects?.() ?? null,
@@ -786,7 +792,14 @@ export function apply(ctx) {
     defaultModel: () => defaultModel(ctx, { model: {} }),
     http: { body: readBody, raw: readRaw, query, send },
     media: createMediaAccess({ root: ROOT, use, config: getConfig }),
-    personas: { list: listPersonas, read: readPersona, current: () => currentPersonaText(cfg.persona.current) },
+    personas: {
+      list: listPersonas, read: readPersona, current: () => currentPersonaText(cfg.persona.current),
+      look: (sessionId) => {
+        const id = resolvePersonaId((sessionId && hub.personaOf(sessionId)) || personaNow(cfg))
+        const references = id ? lookReferences(id, { lazy: true }) : []
+        return { get image() { return references[0]?.image || null }, references, appearance: id ? readLook(id).appearance : '' }
+      },
+    },
     getConfig, setConfig,
   }
   mods = createModules({ ctx, core, getConfig, setConfig, logger, version: VERSION, builtins: BUILTINS })
@@ -898,7 +911,14 @@ export function apply(ctx) {
     ownerQQ: () => cfg.ownerQQ,
   })
   core.dangerGuard = dangerGuard
-  approvalRelay = createApprovalRelay({ getConfig, deliver: (chatId, text) => hub.sendText(chatId, text), chatOfSession: (id) => hub.chatOfSession(id), log })
+  approvalRelay = createApprovalRelay({
+    getConfig,
+    deliver: (chatId, text) => hub.sendText(chatId, text),
+    chatOfSession: (id) => hub.chatOfSession(id),
+    // 等主人回复「确认」多久：可配置（config.approvalTimeoutSec，秒），默认 5 分钟
+    timeoutMs: (Number(getConfig().approvalTimeoutSec) || 300) * 1000,
+    log,
+  })
   ctx.effect(() => {
     let off = null
     try { off = ctx.on('approval/request', (request, next) => approvalRelay.onRequest(request, next)) } catch (error) { log.debug('挂审批应答失败：', error.message) }
@@ -1048,6 +1068,8 @@ export function apply(ctx) {
     getConfig,
     workspaceOf: workspaceOfSession,
     compose: noticeText,
+    // 合并窗口可配置（config.notice.windowSec，秒）：审批/选项请求到齐后等多久再推 QQ
+    windowMs: (Number(getConfig().notice?.windowSec) || 8) * 1000,
     log,
   })
   async function notifyApproval(session, event) {
@@ -1274,12 +1296,29 @@ export function apply(ctx) {
     const body = await readBody(req)
     // 面板草稿可能早于 QQ 的 /quiet /chatty；拒绝覆盖期间改过的群设置。
     // 只检查新版面板显式附带的基线，旧版和模块的局部保存维持原约定。
+    if (body?.memory && Object.hasOwn(body.memory, 'passiveGroups')) {
+      const raw = body.memory.passiveGroups
+      const ids = Array.isArray(raw) ? raw : typeof raw === 'string' ? raw.split(/[\s,，;；]+/).filter(Boolean) : null
+      if (!ids || ids.some(id => !/^[1-9]\d{4,11}$/.test(String(id).trim()))) return {
+        ok: false, code: 'invalid_passive_groups', message: '旁听名单请填 5～12 位数字群号，用换行或逗号分隔，不要混入文字。本次没有保存。',
+      }
+    }
+    for (const ids of [body?.group?.moduleOnlyGroups, ...(body?._groupSettingsBase?.groups ? [body?.allow?.groups] : [])]) {
+      if (ids !== undefined && (!Array.isArray(ids) || ids.some(id => !/^[1-9]\d{4,11}$/.test(String(id))))) return {
+        ok: false, code: 'invalid_group_ids', message: '群号请填 5～12 位数字，不要混入文字。本次没有保存。',
+      }
+    }
+    if (body && Object.hasOwn(body, 'memberFilter') && !validMemberFilter(body.memberFilter)) return {
+      ok: false, code: 'invalid_member_filter', message: '不回应名单未保存：请填有效的 QQ 号和群号（5～12 位数字），每人只添加一次，并明确选择所有群或指定群；最多 100 人、每人 100 个群。',
+    }
     const expected = body?._groupSettingsBase
     if (body) delete body._groupSettingsBase
     if (expected && (
+      (Object.hasOwn(expected, 'groups') && !isDeepStrictEqual(expected.groups, cfg.allow.groups)) ||
+      (Object.hasOwn(expected, 'memberFilter') && !isDeepStrictEqual(expected.memberFilter, cfg.memberFilter)) ||
       (Object.hasOwn(expected, 'group') && !isDeepStrictEqual(expected.group, cfg.group)) ||
       (Object.hasOwn(expected, 'passiveGroups') && !isDeepStrictEqual(expected.passiveGroups, cfg.memory.passiveGroups))
-    )) return { ok: false, code: 'group_settings_conflict', message: '群聊或旁听设置已在别处修改，本次没有保存。请记下要保留的改动，再点「读取最新设置」放弃草稿。' }
+    )) return { ok: false, code: 'group_settings_conflict', message: '群设置已在别处修改，本次没有保存。请记下要保留的改动，再点「读取最新设置」放弃草稿。' }
     const before = cfg
     // 控制台密码不能只改配置（SnowLuma 那边还是旧的）：拿出来单独去 SnowLuma 改
     const newPw = typeof body?.snowluma?.webuiPassword === 'string' ? body.snowluma.webuiPassword : ''
@@ -2122,17 +2161,69 @@ export function apply(ctx) {
     return { ok: true, message: n ? `归档了 ${n} 个会话，下一条消息起她会重新开始` : '本来就没有会话' }
   })
 
-  // 人格
+  // 人格：新增写操作显式限制 POST，避免 GET 绕过 CSRF 方法检查。
+  const personaPost = (req, res) => {
+    if (req.method === 'POST') return true
+    send(res, 405, { ok: false, message: '请使用 POST' })
+    return false
+  }
+  const savedLookId = (id) => {
+    readLook(id) // 严格检查 id，不接受清洗后指向另一人格
+    if (!readPersona(id)) throw new Error('请先保存人格')
+    return id
+  }
+  route('/persona/look', async (req) => ({ ok: true, look: readLook(savedLookId(query(req).id)) }))
+  route('/persona/look/image', async (req, res) => {
+    const q = query(req)
+    const buf = lookImage(savedLookId(q.id), q.imageId)
+    if (!buf) { send(res, 404, { ok: false, message: '还没有人设图' }); return }
+    res.setHeader?.('x-content-type-options', 'nosniff')
+    send(res, 200, buf, lookMime(buf))
+  })
+  route('/persona/look/upload', async (req, res) => {
+    if (!personaPost(req, res)) return
+    const b = JSON.parse((await readRaw(req, 8 * 1024 * 1024)).toString('utf8'))
+    const id = savedLookId(b?.id)
+    const match = typeof b.data === 'string' && b.data.match(/^data:image\/(?:png|jpeg|jpg|gif|webp);base64,([A-Za-z0-9+/]+={0,2})$/)
+    if (!match || match[1].length % 4 !== 0) throw new Error('请选择有效的图片 data URL')
+    return { ok: true, look: saveLookImage(id, Buffer.from(match[1], 'base64'), { imageId: b.imageId, append: b.append === true }) }
+  })
+  route('/persona/look/delete', async (req, res) => {
+    if (!personaPost(req, res)) return
+    const b = await readBody(req)
+    return { ok: true, look: deleteLookImage(savedLookId(b.id), b.imageId) }
+  })
+  route('/persona/look/configure', async (req, res) => {
+    if (!personaPost(req, res)) return
+    const b = JSON.parse((await readRaw(req, 16 * 1024)).toString('utf8'))
+    return { ok: true, look: configureLookImage(savedLookId(b.id), b.imageId, { reference: b.reference, note: b.note }) }
+  })
+  route('/persona/look/describe', async (req, res) => {
+    if (!personaPost(req, res)) return
+    const b = await readBody(req)
+    const id = savedLookId(b.id)
+    const buffers = lookImages(id)
+    if (!buffers.length) throw new Error('请先上传人设图')
+    const imageHash = readLook(id).imageHash
+    const text = await describeLook({ dsh: ctx, cfg: getConfig(), buffers })
+    // 在途解析不覆盖换图后的状态；描述仍由面板确认保存。
+    if (!readPersona(id) || readLook(id).imageHash !== imageHash) throw new Error('人设图已变化，请重新解析')
+    return { ok: true, text, imageHash }
+  })
   route('/personas', async () => ({ ok: true, list: listPersonas(), current: cfg.persona.current, dataOwner: dataOwner(cfg), claimPending: claimPending(cfg) }))
   route('/persona/get', async (req) => {
     const p = readPersona(query(req).id)
-    return p ? { ok: true, persona: p } : { ok: false, message: '没有这个人格' }
+    return p ? { ok: true, persona: p, look: readLook(p.id) } : { ok: false, message: '没有这个人格' }
   })
-  route('/persona/save', async (req) => {
+  route('/persona/save', async (req, res) => {
+    if (!personaPost(req, res)) return
     const b = await readBody(req)
+    readLook(b.id)
+    if (b.appearance !== undefined && typeof b.appearance !== 'string') throw new Error('外貌描述须为文字')
     const p = savePersona(b.id, b)
+    if (b.appearance !== undefined) saveAppearance(p.id, b.appearance, b.appearanceSource)
     bridge.refresh()
-    return { ok: true, persona: p, message: '人格已保存，下一轮起生效' }
+    return { ok: true, persona: p, look: readLook(p.id), message: '人格已保存，下一轮起生效' }
   })
   route('/persona/delete', async (req) => {
     const b = await readBody(req)

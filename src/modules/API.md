@@ -178,7 +178,7 @@ QQ 主人命令的参数或回执涉及隐私时，可用 `api.command({ name: '
 | `ask(opts)` | 同 `api.ask` |
 | `listModels()` / `defaultModel()` | DSH 里的模型 |
 | `http` | 写接口用的小工具：`body(req)` 读 JSON、`raw(req, 最大字节)` 读原始内容、`query(req)` 读网址参数、`send(res, 状态码, 内容, 类型)` |
-| `personas` | 人格：`list()` `read(id)` `current()` |
+| `personas` | 人格：`list()` `read(id)` `current()`（正文）；`look(sessionId?)` 返回会话所属人格（未传时取当前异步上下文人格）的 `{ image: Buffer \| null, appearance: string, references: { id, note, image: Buffer }[] }`，`references` 仅含已开启的参考图及备注，`image` 为其中第一张（兼容旧调用）；全部关闭时返回空数组和 null，与提示词使用相同的缺失人格回退规则。人设图仅供识图和生图，不直接加入聊天上下文 |
 | `modules` | 模块内核本身（`status()` `reload(id)` ……） |
 | `getConfig()` / `setConfig(cfg)` | 同 `api.config` / 整份替换配置 |
 | `logger` | 插件的日志器（`logger.child('名字')` 拿一个分类） |

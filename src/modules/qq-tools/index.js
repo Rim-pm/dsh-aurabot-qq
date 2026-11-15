@@ -271,7 +271,12 @@ export default {
           const body = String(text || '')
           if (voice === true && (/<\/?(?:voice|sticker|reply|at|poke|face)\b/i.test(body) || body.includes('|||'))) return { ok: false, message: 'voice=true 时 text 只填要念的正文，不写标签或 |||；请修改后再试，还没有发送。' }
           if (hasInvalidVoiceMarkup(body)) return { ok: false, message: '语音标签没有正确配对，还没有发送。请改用 voice=true 并在 text 中只填正文，或修正为 <voice>正文</voice> 后再试。' }
-          const r = await hub.deliver(`${kind}:${id}`, body, voice === true ? { voice: true } : {})
+          let r
+          try { r = await hub.deliver(`${kind}:${id}`, body, voice === true ? { voice: true } : {}) }
+          catch (error) {
+            api.log?.warn?.('跨聊天发送未确认：', error?.message || error)
+            return { ok: false, message: '发送结果未确认，请先查看目标聊天；不要自动重发整条消息。详细原因请主人查看本机日志。' }
+          }
           if (!r) return { ok: false, message: '没发出去：这条被拦下了，或者内容是空的' }
           const sentTypes = r.sentTypes || [], queuedTypes = r.queuedTypes || []
           const labels = { record: '语音', text: '文字', image: '图片', face: '表情', poke: '戳一戳' }

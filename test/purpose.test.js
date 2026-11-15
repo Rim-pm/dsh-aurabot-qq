@@ -1073,3 +1073,60 @@ test('代发决断：决断为沉默 → 不发；改写 → 用改写文本；�
   assert.equal(r4.send, true)
   assert.equal(r4.text, '原文直发')
 })
+
+test('代发决断：最近 20 条私聊流水都喂进去（8 条看不全上下文）', async () => {
+  const hub = makeHub({ reply: '原样' })
+  const rows = Array.from({ length: 25 }, (_, i) => ({
+    chatId: `private:${OWNER}`,
+    who: i % 2 ? 'bot' : 'owner',
+    text: `第${i + 1}条消息`,
+    t: Date.now() - (25 - i) * 1000,
+  }))
+  hub.chatLogDays = () => ['d1']
+  hub.chatLogOf = (day) => (day === 'd1' ? rows : [])
+  const { p } = makePurpose(hub)
+  await p.brokerReview({ to: `private:${OWNER}`, text: '模块推来的消息', moduleId: 'bili' })
+  const prompt = hub.turns[0].prompt
+  assert.match(prompt, /第25条消息/, '最新一条要在')
+  assert.match(prompt, /第6条消息/, '倒数第 20 条要在（20 条窗口）')
+  assert.doesNotMatch(prompt, /第5条消息/, '更早的不要，控制 token')
+})
+
+test('代发决断：跨天也要凑够 20 条（零点刚过时只看当天会不够）', async () => {
+  const hub = makeHub({ reply: '原样' })
+  const yesterday = Array.from({ length: 15 }, (_, i) => ({
+    chatId: `private:${OWNER}`, who: 'owner', text: `昨天的第${i + 1}条`, t: Date.now() - (30 - i) * 1000,
+  }))
+  const today = Array.from({ length: 10 }, (_, i) => ({
+    chatId: `private:${OWNER}`, who: 'bot', text: `今天的第${i + 1}条`, t: Date.now() - (10 - i) * 1000,
+  }))
+  hub.chatLogDays = () => ['d1', 'd2']
+  hub.chatLogOf = (day) => (day === 'd1' ? yesterday : day === 'd2' ? today : [])
+  const { p } = makePurpose(hub)
+  await p.brokerReview({ to: `private:${OWNER}`, text: '模块推来的消息', moduleId: 'bili' })
+  const prompt = hub.turns[0].prompt
+  assert.match(prompt, /今天的第10条/, '今天最新的要有')
+  assert.match(prompt, /昨天的第11条/, '往前凑满 20 条时，昨天的也要读进来')
+})
+
+test('代发决断：人格卡整份喂进去（5000 字窗口，后半段说话规则也要能看到）', async () => {
+  // 前半段：身份设定；后半段：说话规则——截 1500 字会把后半段切掉
+  const head = '她是一条活泼爱玩又黏人的鱼。'.repeat(120)   // 约 1680 字，确保超过旧的 1500 截断线
+  const tail = '【说话规则】说人话，不用校准闭环这类词；不说应酬话。'
+  const persona = head + tail
+  const hub = makeHub({ reply: '原样' })
+  const { p } = makePurpose(hub, { persona })
+  await p.brokerReview({ to: `private:${OWNER}`, text: '模块推来的消息', moduleId: 'bili' })
+  const prompt = hub.turns[0].prompt
+  assert.match(prompt, /说人话/, '人格后半段的说话规则要在提示词里')
+  assert.ok(persona.length > 1500, '人格本身超过 1500 字，用来证明窗口放大了')
+})
+
+test('代发决断：人格超过 5000 字才截断（防止极端长卡把 prompt 撑爆）', async () => {
+  const long = '甲'.repeat(6000) + '结尾标记'
+  const hub = makeHub({ reply: '原样' })
+  const { p } = makePurpose(hub, { persona: long })
+  await p.brokerReview({ to: `private:${OWNER}`, text: '模块推来的消息', moduleId: 'bili' })
+  const prompt = hub.turns[0].prompt
+  assert.doesNotMatch(prompt, /结尾标记/, '超 5000 字的部分被截掉')
+})

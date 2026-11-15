@@ -1,3 +1,4 @@
+import { normalizeMemberFilter } from '../chat/member-filter.js'
 // 插件配置：默认值 + 归一化 + 读写。配置文件 ~/.dsh/plugins-data/aurabot/config.json
 
 import { randomUUID } from 'node:crypto'
@@ -24,9 +25,10 @@ export const DEFAULTS = {
   approvalNotify: true, // DSH 要授权时把请求发到主人私聊
   // 什么情况往主人 QQ 上报：enabled 是总开关，approval = 工具要授权，question = 她要向人提问选选项。
   // workspaces 按工作区单独覆盖：{ "<工作区路径>": { approval?: bool, question?: bool } }，没写的项跟随总开关。
-  notice: { enabled: true, approval: true, question: true, workspaces: {} },
+  notice: { enabled: true, approval: true, question: true, windowSec: 8, workspaces: {} },
   qqApi: { enabled: true }, // 她能用 qq_api_call 调 QQ 接口：别人只能查当前群，写操作只听主人
   approvalViaQQ: true, // 主人私聊会话要授权时，在 QQ 回复「确认」直接批准这一次
+  approvalTimeoutSec: 300, // 等主人回复「确认」多久（秒）：默认 300，范围 30 ~ 1800
   profilePerms: { qqNickname: 'owner', qqSignature: 'owner', qqAvatar: 'owner', qqFriendRequest: 'owner', whitelist: 'owner', douyinBrowse: 'owner', douyinLike: 'owner', douyinComment: 'owner', douyinShareOwner: 'owner', douyinDm: 'owner' }, // 改资料类操作（含抖音浏览 / 点赞 / 评论 / 分享）的权限：off 关 / owner 仅主人私聊 / all 所有人。抖音项默认仅主人，总开关默认关
   capabilityAllow: { image: [], song: [], video: [] },
   commandAllow: Object.fromEntries(DELEGATED_COMMANDS.map((name) => [name, []])),
@@ -91,6 +93,7 @@ export const DEFAULTS = {
     ownerOnly: true, // 只有主人能让她画
     seeOwn: true, // 「让她画完自己看一眼」：开着才把画好的图交给她看
     img2img: true, // 允许参考聊天图片 / 自己的画作来改画
+    allowGif: false, // 明确请求动图时才允许 format=gif，普通画图仍沿用静态路径
     galleryShown: 20, // 面板「她的画作」显示最近几张（1~50；只影响显示，不删文件）
     // 自定义接法：url 里可以用 {prompt} {model} {size} {width} {height} {image}（参考图 base64）；params 是参数名/值（值里也能用这些占位符）
     custom: { method: 'GET', url: '', bodyType: 'json', responsePath: '', params: [] },
@@ -109,8 +112,10 @@ export const DEFAULTS = {
     custom: { createUrl: '', createMethod: 'POST', headers: '', body: '{"prompt":"{prompt}","duration":{seconds}}', taskIdPath: 'task_id', queryUrl: '', statusPath: 'status', successValue: 'succeeded', failValue: 'failed,cancelled', urlPath: 'content.url', pollMs: 5000 },
   },
   persona: { current: 'dafeiyu' },
+  personaLook: { visionModel: { provider: '', model: '' } }, // 留空跟随聊天模型
   // 主人私聊里问起群里的事：把最近 24 小时的群聊流水补进这一轮（默认关，开启前先把群加进白名单）
-  group: { ...DEFAULT_GROUP_POLICY, overrides: {}, ownerTools: 'off', ownerToolsGroups: [], ownerBrief: { enabled: true, lines: 24, groups: [] } },
+  group: { ...DEFAULT_GROUP_POLICY, privateCommandsEnabled: true, overrides: {}, ownerTools: 'off', ownerToolsGroups: [], ownerBrief: { enabled: true, lines: 24, groups: [] } },
+  memberFilter: { enabled: true, rules: [] }, // 不回应的人：明确选择所有群或指定群；不影响私聊
   // 按群头衔不回：勾选的群里，专属头衔正好是 title 的成员（一般是别的机器人）说话、戳她都不理。没勾群就不起作用
   titleFilter: { enabled: true, groups: [], title: '大肥鱼' },
   voice: {
@@ -181,7 +186,9 @@ export const DEFAULTS = {
   stickers: {
     enabled: true,
     faces: true, // 回复里能夹 QQ 自带的小黄脸（<face:名字>）
-    autoChance: 0.35, // 文字回复自动配一张表情的概率
+    autoChance: 0.35, // 自动配表情的概率；limitTagged 开启时也限制回复自带的表情
+    limitTagged: false, // 升级保持原行为；开启后按 autoChance 限制回复中的表情，不再叠加心情倍率
+    keywordExemption: false, // 实验性：正文命中配图关键词时保留已有表情，只在 limitTagged 开启时生效
     // 主动给对方的原消息贴 QQ 表情：这是新行为，默认关；开了之后按自己的概率算，
     // 不从 autoChance 取值（两者是不同动作，隐式联动会让升级后的人莫名其妙被贴表情，#216 review）
     react: false, // 主动贴表情总开关，默认关
@@ -347,6 +354,9 @@ export const DEFAULTS = {
     maxPerDay: 20, // 每个人每天最多几次；留空就是 20
     allow: [], // 主动搭话白名单：除主人外还会主动找谁（QQ 号）
     nudge: true, // 她问了你一句、你一直没回时，偶尔轻轻追一句
+    reminderEnabled: false, // 允许她在主人私聊里给自己设小闹钟
+    reminderLimit: 5, // 最多同时保留几条未过期的提醒（硬上限 10）
+    reminderRetry: true, // 触发失败后 15 分钟内每 5 分钟重试
     awakeFrom: 8,
     awakeTo: 23,
   },
@@ -517,7 +527,10 @@ const bodyText = (v) => {
 function normalizeNotice(v, legacyNotify) {
   const o = isObj(v) ? v : {}
   const approvalDefault = legacyNotify === false ? false : true
-  const out = { enabled: bool(o.enabled, true), approval: typeof o.approval === 'boolean' ? o.approval : approvalDefault, question: bool(o.question, true), workspaces: {} }
+  const out = { enabled: bool(o.enabled, true), approval: typeof o.approval === 'boolean' ? o.approval : approvalDefault, question: bool(o.question, true), windowSec: 8, workspaces: {} }
+  // 合并窗口：审批/选项请求到齐后等多久再推 QQ。范围 1 ~ 60 秒，默认 8（够几条一起到，又不至于太慢）
+  const winSec = Number(o.windowSec)
+  out.windowSec = Number.isFinite(winSec) ? Math.min(60, Math.max(1, Math.round(winSec))) : 8
   const ws = isObj(o.workspaces) ? o.workspaces : {}
   for (const [key, val] of Object.entries(ws)) {
     const path = String(key || '').trim()
@@ -544,6 +557,9 @@ export function normalize(raw) {
   // 老配置只有 approvalNotify：没写过 notice 时用它当审批上报的默认值，免得更一次版本被重新打开
   c.notice = normalizeNotice(isObj(raw?.notice) ? raw.notice : null, raw?.approvalNotify)
   c.approvalViaQQ = bool(c.approvalViaQQ, true)
+  // 等主人回复授权的时长：坏数据一律回 5 分钟；范围夹在 30 秒 ~ 30 分钟（太短来不及看，太长把回合堵死）
+  const approvalSec = Number(c.approvalTimeoutSec)
+  c.approvalTimeoutSec = Number.isFinite(approvalSec) ? Math.min(1800, Math.max(30, Math.round(approvalSec))) : 300
   c.qqApi.enabled = bool(c.qqApi.enabled, true)
   c.gateway = c.gateway === 'onebot' ? 'onebot' : 'snowluma'
   // 只认绝对路径（Windows 的 D:\\… 或 Linux 的 /…），别的当没填
@@ -594,6 +610,8 @@ export function normalize(raw) {
   c.files.dirs = (Array.isArray(c.files.dirs) ? c.files.dirs : String(c.files.dirs || '').split(/[\n,，;；]+/))
     .map((s) => String(s).trim()).filter((s) => /^([a-zA-Z]:[\\/]|\/)/.test(s)).slice(0, 20)
   const g = c.group
+  g.privateCommandsEnabled = bool(g.privateCommandsEnabled, true)
+  g.moduleOnlyGroups = qqList(g.moduleOnlyGroups)
   g.wakeWords = (Array.isArray(g.wakeWords) ? g.wakeWords : String(g.wakeWords || '').split(/[\s,，]+/)).map((s) => String(s).trim()).filter(Boolean)
   g.proactiveEnabled = bool(g.proactiveEnabled, true)
   g.engagedEnabled = typeof g.engagedEnabled === 'boolean' ? g.engagedEnabled : null
@@ -678,6 +696,8 @@ export function normalize(raw) {
   asrApi.baseUrl = asrApi.baseUrl.replace(/\/+$/, '')
   asrApi.prefer = ['qq', 'cloud'].includes(asrApi.prefer) ? asrApi.prefer : 'qq'
   c.stickers.autoChance = num(c.stickers.autoChance, 0.35, 0, 1)
+  c.stickers.limitTagged = bool(c.stickers.limitTagged, false)
+  c.stickers.keywordExemption = bool(c.stickers.keywordExemption, false)
   // 主动贴表情：自己的概率（默认 0.15），不从 autoChance 取值；老配置里存成 null 的按默认算
   c.stickers.reactChance = num(c.stickers.reactChance ?? 0.15, 0.15, 0, 1)
   c.stickers.reactMaxPerHour = num(c.stickers.reactMaxPerHour, 10, 0, BIG)
@@ -694,6 +714,10 @@ export function normalize(raw) {
     const model = String(m.model || '').trim()
     return provider && model ? { provider, model } : { provider: '', model: '' }
   })()
+  const lookModel = isObj(c.personaLook?.visionModel) ? c.personaLook.visionModel : {}
+  const lookProvider = typeof lookModel.provider === 'string' ? lookModel.provider.trim() : ''
+  const lookName = typeof lookModel.model === 'string' ? lookModel.model.trim() : ''
+  c.personaLook = { visionModel: lookProvider && lookName ? { provider: lookProvider, model: lookName } : { provider: '', model: '' } }
   c.diary.timesPerDay = num(c.diary.timesPerDay, 2, 0, 48)
   c.diary.windowStart = hhmm(c.diary.windowStart, '10:00')
   c.diary.windowEnd = hhmm(c.diary.windowEnd, '23:30')
@@ -719,6 +743,9 @@ export function normalize(raw) {
   c.speakUp.maxIntervalMinutes = Math.max(c.speakUp.minIntervalMinutes, num(c.speakUp.maxIntervalMinutes, 240, 1, BIG))
   // 留空就是 20，上限不封顶
   c.speakUp.maxPerDay = c.speakUp.maxPerDay === '' || c.speakUp.maxPerDay == null ? 20 : num(c.speakUp.maxPerDay, 20, 0, BIG)
+  c.speakUp.reminderEnabled = bool(c.speakUp.reminderEnabled, false)
+  c.speakUp.reminderLimit = Math.min(10, Math.max(1, Math.round(num(c.speakUp.reminderLimit, 5, 1, 10))))
+  c.speakUp.reminderRetry = bool(c.speakUp.reminderRetry, true)
   c.speakUp.allow = [...new Set((Array.isArray(c.speakUp.allow) ? c.speakUp.allow : []).map((q) => String(q).trim()).filter((q) => /^\d{5,}$/.test(q)))]
   const q = c.qzoneSocial
   q.enabled = bool(q.enabled, true)
@@ -988,6 +1015,7 @@ export function normalize(raw) {
   c.forward = c.forward && typeof c.forward === 'object' ? c.forward : {}
   c.forward.expandEarly = bool(c.forward.expandEarly, false)
   c.forward.expandHistory = bool(c.forward.expandHistory, false)
+  c.memberFilter = normalizeMemberFilter(c.memberFilter)
   c.titleFilter.enabled = bool(c.titleFilter.enabled, true)
   c.titleFilter.groups = qqList(c.titleFilter.groups) // 和群白名单同一套规则
   c.titleFilter.title = String(c.titleFilter.title ?? '').replace(/[​-‍﻿]/g, '').trim().slice(0, 30) || '大肥鱼'
@@ -1026,6 +1054,7 @@ export function normalize(raw) {
   c.imageGen.ownerOnly = bool(c.imageGen.ownerOnly, true)
   c.imageGen.seeOwn = bool(c.imageGen.seeOwn, true)
   c.imageGen.img2img = bool(c.imageGen.img2img, true)
+  c.imageGen.allowGif = bool(c.imageGen.allowGif, false)
   if (!/^\d{3,4}x\d{3,4}$/.test(String(c.imageGen.size))) c.imageGen.size = '1024x1024'
   c.imageGen.galleryShown = Math.min(50, Math.max(1, Math.round(Number(c.imageGen.galleryShown) || 20)))
   c.imageGen.shape = ['her', 'square', 'portrait', 'landscape', 'wide'].includes(c.imageGen.shape) ? c.imageGen.shape : 'her'

@@ -24,6 +24,13 @@ test('parseReply 识别语音和表情标记', () => {
   assert.deepEqual(r2.items.map((x) => x.kind), ['text', 'sticker'])
 })
 
+test('中文参数标签 <参数 name="sticker"> 也转成真表情，不原样发出', () => {
+  const r = parseReply('<参数 name="sticker">N05_刷刷<参数>')
+  assert.deepEqual(r.items, [{ kind: 'sticker', value: 'N05_刷刷' }])
+  const v = parseReply('<参数 name="voice">晚安啦<参数>')
+  assert.deepEqual(v.items, [{ kind: 'voice', value: '晚安啦' }])
+})
+
 test('parseReply 沉默与空', () => {
   assert.equal(parseReply('[沉默]').silent, true)
   assert.equal(parseReply('   ').silent, true)
@@ -415,6 +422,18 @@ test('群聊：没人叫她时接话有上限，叫她就重新开始', () => {
   assert.equal(decideGroupReply({ ...o, engagedRun: 6 }).reply, false, '兜底：接满了就回到插话规则，这里冷却和上限都不过')
   assert.equal(decideGroupReply({ ...o, engagedRun: 6, mentioned: true }).mode, 'must')
   assert.equal(decideGroupReply({ ...o, policy: { ...DEFAULT_GROUP_POLICY, engagedMax: 0 } }).reply, false)
+})
+
+test('人设识图模型：旧配置、脏值、两半选择与面板合并', async () => {
+  const { normalize, publicConfig, mergeFromPanel } = await import('../src/core/config.js')
+  const empty = { provider: '', model: '' }
+  for (const raw of [{}, { personaLook: null }, { personaLook: { visionModel: [] } }, { personaLook: { visionModel: { provider: 'p' } } }, { personaLook: { visionModel: { provider: {}, model: 'm' } } }]) {
+    assert.deepEqual(normalize(raw).personaLook.visionModel, empty)
+  }
+  const cfg = normalize({ personaLook: { visionModel: { provider: ' p ', model: ' v ' } } })
+  assert.deepEqual(cfg.personaLook.visionModel, { provider: 'p', model: 'v' })
+  assert.deepEqual(publicConfig(cfg).personaLook, cfg.personaLook)
+  assert.deepEqual(mergeFromPanel(cfg, { personaLook: { visionModel: empty } }).personaLook.visionModel, empty)
 })
 
 test('群聊：接话提示告诉她连着说了几次，让她自己停', () => {
