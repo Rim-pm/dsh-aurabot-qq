@@ -858,7 +858,7 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, say,
     const cached = join(work(), 'cache', key + '.mp3')
     if (existsSync(cached)) {
       log.info(`翻唱：「${job.title}」做过了，直接用缓存`)
-      return { file: cached, voice: voice.id, pitch, dir }
+      return { file: cached, voice: voice?.id, pitch, dir }
     }
     current.stage = '截取要唱的那一段'
     const part = await cutFirst(song, dir, job.clip)
@@ -886,7 +886,7 @@ export function createSongStudio({ getConfig, log, sendVoiceFile, sendText, say,
     mkdirSync(join(work(), 'cache'), { recursive: true })
     copyFileSync(out, cached)
     pruneCache(join(work(), 'cache'), 40)
-    return { file: cached, voice: voice.id, pitch, dir }
+    return { file: cached, voice: voice?.id, pitch, dir }
   }
 
   /** 翻唱失败：让她自己说一句（say 由模块层接模型生成），同一聊天 60 秒内只提示一次。 */
