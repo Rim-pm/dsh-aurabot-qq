@@ -24,6 +24,13 @@ test('parseReply 识别语音和表情标记', () => {
   assert.deepEqual(r2.items.map((x) => x.kind), ['text', 'sticker'])
 })
 
+test('中文参数标签 <参数 name="sticker"> 也转成真表情，不原样发出', () => {
+  const r = parseReply('<参数 name="sticker">N05_刷刷<参数>')
+  assert.deepEqual(r.items, [{ kind: 'sticker', value: 'N05_刷刷' }])
+  const v = parseReply('<参数 name="voice">晚安啦<参数>')
+  assert.deepEqual(v.items, [{ kind: 'voice', value: '晚安啦' }])
+})
+
 test('parseReply 沉默与空', () => {
   assert.equal(parseReply('[沉默]').silent, true)
   assert.equal(parseReply('   ').silent, true)
@@ -70,6 +77,22 @@ test('群聊：@、引用、唤醒词必回', () => {
   assert.equal(decideGroupReply(base({ mentioned: true, hour: 3 })).reply, true)
 })
 
+test('群聊：每小时 @/唤醒词必回上限，超过不回，主人除外', () => {
+  const cap = (o = {}) => base({ policy: policyFor({ mustMaxPerHour: 3 }, {}, 1), mustTimes: [1, 2, 3].map((i) => 10_000_000 - 60_000 * i), ...o })
+  // 超上限：@、引用、叫名字都不回了
+  assert.match(decideGroupReply(cap({ mentioned: true })).reason, /回够了/)
+  assert.match(decideGroupReply(cap({ repliedToBot: true })).reason, /回够了/)
+  assert.match(decideGroupReply(cap({ text: '肥鱼在吗' })).reason, /回够了/)
+  // 主人说话不受限
+  assert.equal(decideGroupReply(cap({ mentioned: true, fromOwner: true })).mode, 'must')
+  // 小时滚过去就又能回了
+  assert.equal(decideGroupReply(cap({ mentioned: true, mustTimes: [1, 2, 3].map((i) => 10_000_000 - 3_600_000 * i) })).mode, 'must')
+  // 上限设 0 = 不限制
+  assert.equal(decideGroupReply(cap({ mentioned: true, policy: policyFor({ mustMaxPerHour: 0 }, {}, 1) })).mode, 'must')
+  // 没超上限照常必回
+  assert.equal(decideGroupReply(cap({ mentioned: true, mustTimes: [10_000_000 - 60_000] })).mode, 'must')
+})
+
 test('群聊：插话受概率、冷却、上限、静默、冷群约束', () => {
   assert.equal(decideGroupReply(base({})).mode, 'interject')
   assert.equal(decideGroupReply(base({ rand: () => 0.5, relevance: 0.3 })).reply, false)
@@ -112,13 +135,13 @@ test('群聊安全刹车：短时间说太多就歇着，但明确被叫到的�
 test('群聊：刚说完被追问「人呢」也算叫她，但要防 A/B 聊天误判（#182）', () => {
   const now = 10_000_000
   const said = [now - 60_000, now - 30_000] // 她这两分钟里说过话（刹车/「刚说完」都成立）
-  const ask = (o = {}) => decideGroupReply(base({ policy: policyFor({}, {}, 1), text: '人呢', lastIsBot: false, botReplyTimes: said, now, rand: () => 0.99, ...o }))
+  const ask = (o = {}) => decideGroupReply(base({ policy: policyFor({}, {}, 1), text: '人呢', lastIsBot: true, botReplyTimes: said, now, rand: () => 0.99, ...o }))
   assert.equal(ask().mode, 'must')
   assert.equal(ask().reason, '刚说完被追问')
   // 她这几分钟没说过话：不认（群里 A/B 正常聊天，B 回 A 一句「人呢」）
   assert.notEqual(ask({ botReplyTimes: [] }).mode, 'must')
-  // 这一条之前最近一条就是她：也不认（不是在追问她）
-  assert.notEqual(ask({ lastIsBot: true }).mode, 'must')
+  // 这一条之前最近一条是别人：不认（可能是群友之间的追问）
+  assert.notEqual(ask({ lastIsBot: false }).mode, 'must')
   // 超过 12 字：不认
   assert.notEqual(ask({ text: '你们谁知道这个东西到底要怎么弄啊？' }).mode, 'must')
   // @ 了别人：不认（不管「@ 别人不算叫她」这个策略开没开）
@@ -295,7 +318,7 @@ test('更新：版本比较、仓库名、更新命令、更新说明', async ()
   assert.equal(u.changelogSection(log, '0.3.0'), '- 新的')
   assert.equal(u.changelogSection(log, '0.2.0'), '- 旧的')
   assert.equal(u.changelogSection(log, '9.9.9'), '')
-  const check = u.createUpdateChecker({ pkg: { version: '0.2.0', repository: 'https://github.com/a/b' }, fetchImpl: async () => ({ ok: true, json: async () => ({ version: '0.3.0' }) }) })
+  const check = u.createUpdateChecker({ pkg: { version: '0.2.0', repository: 'https://github.com/a/b' }, fetchImpl: async () => ({ ok: true, text: async () => '<feed><entry><link rel="alternate" href="https://github.com/a/b/releases/tag/v0.3.0"/></entry></feed>' }) })
   const r = await check()
   assert.equal(r.newer, true)
   assert.equal(r.latest, '0.3.0')
@@ -399,6 +422,18 @@ test('群聊：没人叫她时接话有上限，叫她就重新开始', () => {
   assert.equal(decideGroupReply({ ...o, engagedRun: 6 }).reply, false, '兜底：接满了就回到插话规则，这里冷却和上限都不过')
   assert.equal(decideGroupReply({ ...o, engagedRun: 6, mentioned: true }).mode, 'must')
   assert.equal(decideGroupReply({ ...o, policy: { ...DEFAULT_GROUP_POLICY, engagedMax: 0 } }).reply, false)
+})
+
+test('人设识图模型：旧配置、脏值、两半选择与面板合并', async () => {
+  const { normalize, publicConfig, mergeFromPanel } = await import('../src/core/config.js')
+  const empty = { provider: '', model: '' }
+  for (const raw of [{}, { personaLook: null }, { personaLook: { visionModel: [] } }, { personaLook: { visionModel: { provider: 'p' } } }, { personaLook: { visionModel: { provider: {}, model: 'm' } } }]) {
+    assert.deepEqual(normalize(raw).personaLook.visionModel, empty)
+  }
+  const cfg = normalize({ personaLook: { visionModel: { provider: ' p ', model: ' v ' } } })
+  assert.deepEqual(cfg.personaLook.visionModel, { provider: 'p', model: 'v' })
+  assert.deepEqual(publicConfig(cfg).personaLook, cfg.personaLook)
+  assert.deepEqual(mergeFromPanel(cfg, { personaLook: { visionModel: empty } }).personaLook.visionModel, empty)
 })
 
 test('群聊：接话提示告诉她连着说了几次，让她自己停', () => {

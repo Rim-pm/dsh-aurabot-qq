@@ -14,6 +14,7 @@ import { loginSessionKey, recoverLoginPause } from './login-pause.js'
 import { lookWithVision, visionState, findFfmpeg } from './vision.js'
 import { createShotStore, shotPath, clockOf } from './shots.js'
 const { isSilence, cleanOutboundText } = __lib('chat/reply.js')
+const { isSessionBackoff } = __lib('chat/session-backoff.js')
 
 // 这些错误说明今天先别写了：没登录 / Cookie 过期、csrf 不对、风控、要验证码、太频繁
 const PAUSE_CODES = { '-101': 'B 站没登录或 Cookie 过期了', '-111': 'Cookie 里的 bili_jct 不对', '-352': '被 B 站风控了', '-509': '写得太频繁', '12015': 'B 站要求验证码' }
@@ -227,6 +228,7 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
       const arr = pickJson(out, []).map((k) => String(k).trim()).filter(Boolean)
       if (arr.length) return arr.slice(0, 3)
     } catch (error) {
+      if (isSessionBackoff(error)) throw error
       log.debug('挑关键词失败：', error.message)
     }
     return interests.sort(() => Math.random() - 0.5).slice(0, 3)
@@ -355,6 +357,8 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
     if (busy) return { ok: false, message: '正在刷' }
     if (c.subsOnly) return { ok: false, message: '开着「只要订阅」，不刷视频' }
     if (!c.enabled && !force) return { ok: false, message: 'B 站没打开' }
+    const cooldown = hub.systemSessionCooldown?.('bili')
+    if (cooldown) return { ok: false, skipped: true, retryAt: cooldown.retryAt, message: '后台会话冷却中' }
     busy = true
     const s = today(load())
     try {
@@ -480,6 +484,7 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
       log.info(`刷了一轮 B 站：看了 ${looked.length} 个，点赞 ${liked} 条，收藏 ${faved} 条，分享 ${shared} 个，截图 ${shotSent} 张`)
       return { ok: true, message: `看了 ${looked.length} 个视频，点赞 ${liked} 条、收藏 ${faved} 条，分享给你 ${shared} 个${shotSent ? '，还发了张截图' : ''}`, watched: looked.length, shared, likes: liked, favs: faved, skipped, shots: shotSent }
     } catch (error) {
+      if (isSessionBackoff(error)) return { ok: false, skipped: true, retryAt: error.retryAt, message: error.message }
       log.warn('刷 B 站出错：', error.message)
       return { ok: false, message: error.message }
     } finally {

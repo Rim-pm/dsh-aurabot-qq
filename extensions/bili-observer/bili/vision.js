@@ -129,6 +129,7 @@ const SYSTEM = '你在看一个视频的若干张截图。只写画面上确实�
 export async function describeFrames(dsh, { info, frames, cfg, model }) {
   const images = frames.map((f) => ({ data: f.toString('base64'), mediaType: 'image/jpeg' }))
   const text = await askModel(dsh, {
+        module: 'bili-vision',
     cfg,
     ...(model && model.provider && model.model ? { model } : {}),
     system: SYSTEM,

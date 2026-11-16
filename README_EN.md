@@ -47,10 +47,10 @@ QQ ⇄ SnowLuma (OneBot v11; or your existing bot) ⇄ Aurabot plugin ⇄ DSH se
 |---|---|---|
 | 💬 | **DM & group chat** | Each QQ DM/group maps to its own DSH session — watch her reasoning and tool calls, or jump in |
 | 🎨 | **Persona & mood** | Switchable persona cards edited section by section; mood driven by praise/anger, affecting tone, stickers, voice and reply speed |
-| 🗣️ | **Voice notes & singing** | edge-tts, local CosyVoice / GPT-SoVITS, or any HTTP TTS; import RVC voices for covers so she talks and sings with the same voice |
+| 🗣️ | **Voice notes & singing** | edge-tts, Doubao (Volcano) / MiniMax online voices, local CosyVoice / GPT-SoVITS, or any HTTP TTS; import RVC voices for covers so she talks and sings with the same voice |
 | 😀 | **Stickers** | Auto-collect, AI naming/tagging, context-aware sticker choice; marketplace stickers sent as-is |
 | 📖 | **Qzone** | Writes diaries from the day’s chats, replies to comments as her persona, browses friends’ feeds |
-| 📺 | **Bilibili** | Picks videos from interests and memory, reads info/subtitles/comments, comments, shares to your DM; follows up on replies to her comments |
+| 📺 | **Bilibili (extension)** | Observer mode: picks videos from interests and memory, reads info/subtitles/comments, only likes/favorites, shares to your DM and watches UP dynamics — no comments or danmaku. Install `extensions/bili-observer` |
 | 🖼️ | **Image gen & local APIs** | Built-in or your own image/TTS/cover/ASR services; the panel generates scripts that take effect instantly |
 | 🧠 | **Memory** | Memory store, per-person profiles, relationship insights, speaking style and diaries go into context; import old notes; search/edit/delete and adjust automatic memory capacity in the panel (default 3,000) |
 | 🐟 | **Desktop pet (optional)** | A pet module puts her on your desktop: idle actions, muttering, work-status reactions — never posts to QQ |
@@ -183,6 +183,7 @@ npm test        # unit tests + end-to-end tests with a fake DSH host and a mock 
 src/host.js            plugin entry (host half): core + panel API /aurabot/api/*
 src/core/modules.js    module kernel: load, toggle, replace, hot reload, error isolation
 src/modules/           built-in modules + API.md + types + module template
+extensions/            optional extensions (bili-observer, douyin-save, weather), each with its own install script
 src/chat/              message hub, group policy, reply parsing, allow-list & permissions
 src/onebot/client.js   OneBot v11 client (HTTP + WS, auto reconnect)
 src/snowluma/          SnowLuma management (detect, start/stop, inject only the bot account)

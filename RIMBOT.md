@@ -107,12 +107,13 @@ Invoke-RestMethod "$base/aurabot/api/test-send" -Method Post -ContentType applic
 
 ```powershell
 git fetch upstream
-git merge upstream/release/1.2.0     # 换成当时最新的 release/1.2.x
+git merge upstream/release/1.3.0     # 换成当时最新的 release/1.3.x
 # 冲突重点：package.json、src/core/config.js、client/client.js、
-#          src/bili/api.js、src/modules/bili/index.js、src/persona/personas.js
-# 本地要保住：B站订阅（dynamics/judge/examples + subsOnly）、RimTTS、
-#            抖音/B站链接转存扩展、琳的人格卡（personas/）
-npm test                              # 1287 条；e2e 个别用例并发下会抖，单跑能过
+#          src/chat/hub.js、src/persona/personas.js、
+#          extensions/bili-observer/bili/api.js
+# 本地要保住：RimTTS、抖音/B站链接转存扩展、琳的人格卡（personas/）、
+#            B 站「只观察不写」的闸门（见下）
+npm test                              # 2521 条；e2e / hub-lifecycle 个别用例并发下会抖，单跑能过
 ```
 
 社区模块索引：
@@ -120,6 +121,24 @@ npm test                              # 1287 条；e2e 个别用例并发下会�
 
 插件本体是纯 ESM、没有 npm 依赖，拉完重启 `dsh web` 即可（本机 web profile 是
 `link:D:/Nakk/OrcaPJs/RimBot`，改完源码重启就生效）。
+
+### 1.3.0 合并要点（2026-11-14）
+
+上游 1.3.0 往 B 站**加写能力**（`group-share` 群分享、`qr-login` 扫码登录、`danmaku` 发弹幕），
+本机方向相反：B 站只观察不写。所以这一版把 B 站**彻底扩展化**：
+
+- 内核不再有 `src/bili/`、`src/modules/bili/`；`cleanExamples` 迁到 `src/core/examples.js`。
+- B 站全部逻辑在 `extensions/bili-observer/bili/*`（vendored，靠 `globalThis.aurabot.lib`
+  取内核源码）；测试改指扩展，桩在 `test/helpers/bili-lib.js`。
+- 上游的 `group-share.js` / `qr-login.js` / `danmaku.js`（写）**没有合入**；
+  弹幕**读取**（`danmakuText` / `pickDanmaku` + `docs/BILI-DANMAKU.md`）保留。
+- `extensions/bili-observer/bili/api.js` 的 `createBiliApi({ getCookie, log, fetchImpl, allowWrite })`
+  是唯一出口：写操作先过 `allowWrite(kind)`，被挡时返回 `{ ok: false, blocked: 'observer', kind }`，
+  只有 `like` / `fav` 放行；`setFace` / `setSign` 的实现留着但被 `deny('profile')` 挡在最前。
+- 配置里 `bili.groupShare.*` 的死键已删；`buvid3` / `buvid4` / `dedeUserId` 因上游
+  `buildBiliCookie` / `splitBiliCookie` 仍在用而保留。
+- 扩展的 `duty.js` 补上了 `chat/session-backoff.js` 语义（`hub.systemSessionCooldown('bili')` +
+  `isSessionBackoff` 直接 rethrow，避免后台会话退避时继续打 B 站）。
 
 ## 小黑盒（社区模块 heybox 1.3.1，2026-11-04 装）
 

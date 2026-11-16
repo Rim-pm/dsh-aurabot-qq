@@ -10,10 +10,38 @@
 //   - 整轮只输出 `[沉默]`（或空）= 这次不说话（群聊插话用）
 // 另外顺手把模型偶尔漏出来的 Markdown 洗掉——QQ 不渲染 Markdown。
 
-import { currentPromptSources, promptFingerprint, promptTextRanges } from '../security/leak-guard.js'
+import { contextInjectionRanges, currentPromptSources, promptFingerprint, promptTextRanges } from '../security/leak-guard.js'
 import { stripWrapMarkers } from './wrap-up.js'
+import { stripMarkers } from './reply-marker.js'
+import { stripHtmlFragments } from './html-fragments.js'
 
 export const SILENCE = '[沉默]'
+
+// 提示词里每条消息前挂的时刻，统一按东八区。
+// 拼进正文是为了让她判断「多久以前」——提示词里只有每轮开头的「当前时间」，
+// 消息体本身原来不带时刻，跨几轮就容易把十几分钟前的事说成「昨天」。
+// 只给 HH:MM 跨天会失真（23:50 与次日 00:10 看起来像同一段时间倒着走），
+// 所以 clockLabel 在跨天时补上日期：当天 `21:34`、前一天 `昨天 21:34`、更早 `11-07 21:34`。
+const CLOCK = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hour12: false })
+// 用完整日期再裁出 MM-DD，比单取月/日稳妥：sv-SE 单独取月日会给出 06/11（日在前）
+const DAY = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' })
+
+export function clockAt(at = Date.now()) {
+  const t = Number(at)
+  return CLOCK.format(new Date(Number.isFinite(t) && t > 0 ? t : Date.now()))
+}
+
+/** 当天只给时刻，跨天补日期：`21:34` / `昨天 21:34` / `11-06 21:34` / `2025-12-31 23:59`。 */
+export function clockLabel(at, now = Date.now()) {
+  const t = Number(at)
+  const then = new Date(Number.isFinite(t) && t > 0 ? t : now)
+  const cur = new Date(now)
+  const day = DAY.format(then)
+  if (day === DAY.format(cur)) return clockAt(then.getTime())
+  if (day === DAY.format(new Date(cur.getTime() - 86400000))) return `昨天 ${clockAt(then.getTime())}`
+  const sameYear = day.slice(0, 4) === DAY.format(cur).slice(0, 4)
+  return `${sameYear ? '' : day.slice(0, 4) + '-'}${day.slice(5)} ${clockAt(then.getTime())}`
+}
 
 /** 去掉 Markdown 痕迹，保留文字本身。 */
 export function stripMarkdown(text) {
@@ -32,10 +60,35 @@ export function stripMarkdown(text) {
     .trim()
 }
 
-/** 是不是「这次不说话」。 */
+// 模型偶尔把自己那边的内部语法漏进正文，这些都不能发到 QQ，得在解析入口洗掉：
+//   - 工具调用的收尾标记，比如 </｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>（全角竖线包着关键字）
+//   - 上下文插件给历史消息挂的编号（m00896 / m00896b），提示词里说了不许抄，但它会抄
+// 编号是 5 位起（补零写法 m00xxx）；4 位的 m1005、m1136 是打印机型号，不能误伤。
+const SPECIAL_TOKEN = /<\/?[｜|]{1,2}\s*[A-Za-z_]+\s*[｜|]{1,2}[^<>]*>/g
+const CONTEXT_REF = '(?:m0\\d{3,5}|m[1-9]\\d{4,6})[a-z]{0,2}'
+const REF_AT_HEAD = new RegExp(`^[ \\t]*(?:${CONTEXT_REF})[ \\t]*[，,：:、]?[ \\t]*`)
+const REF_INLINE = new RegExp(`(?<![A-Za-z0-9])(?:${CONTEXT_REF})(?![A-Za-z0-9])`, 'g')
+const REF_IN_BAD_TAG = new RegExp(`<reply\\s*[:：]\\s*(?:${CONTEXT_REF})\\s*>`, 'gi')
+
+/** 洗掉模型漏出来的内部标记与消息编号：行首连标点一起清，行中行尾留个空格；洗完是空的就当「这次不说话」。 */
+export function stripModelArtifacts(text) {
+  return String(text || '')
+    .replace(SPECIAL_TOKEN, '')
+    .replace(REF_IN_BAD_TAG, '')
+    .split('\n')
+    .map((line) => line.replace(REF_AT_HEAD, '').replace(REF_INLINE, ''))
+    .join('\n')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+/** 是不是「这次不说话」：整条只由沉默标记、空白、标点组成才算。 */
+const SILENCE_MARK = /\[沉默\]|［沉默］|\(沉默\)|（沉默）/g
 export function isSilence(text) {
   const t = String(text || '').trim()
-  return t === '' || t === SILENCE || t === '［沉默］' || t === '(沉默)' || t === '（沉默）'
+  if (t === '') return true
+  return t.replace(SILENCE_MARK, '').replace(/[\s\p{P}]/gu, '') === ''
 }
 
 const ZERO_WIDTH_CHARS = new Set(['\u200B', '\u200C', '\u200D', '\uFEFF', '\u2060'])
@@ -58,6 +111,22 @@ function codeRanges (raw) {
   return ranges
 }
 const insideCode = (code, start, end) => code.some((r) => start >= r.start && end <= r.end)
+
+/** 跨聊天工具的发送前校验：代码示例不算指令，残缺/嵌套/跨气泡的语音标签不直接外发。 */
+export function hasInvalidVoiceMarkup(text) {
+  const raw = String(text || '')
+  const code = codeRanges(raw)
+  let masked = raw
+  for (const r of [...code].sort((a, b) => b.start - a.start)) masked = masked.slice(0, r.start) + ' '.repeat(r.end - r.start) + masked.slice(r.end)
+  let open = false
+  for (const [token] of masked.matchAll(/<\/?voice\b[^>]*(?:>|$)|\|\|\|/gi)) {
+    if (token === '|||') { if (open) return true }
+    else if (token === '<voice>' && !open) open = true
+    else if (token === '</voice>' && open) open = false
+    else return true
+  }
+  return open
+}
 
 /** 只识别工具协议标签；普通的 <、|、HTML 和聊天控制标签不在这里处理。 */
 function toolTag (token) {
@@ -288,6 +357,17 @@ function withoutToolRanges(raw, ranges, start = 0, end = raw.length) {
   return clean + raw.slice(last, end)
 }
 
+/** 合并区间：排序后重叠/相接的合成一段，避免同一段文字被删两次。 */
+function mergeRanges (ranges) {
+  const out = []
+  for (const r of [...ranges].sort((a, b) => a.start - b.start || b.end - a.end)) {
+    const last = out[out.length - 1]
+    if (last && r.start <= last.end) last.end = Math.max(last.end, r.end)
+    else out.push({ start: r.start, end: r.end })
+  }
+  return out
+}
+
 export function stripToolText(text) {
   const raw = String(text || '')
   return withoutToolRanges(raw, toolTextRanges(raw))
@@ -307,26 +387,30 @@ export function cleanOutboundText(text, { warn, promptSources, fingerprint, user
   const active = currentPromptSources()
   const sources = promptSources ?? [...(active?.system.values() || []), active?.context || '', ...(active?.memory || [])]
   const raw = String(text || '')
-  const tools = toolTextRanges(raw, { ownerPrivate })
-  const toolClean = withoutToolRanges(raw, tools)
+  // 先剥 HTML 残片：它们和工具调用、提示词复读互不重叠，按原文坐标并进同一份区间表。
+  const { cuts: htmlCuts } = stripHtmlFragments(raw)
+  // time-context 注入不是提示词复读，主人私聊的复读豁免不该放过它，这里直接并进必删区间。
+  const tools = [...toolTextRanges(raw, { ownerPrivate }), ...contextInjectionRanges(raw)]
+    .sort((a, b) => a.start - b.start || b.end - a.end)
+  const baseRanges = mergeRanges([...tools, ...htmlCuts])
+  const toolClean = withoutToolRanges(raw, baseRanges)
   const prompts = (allowPromptEcho ? [] : promptTextRanges(toolClean, fingerprint || promptFingerprint(sources, userText ?? active?.userText ?? '')))
     .sort((a, b) => a.start - b.start || b.end - a.end)
   const promptClean = withoutToolRanges(toolClean, prompts)
   // 主人问设定时保留带解释的完整回答，仅整条复读才拦。
   const removePrompts = prompts.length && (!ownerPrivate || isSilence(visibleContent(promptClean)))
   onPromptDecision?.(Boolean(ownerPrivate && prompts.length && !removePrompts))
-  let ranges = tools
+  let ranges = baseRanges
   if (removePrompts) {
-    // 将工具清洗后的坐标映射回原消息，防止跨文字段或工具与复读混排时错删。
+    // 将清洗后的坐标映射回原消息，防止跨文字段或工具与复读混排时错删。
     const offsets = []
     let r = 0
     for (let i = 0; i < raw.length; i++) {
-      while (r < tools.length && tools[r].end <= i) r++
-      if (r < tools.length && tools[r].start <= i) continue
+      while (r < baseRanges.length && baseRanges[r].end <= i) r++
+      if (r < baseRanges.length && baseRanges[r].start <= i) continue
       offsets.push(i)
     }
-    ranges = [...tools, ...prompts.map((p) => ({ start: offsets[p.start], end: offsets[p.end - 1] + 1 }))]
-      .sort((a, b) => a.start - b.start || b.end - a.end)
+    ranges = mergeRanges([...baseRanges, ...prompts.map((p) => ({ start: offsets[p.start], end: offsets[p.end - 1] + 1 }))])
   }
   let clean = withoutToolRanges(raw, ranges)
   if (ranges.length && isSilence(visibleContent(clean))) {
@@ -334,7 +418,30 @@ export function cleanOutboundText(text, { warn, promptSources, fingerprint, user
     clean = ''
   }
   onRanges?.(ranges)
-  return clean
+  // 出站统一兜底：正文标记本身不能发出去。turn/end 已经解析过标记，
+  // 但空间说说、B 站评论、命令回复这些不走 turn/end 的出口也要剥一次（没有标记时原样返回）。
+  return stripMarkers(clean)
+}
+
+/** 出站正文上限：模型失控时（2026-11-13 08:02 一次吐出 48263 字「在吗」）别把整段原样甩给 OneBot。 */
+export const MAX_OUTBOUND_CHARS = 1500
+
+/** 超过上限就把文字段按顺序截断，引用/@/媒体段原样保留。 */
+export function capOutboundSegments (message, max = MAX_OUTBOUND_CHARS) {
+  const total = message.filter((seg) => seg.type === 'text').reduce((n, seg) => n + String(seg.data?.text || '').length, 0)
+  if (total <= max) return { message, trimmed: false, total }
+  let left = max
+  const out = []
+  for (const seg of message) {
+    if (seg.type !== 'text') { out.push(seg); continue }
+    if (left <= 0) continue
+    const text = String(seg.data?.text || '')
+    const keep = text.slice(0, left)
+    left -= keep.length
+    if (keep) out.push({ ...seg, data: { ...seg.data, text: keep } })
+  }
+  if (!out.some((seg) => seg.type === 'text')) return { message: [], trimmed: true, total }
+  return { message: out, trimmed: true, total }
 }
 
 /** 最终平台出口：合并检查整条消息的文字段，避免调用被拆段绕过；引用、@ 和媒体段原样保留。 */
@@ -357,14 +464,32 @@ export function cleanOutboundSegments(message, options) {
   return result.some((seg) => seg.type === 'text' ? seg.data.text.trim() : !['reply', 'at'].includes(seg.type)) ? result : []
 }
 
+/** 模型偶尔把协议标签写成中文参数语法（<参数 name="sticker">名字<参数>）；转成可解析标签。 */
+function normalizeParamTags (text) {
+  return String(text || '').replace(/[<＜]\s*参数\s+name\s*=\s*["'“”]?\s*(sticker|voice|poke)\s*["'“”]?\s*[>＞]([\s\S]*?)[<＜]\s*\/?\s*参数\s*[>＞]/gi, (match, name, body) => {
+    if (name.toLowerCase() === 'sticker') return `<sticker:${body.trim()}>`
+    if (name.toLowerCase() === 'voice') return `<voice>${body.trim()}</voice>`
+    return '<poke>'
+  })
+}
+
 /** 解析一轮回复；在拆气泡/语音前清洗，避免协议里的竖线被误作气泡分隔符。 */
 export function parseReply(text, options) {
+  // 模型偶尔把「戳人」写成方括号动作（[戳了戳你：尾巴往回一收]），插件不认这种写法，
+  // 会原样当文字发出去。这里统一转成 <poke>，让戳一戳变成真的系统动作。
+  // 模型偶尔写中文参数标签 <参数 name="sticker">…<参数>，同样在解析前归一成协议标签。
+  const forwarded = normalizeParamTags(String(text || '')).replace(/[[【]\s*戳了戳(?:你|他|她)?[^\]】]*[\]】]/g, '<poke>')
   // 模型偶尔把换行写成 HTML `<br>`：当真正的换行处理；代码示例里的字面量保留。
-  // 收尾 / 等待的标记先摘掉：它是给插件看的，不是要发出去的字（调用方通常已经摘过一次，这里兜底）。
-  const cleaned = stripWrapMarkers(cleanOutboundText(text, options))
+  // 收尾 / 等待的标记先摘掉：它是给插件看的，不是要发出去的字（调用方通常已经摘过一次，这里兜底）
+  const cleaned = stripWrapMarkers(stripModelArtifacts(cleanOutboundText(forwarded, options)))
   const code = codeRanges(cleaned)
   const raw = cleaned.replace(/<br\s*\/?>/gi, (tag, offset) => insideCode(code, offset, offset + tag.length) ? tag : '\n').trim()
   if (isSilence(raw)) return { silent: true, items: [] }
+  // 工具显式指定语音：仍经过同一份清洗，但正文不再当作媒体/气泡指令解析。
+  if (options?.voice === true) {
+    const value = stripMarkdown(raw)
+    return { silent: !value, items: value ? [{ kind: 'voice', value }] : [] }
+  }
   const items = []
   let replyTo = '' // 等着挂到下一条气泡上的「引用回复」编号
   const attach = (from) => {
@@ -373,7 +498,8 @@ export function parseReply(text, options) {
       replyTo = ''
     }
   }
-  for (const bubble of raw.split('|||')) {
+  // 连续多写的竖线仍是同一个分隔符，避免 |||| 拆完残留一条 | 消息。
+  for (const bubble of raw.split(/\|{3,}/)) {
     const part = bubble.trim()
     if (!part) continue
     // 依次切出 reply / voice / sticker / markdown 图片，其余是文字
@@ -448,6 +574,27 @@ export function splitLines(text) {
   const listy = lines.filter((l) => /^(\d+[.、)]|[-*•·])/.test(l)).length
   if (listy >= Math.ceil(lines.length / 2)) return [t]
   return lines
+}
+
+/**
+ * 把这一轮真发出去的东西写成一行（聊天流水、记忆、下次交给她时「我说过什么」都看这行）。
+ * 表情必须留名字：只写 `[sticker]` 的话，她事后认不出自己发的是哪一张——
+ * 被说「乱贴表情」时连自查都做不到。
+ */
+export function itemsToLine(items, resolveSticker = () => null) {
+  return (items || [])
+    .map((i) => {
+      if (!i) return ''
+      if (i.kind === 'text' || i.kind === 'voice') return String(i.value ?? '')
+      if (i.kind === 'sticker') {
+        const item = i.value && typeof i.value === 'object' ? i.value : resolveSticker(i.value)
+        const name = item?.name || (item?.md5 ? String(item.md5).slice(0, 8) : '')
+        return name ? `[表情：${name}]` : '[表情]'
+      }
+      return `[${i.kind}]`
+    })
+    .filter((s) => s !== '')
+    .join(' ')
 }
 
 function pushText(items, s) {

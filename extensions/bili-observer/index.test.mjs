@@ -28,6 +28,7 @@ before(async () => {
     'core/img.js': await import(new URL('core/img.js', base)),
     'core/net.js': await import(new URL('core/net.js', base)),
     'chat/reply.js': await import(new URL('chat/reply.js', base)),
+    'chat/session-backoff.js': await import(new URL('chat/session-backoff.js', base)),
     'tools/tools.js': await import(new URL('tools/tools.js', base)),
   }
   globalThis.aurabot = {

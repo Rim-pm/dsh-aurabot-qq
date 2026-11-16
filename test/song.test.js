@@ -1,9 +1,9 @@
 // 翻唱：截取位置、音色列表、网易云加密和 Cookie 解析、点歌的前置检查、/sing 命令。
 import { test, before } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 let studio
 let netease
@@ -75,6 +75,38 @@ test('点歌前置检查：没打开、没装好、没说歌名', () => {
   assert.equal(st.ready, false)
   assert.equal(st.parts.python, false)
   assert.match(st.message, /导入/)
+})
+
+// env/Scripts/python.exe 在 Linux 上只是一行「转给真解释器」的脚本；venv 被删了文件还在，
+// 只判存在就会报「装好了」，一点就 127。这里造一个 shim 转发给不存在的路径。
+function makeShim(root, body) {
+  const dir = join(root, 'env', 'Scripts')
+  mkdirSync(dir, { recursive: true })
+  const shim = join(dir, 'python.exe')
+  writeFileSync(shim, body)
+  chmodSync(shim, 0o755)
+  return shim
+}
+
+test('翻唱环境：shim 在、转发到的解释器没了，不能算装好', { skip: process.platform === 'win32' }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'rvc-'))
+  const shim = makeShim(root, '#!/bin/bash\nexec /nonexistent/sep-venv/bin/python "$@"\n')
+  const cfg = normalize({ song: { enabled: true, root } })
+  const s = studio.createSongStudio({ getConfig: () => cfg, log: { info() {}, warn() {}, debug() {} }, sendVoiceFile: async () => {} })
+  const st = s.status()
+  assert.equal(st.parts.python, false, `${dirname(shim)} 里的 shim 转发到的解释器不存在，不能报就绪`)
+  assert.equal(st.ready, false)
+})
+
+test('翻唱环境：解释器真能跑才算 python 就绪，包缺了分离器仍不算', { skip: process.platform === 'win32' }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'rvc-'))
+  makeShim(root, '#!/bin/bash\necho 1\n')
+  const cfg = normalize({ song: { enabled: true, root } })
+  const s = studio.createSongStudio({ getConfig: () => cfg, log: { info() {}, warn() {}, debug() {} }, sendVoiceFile: async () => {} })
+  const st = s.status()
+  assert.equal(st.parts.python, true)
+  assert.equal(st.parts.separator, false, '没放 audio-separator.exe，分离器不能报就绪')
+  assert.equal(st.ready, false)
 })
 
 test('/sing：歌名和变调', async () => {
@@ -204,11 +236,34 @@ test('下载源：自动模式下官方源慢就用国内镜像；老配置自�
   assert.equal(normalize({ song: { pypiMirror: 'tuna' } }).song.pypiMirror, 'cn')
 })
 
-test('检查更新：GitHub 连不上就走 jsDelivr', async () => {
+test('检查更新：Release Atom 连不上就走 GitHub API', async () => {
   const u = await import('../src/core/update.js')
   const seen = []
-  const check = u.createUpdateChecker({ pkg: { version: '0.2.0', repository: 'https://github.com/a/b' }, fetchImpl: async (url) => { seen.push(url); if (url.includes('raw.githubusercontent')) throw new Error('reset'); return { ok: true, json: async () => ({ version: '0.3.0' }) } } })
+  const check = u.createUpdateChecker({ pkg: { version: '0.2.0', repository: 'https://github.com/a/b' }, fetchImpl: async (url) => { seen.push(url); if (url.includes('releases.atom')) throw new Error('reset'); return { ok: true, json: async () => [{ tag_name: 'v0.3.0', draft: false }] } } })
   const r = await check({ force: true })
   assert.equal(r.newer, true)
-  assert.ok(seen[1].includes('cdn.jsdelivr.net'))
+  assert.ok(seen[1].includes('api.github.com'))
+})
+
+test('翻唱失败那句话：让她自己说，提示词带上歌名和真实原因、明说别念内部信息', async () => {
+  const { failPrompt } = await import('../src/modules/song/index.js')
+  const p = failPrompt('雨爱', '翻唱环境不完整，在面板里点「重新检查」')
+  assert.ok(p.includes('《雨爱》'))
+  assert.ok(p.includes('翻唱环境不完整'))
+  assert.ok(p.includes('不要念出来'))
+  assert.ok(p.includes('[沉默]'))
+})
+
+test('翻唱失败那句话：清洗只留一句口语，[沉默] 和念了内部信息的都当没说话', async () => {
+  const { cleanFailLine } = await import('../src/modules/song/index.js')
+  assert.equal(cleanFailLine('  「这次嗓子有点哑，等我润润再来～」\n后面还有废话'), '这次嗓子有点哑，等我润润再来～')
+  assert.equal(cleanFailLine('大肥鱼：刚没唱成，回头再试试？'), '刚没唱成，回头再试试？')
+  assert.equal(cleanFailLine('**好，我记下了。**'), '好，我记下了。')
+  assert.equal(cleanFailLine('[沉默]'), '')
+  assert.equal(cleanFailLine('（沉默）'), '')
+  assert.equal(cleanFailLine('   '), '')
+  // 念了报错 / 路径 / 额度就不发这句，交给兜底
+  assert.equal(cleanFailLine('下载失败：Error: ENOENT /root/x.mp3，额度不够'), '')
+  // 太长截到第一个句末
+  assert.equal(cleanFailLine('今天嗓子不太行呀，这个调太高了，我唱不上去，等我想想办法再录一次好不好。要是还不行，我回头自己练两天，练好了再给你唱一遍试试'), '今天嗓子不太行呀，这个调太高了，我唱不上去，等我想想办法再录一次好不好。')
 })

@@ -9,8 +9,10 @@ import { paintingPath } from './paintings.js'
 import { createCodexAuth } from './codex-auth.js'
 import { createCodexImage } from './codex-image.js'
 import { mimeOf } from '../chat/inbound.js'
+import { drawFormat, gifError, gifSizeFor, gifFrameCount, GIF_FIELDS } from './image-format.js'
 import { imageToolBlock } from '../core/img.js'
-import { imageSizeFor } from './image-shape.js'
+import { canSeeImages } from '../core/llm.js'
+import { imageSizeFor, normalizeRequestedSize } from './image-shape.js'
 export { imageToolBlock }
 
 /** 把模板里的 {占位符} 替换掉；不认识的占位符原样留着。 */
@@ -76,33 +78,58 @@ export async function resolveDrawImage(image, { hub, chat }) {
 }
 
 const UNSUPPORTED_REFERENCE = '这个生图服务不支持参考图'
+export const isUnsupportedReference = (error) => error?.message === UNSUPPORTED_REFERENCE
+
+function customFields(cp) {
+  const method = String(cp.method || 'GET').toUpperCase() === 'GET' ? 'GET' : 'POST'
+  const params = (Array.isArray(cp.params) ? cp.params : [])
+    .map((p) => ({ key: String(p && p.key != null ? p.key : '').trim(), value: p ? p.value : '' }))
+    .filter((p) => p.key)
+  return { method, params }
+}
+
+function customSupportsReference(cp, placeholder = '{image}') {
+  const { method, params } = customFields(cp)
+  // 只检查实际发送的 URL 与参数；fragment 和被覆盖的重复键不算。
+  const sentParams = method === 'POST' ? Object.values(Object.fromEntries(params.map((p) => [p.key, p.value]))) : params.map((p) => p.value)
+  return [String(cp.url || '').split('#')[0], ...sentParams].some((v) => String(v || '').includes(placeholder))
+}
+
+export const isSingleReferenceOnly = (error) => error?.code === 'SINGLE_REFERENCE_ONLY'
+
 function serviceError(status, message, image) {
+  if (image && [400, 422].includes(status)) {
+    const match = message.match(/(?:at most|max(?:imum)?(?: of)?|up to|only|最多|只支持|仅支持)\s*([1-8])\s*(?:(?:input|reference)\s*)?(?:images?|张)/i)
+    const single = /(?:only (?:one|a single) (?:input )?image|(?:multiple images|image array|image\[\]).*(?:not support|unsupported)|(?:not support|unsupported).*multiple images|(?:最多|只支持|仅支持).*一张)/i.test(message)
+    const limit = match ? Number(match[1]) : single ? 1 : 0
+    if (limit) return Object.assign(new Error(`这个生图服务最多支持 ${limit} 张参考图`), { code: limit === 1 ? 'SINGLE_REFERENCE_ONLY' : 'REFERENCE_LIMIT', referenceLimit: limit })
+  }
   const unsupported = [404, 405, 415, 501].includes(status)
     || ([400, 422].includes(status) && /(?:(?:unsupported|not support|does not support|not available|unknown|unrecognized).*(?:image|edit|model)|(?:image|edit|model).*(?:unsupported|not support|does not support|not available)|不支持.*(?:图|编辑|模型)|(?:图|编辑|模型).*不支持)/i.test(message))
-  return new Error(image && unsupported ? UNSUPPORTED_REFERENCE : message)
+  const error = new Error(image && unsupported ? UNSUPPORTED_REFERENCE : message)
+  error.imageRequestFailed = true; error.imageStatus = status
+  return error
 }
 
 /**
  * 自定义接口这一次要发什么（纯函数，方便单独测）。
  * 返回 { url, method, headers, body }。
  */
-export function customRequest (imageGen, prompt, image) {
+export function customRequest (imageGen, prompt, image, images = image ? [image] : []) {
   const cp = imageGen.custom || {}
-  const method = String(cp.method || 'GET').toUpperCase() === 'GET' ? 'GET' : 'POST'
+  const { method, params } = customFields(cp)
   const { width, height } = dimsOf(imageGen.size)
-  const raw = { prompt, model: imageGen.model || '', size: imageGen.size || '', width, height, image: image ? image.toString('base64') : '' }
-  const enc = { ...raw, prompt: encodeURIComponent(prompt), image: encodeURIComponent(raw.image) }
-  const params = (Array.isArray(cp.params) ? cp.params : [])
-    .map((p) => ({ key: String(p && p.key != null ? p.key : '').trim(), value: p ? p.value : '' }))
-    .filter((p) => p.key)
-
-  // URL 的 fragment 不会发给服务端；重复参数按最终实际发送的值判断。
-  const sentParams = method === 'POST' ? Object.values(Object.fromEntries(params.map((p) => [p.key, p.value]))) : params.map((p) => p.value)
-  if (image && ![String(cp.url || '').split('#')[0], ...sentParams].some((v) => String(v || '').includes('{image}'))) throw new Error(UNSUPPORTED_REFERENCE)
+  const raw = { prompt, model: imageGen.model || '', size: imageGen.size || '', width, height, image: image ? image.toString('base64') : '', images: JSON.stringify(images.map((buf) => buf.toString('base64'))) }
+  const enc = { ...raw, prompt: encodeURIComponent(prompt), image: encodeURIComponent(raw.image), images: encodeURIComponent(raw.images) }
+  if (images.length && !customSupportsReference(cp) && !customSupportsReference(cp, '{images}')) throw serviceError(415, UNSUPPORTED_REFERENCE, image)
+  if (images.length > 1 && !customSupportsReference(cp, '{images}')) throw Object.assign(new Error('这个生图服务仅支持单张参考图'), { code: 'SINGLE_REFERENCE_ONLY' })
   let url = fill(cp.url, enc)
   if (method === 'GET' && params.length) {
     const q = params.map((p) => `${encodeURIComponent(p.key)}=${encodeURIComponent(fill(p.value, raw))}`).join('&')
-    url += (url.includes('?') ? '&' : '?') + q
+    const hashAt = url.indexOf('#')
+    const base = hashAt < 0 ? url : url.slice(0, hashAt)
+    const fragment = hashAt < 0 ? '' : url.slice(hashAt)
+    url = base + (base.includes('?') ? '&' : '?') + q + fragment
   }
 
   const headers = {}
@@ -111,7 +138,7 @@ export function customRequest (imageGen, prompt, image) {
   let body
   if (method === 'POST') {
     const obj = {}
-    for (const p of params) obj[p.key] = fill(p.value, raw)
+    for (const p of params) obj[p.key] = cp.bodyType !== 'form' && p.value === '{images}' ? images.map((buf) => buf.toString('base64')) : fill(p.value, raw)
     if (cp.bodyType === 'form') {
       headers['content-type'] = 'application/x-www-form-urlencoded'
       body = new URLSearchParams(obj).toString()
@@ -132,27 +159,65 @@ async function valueToBuffer (v) {
   throw new Error('生图接口返回的既不是图片地址也不是图片')
 }
 
-export function createImageGen({ getConfig, log, local, fetchImpl, codexAuth }) {
+export function createImageGen({ getConfig, log, local, dsh, fetchImpl, codexAuth, upstream }) {
   const fetch = fetchImpl || ((...args) => globalThis.fetch(...args))
   const auth = codexAuth || createCodexAuth({ log, fetchImpl: fetch })
   const viaCodex = createCodexImage({ auth, fetchImpl: fetch, log })
-  async function generate(prompt, { shape, image } = {}) {
+  async function generate(prompt, { format, shape, image, images, size, onRetry } = {}) {
     const config = getConfig().imageGen
-    const c = { ...config, size: imageSizeFor(shape, config) }
+    const gif = drawFormat(format) === 'gif'
+    if (gif && !config.allowGif) throw gifError('GIF 动图还没开启，请主人在生图设置中打开「允许按需生成 GIF」')
+    if (gif && (config.provider !== 'openai' || local?.active('image') || upstream?.ready?.())) throw gifError('当前生图接法暂不支持按需 GIF，请使用支持 GIF 的 OpenAI 格式接口')
+    const requestedSize = size == null || size === '' ? '' : normalizeRequestedSize(size)
+    if (size != null && size !== '' && !requestedSize) throw new Error('图片尺寸格式不对，应为 1024x1024 或 2048x2048 这类格式')
+    const c = { ...config, size: requestedSize || imageSizeFor(shape, config) }
+    c.gif = gif
+    if (gif && !requestedSize) c.size = gifSizeFor(shape, config)
+    const refs = images ?? (image ? [image] : [])
+    if (!Array.isArray(refs) || refs.length > 8 || refs.some((buf) => !Buffer.isBuffer(buf) || !String(mimeOf(buf)).startsWith('image/'))) throw new Error('参考图须为最多 8 张可用图片')
     if (image != null && (!Buffer.isBuffer(image) || !String(mimeOf(image)).startsWith('image/'))) throw new Error('参考图不是可用的图片')
+    image = refs[0] || null
     if (image && c.img2img === false) throw new Error('参考图功能已关闭')
+    // 外部生图模块（如社区库的「生图 · DSH 已接入模型」）：它明确接管时就用它，返回 null 则照旧。
+    // 只在没有参考图时询问：对话模型通道没有统一的编辑协议，图生图落回内置接法。
+    if (upstream && !image && !gif) {
+      const full = [c.stylePrompt, prompt].filter(Boolean).join('，')
+      const handled = await upstream(full, { shape, size: c.size })
+      if (handled != null) {
+        if (!Buffer.isBuffer(handled) || !handled.length) throw new Error('生图接口没有返回图片')
+        if (!String(mimeOf(handled)).startsWith('image/')) throw new Error('生图接口返回的不是图片')
+        log.info(`画好了一张图（${Math.round(handled.length / 1024)}KB，外部生图模块）：${prompt.slice(0, 40)}`)
+        return handled
+      }
+    }
     // 本地接口接管：用用户自己电脑上的画图服务
     if (local?.active('image')) {
       const { toImageBuffer } = await import('../local/local.js')
       const t = Date.now()
-      const buf = await toImageBuffer(await local.call('image', { prompt: [c.stylePrompt, prompt].filter(Boolean).join('，'), size: c.size, ...(image ? { image: image.toString('base64') } : {}) }))
+      const buf = await toImageBuffer(await local.call('image', { prompt: [c.stylePrompt, prompt].filter(Boolean).join('，'), size: c.size, ...(refs.length > 1 ? { images: refs.map((buf) => buf.toString('base64')) } : image ? { image: image.toString('base64') } : {}) }))
       log.info(`本地画好了一张图（${Math.round(buf.length / 1024)}KB，${Math.round((Date.now() - t) / 1000)}s）：${prompt.slice(0, 40)}`)
       return buf
     }
     if (!c.enabled) throw new Error('生图还没开启')
     const full = [c.stylePrompt, prompt].filter(Boolean).join('，')
     const t = Date.now()
-    const buf = c.provider === 'codex' ? await viaCodex(c, full, { shape, image }) : c.provider === 'custom' ? await viaCustom(c, full, image) : await viaOpenAI(c, full, image)
+    let buf
+    try { buf = c.provider === 'codex' ? await viaCodex(c, full, { shape, image }) : c.provider === 'custom' ? await viaCustom(c, full, image, refs) : await viaOpenAI(c, full, image, refs) }
+    catch (error) {
+      if (gif || !c.fallbackEnabled || !error.imageRequestFailed) throw error
+      let last = error
+      for (const endpoint of c.fallbacks || []) {
+        if (!endpoint.model || (endpoint.provider !== 'codex' && !endpoint.baseUrl)) continue
+        if (onRetry) await onRetry({ error: last })
+        try { buf = endpoint.provider === 'codex' ? await viaCodex({ ...c, codex: { ...c.codex, model: endpoint.model } }, full, { shape, image }) : await viaOpenAI({ ...c, ...endpoint }, full, image, refs); break }
+        catch (next) { last = next; if (!next.imageRequestFailed) throw next }
+      }
+      if (!buf) throw last
+    }
+    if (gif && gifFrameCount(buf) < 2) {
+      const kind = ({ 'image/png': 'PNG 静态图', 'image/jpeg': 'JPEG 静态图', 'image/webp': 'WebP 图片', 'image/gif': '单帧或损坏的 GIF' })[mimeOf(buf)] || '无法识别的内容'
+      throw gifError(`接口没有返回有效的多帧 GIF 动图，实际返回${kind}；已停止发送，请检查接口或模型的 GIF 支持`)
+    }
     if (!buf || !buf.length) throw new Error('生图接口没有返回图片')
     if (!String(mimeOf(buf)).startsWith('image/')) throw new Error('生图接口返回的不是图片')
     log.info(`画好了一张图（${Math.round(buf.length / 1024)}KB，${Math.round((Date.now() - t) / 1000)}s）：${prompt.slice(0, 40)}`)
@@ -160,22 +225,22 @@ export function createImageGen({ getConfig, log, local, fetchImpl, codexAuth }) 
   }
 
   /** OpenAI 兼容接口。 */
-  async function viaOpenAI (c, prompt, image) {
+  async function viaOpenAI (c, prompt, image, refs) {
     const base = String(c.baseUrl || '').replace(/\/+$/, '')
     if (!base || !c.model) throw new Error('还没填生图服务地址或模型')
     const headers = image ? {} : { 'content-type': 'application/json' }
     if (c.apiKey) headers.authorization = `Bearer ${c.apiKey}`
     // response_format、image_size 不是每家都认（官方 OpenAI 就不认）：被拒了去掉再发。被拒的请求没出图，重发不会多画
-    const body = { model: c.model, prompt, size: c.size, n: 1, response_format: 'b64_json', image_size: c.size }
+    const body = { model: c.model, prompt, size: c.size, n: 1, ...(c.gif ? GIF_FIELDS : { response_format: 'b64_json', image_size: c.size }) }
     let requestBody
     if (image) {
       requestBody = new FormData()
-      requestBody.append('image', new Blob([image], { type: mimeOf(image) }), 'reference.' + mimeOf(image).split('/')[1])
-      for (const [key, value] of Object.entries({ prompt, model: c.model, size: c.size })) requestBody.append(key, value)
+      refs.forEach((buf, index) => requestBody.append(refs.length > 1 ? 'image[]' : 'image', new Blob([buf], { type: mimeOf(buf) }), `reference-${index + 1}.` + mimeOf(buf).split('/')[1]))
+      for (const [key, value] of Object.entries({ prompt, model: c.model, size: c.size, ...(c.gif ? GIF_FIELDS : {}) })) requestBody.append(key, value)
     }
     let r, j
     for (;;) {
-      r = await fetch(`${base}/images/${image ? 'edits' : 'generations'}`, { method: 'POST', headers, body: requestBody || JSON.stringify(body), signal: AbortSignal.timeout(180000) })
+      try { r = await fetch(`${base}/images/${image ? 'edits' : 'generations'}`, { method: 'POST', headers, body: requestBody || JSON.stringify(body), signal: AbortSignal.timeout(180000) }) } catch (error) { error.imageRequestFailed = true; error.imageNetworkFailure = true; throw error }
       j = await r.json().catch(() => ({}))
       if (r.ok) break
       const message = j?.error?.message || j?.message || `HTTP ${r.status}`
@@ -193,17 +258,18 @@ export function createImageGen({ getConfig, log, local, fetchImpl, codexAuth }) 
   }
 
   /** 自定义接口：GET 直接把参数拼在地址上，POST 放进 JSON / 表单。 */
-  async function viaCustom (c, prompt, image) {
+  async function viaCustom (c, prompt, image, refs) {
     const cp = c.custom || {}
     if (!cp.url) throw new Error('还没填自定义生图接口地址')
-    const req = customRequest(c, prompt, image)
+    const req = customRequest(c, prompt, image, refs)
     log.info(`生图请求：${req.method} ${image ? '（含参考图）' : req.url.slice(0, 160)}`)
-    const r = await fetch(req.url, {
+    let r
+    try { r = await fetch(req.url, {
       method: req.method,
       headers: req.headers,
       body: req.body,
       signal: AbortSignal.timeout(180000),
-    })
+    }) } catch (error) { error.imageRequestFailed = true; error.imageNetworkFailure = true; throw error }
     const type = String(r.headers.get('content-type') || '')
     // 直接返回图片字节（pollinations 这类）
     if (type.startsWith('image/')) {
@@ -220,13 +286,51 @@ export function createImageGen({ getConfig, log, local, fetchImpl, codexAuth }) 
 
   const enabled = () => {
     if (local?.active('image')) return true
+    // 外部生图模块已就绪时，插件自己的「生图」开关不是必要条件。
+    try { if (upstream && upstream.ready && upstream.ready()) return true } catch {}
     const c = getConfig().imageGen
     if (!c.enabled) return false
     if (c.provider === 'codex') return auth.status().loggedIn
     return c.provider === 'custom' ? Boolean(c.custom && c.custom.url) : Boolean(c.baseUrl && c.model)
   }
 
-  return { generate, enabled, codexAuth: auth, dispose: () => auth.dispose?.() }
+  /**
+   * 没配好 / 没登录时给一句人话；工具本身照常挂着，执行时再提示。
+   * 这样 Codex 订阅「先开会话、后登录」时工具不会缺失，登录后下一句就能用。
+   */
+  const notReadyReason = () => {
+    if (local?.active('image')) return ''
+    try { if (upstream && upstream.ready && upstream.ready()) return '' } catch {}
+    const c = getConfig().imageGen
+    if (!c.enabled) return '生图还没开启：面板「生图」页右上角开关打开并保存'
+    if (c.provider === 'codex') {
+      return auth.status().loggedIn ? '' : 'ChatGPT 订阅还没登录：面板「生图」页 → Codex 订阅 → 登录'
+    }
+    if (c.provider === 'custom') return c.custom && c.custom.url ? '' : '自定义生图接口地址还没填（面板「生图」页）'
+    return c.baseUrl && c.model ? '' : '还没填生图服务地址或模型（面板「生图」页）'
+  }
+
+  // 保留本地调用方的附件辅助接口，与模块工具共用同一份图片登记实现。
+  const canSee = async () => Boolean(dsh && (await canSeeImages(dsh, getConfig())) === true)
+  const toolImage = async (buf) => dsh ? imageToolBlock(dsh, buf, { ffmpegPath: getConfig().bili?.ffmpegPath, log }) : null
+  async function referenceLimit() {
+    const c = getConfig().imageGen
+    if (c.img2img === false) return 0
+    if (local?.active('image')) {
+      if (typeof local.referenceLimit === 'function') return local.referenceLimit()
+      return typeof local.supportsImage === 'function' && await local.supportsImage() === true ? 1 : 0
+    }
+    if (!c.enabled) return 0
+    if (c.provider === 'codex') return 0
+    if (c.provider === 'custom') return customSupportsReference(c.custom || {}, '{images}') ? 8 : customSupportsReference(c.custom || {}) ? 1 : 0
+    if (!c.baseUrl || !c.model) return 0
+    if (/^dall-e-3$/i.test(c.model || '')) return 0
+    if (/^dall-e-2$/i.test(c.model || '')) return 1
+    return 8 // OpenAI 多图协议；兼容服务的明确单图错误由 self 调用方处理。
+  }
+  const supportsReference = async () => await referenceLimit() > 0
+
+  return { generate, canSee, toolImage, enabled, notReadyReason, supportsReference, referenceLimit, codexAuth: auth, dispose: () => auth.dispose?.() }
 }
 
 /**

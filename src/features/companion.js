@@ -1,9 +1,13 @@
 // 陪伴类小功能：心情、主动搭话。
 
+import { randomUUID } from 'node:crypto'
 import { dataDir, readJson, writeJson } from '../core/store.js'
 import { askModel } from '../core/llm.js'
 import { cleanText, clipText } from '../core/text.js'
 import { shouldDeferBackground } from '../core/offpeak.js'
+import { followUpHint } from './memory.js'
+import { moodReason } from './mood-context.js'
+import { selfName, personaDataDir, personaNow } from '../persona/personas.js'
 
 // ---------------- 心情 ----------------
 // 0~100，基线 60。聊天里的话按关键词推一推，随时间按半衰期回到基线。
@@ -71,7 +75,8 @@ export function parseMoodJudge(out) {
 
 export function createMood({ getConfig, dsh, log }) {
   let judgeDeferLogged = false
-  const file = () => dataDir('mood.json')
+  // 心情是她自己的，跟着人格走（根目录人格还是老位置，见 personas.js）；主动搭话的次数是对主人的打扰频率，仍共用
+  const file = () => personaDataDir(getConfig(), personaNow(getConfig()), 'mood.json')
   /** 当前配置的基线：衰减、初始值、兜底、判断提示词四处统一读它。 */
   const base = () => {
     const v = Number(getConfig().mood?.base)
@@ -85,6 +90,7 @@ export function createMood({ getConfig, dsh, log }) {
   }
   /** 推一下心情（d 可正可负），记下原因。 */
   function nudge(d, reason) {
+    if (getConfig().debug) return // 调试模式不动心情：心情是持久状态，调试不该留下痕迹
     if (!getConfig().mood.enabled || !d) return
     const s = load()
     const before = current()
@@ -92,6 +98,7 @@ export function createMood({ getConfig, dsh, log }) {
     s.at = Date.now()
     reason = cleanText(reason)
     s.reason = reason
+    s.reasonAt = s.at
     // 保留 200 条：20 条只够两小时，出问题查不到原因（实测需要回溯半天以上）
     s.history = [{ at: Date.now(), from: before, to: Math.round(s.value), reason }, ...(s.history || [])].slice(0, 200)
     save(s)
@@ -122,6 +129,7 @@ export function createMood({ getConfig, dsh, log }) {
      */
     async judge({ userText, reply, who = '对方', origin = 'user' }) {
       const cfg = getConfig().mood
+      if (getConfig().debug) return null // 调试模式不判心情（省一次模型调用，也不留下状态）
       if (!cfg.enabled || !cfg.judge || !dsh) return null
       // 峰谷省钱：峰时不跑这次额外模型调用，observe() 已经用关键词兜底；谷时恢复模型判断
       if (shouldDeferBackground(getConfig())) {
@@ -133,8 +141,9 @@ export function createMood({ getConfig, dsh, log }) {
       const scene = origin === 'speak-up' ? `这一轮是她自己想${who}了、主动去找${who}说话（不是被叫来干活）` : `这一轮是${who}在跟她说话`
       try {
         const out = await askModel(dsh, {
+        module: 'mood',
           cfg: getConfig(),
-          system: '你在判断聊天角色「大肥鱼」聊完一轮后的心情变化。她现在心情 ' + v + '/100（' + base() + ' 是平常）。' + scene + '。只看这一轮真正影响她心情的东西：被夸、被关心、被惦记会开心；被凶、被冷落、被嫌弃会难过；开玩笑的「讨厌~」「笨蛋」不算真骂。只输出 JSON：{"delta": -15~15 的整数, "reason": "十几个字的理由", "confidence": 0~1 你有多确定}。没什么影响就 delta 为 0。',
+          system: `你在判断聊天角色「${selfName(getConfig())}」聊完一轮后的心情变化。她现在心情 ` + v + '/100（' + base() + ' 是平常）。' + scene + '。只看这一轮真正影响她心情的东西：被夸、被关心、被惦记会开心；被凶、被冷落、被嫌弃会难过。对方明显是在开玩笑、调侃、傲娇或亲昵称呼时（例如「讨厌~」「笨蛋」「坏蛋」「哼」），即使字面带负面词，也不要判成被嘲讽/被嫌弃，按轻松互动给 0 或轻微正向；只有明确恶意、攻击、羞辱或刻意冷落才降心情。只输出 JSON：{"delta": -15~15 的整数, "reason": "十几个字的理由", "confidence": 0~1 你有多确定}。没什么影响就 delta 为 0。',
           text: `${origin === 'speak-up' ? '她主动说' : who + '说'}：${String(userText || '').slice(0, 600)}\n她回：${String(reply || '').slice(0, 600)}`,
           maxTokens: 400,
           temperature: 0.2,
@@ -155,7 +164,7 @@ export function createMood({ getConfig, dsh, log }) {
       const label = moodLabel(v)
       const style = MOOD_STYLE[label]
       if (!style) return ''
-      return `（你现在${label}${s.reason ? '，因为' + cleanText(s.reason) : ''}。这会自然地影响你说话：${style}。不用说出来自己心情如何。）`
+      return `（你现在${label}${moodReason(s, v, base())}。这会自然地影响你说话：${style}。不用说出来自己心情如何。）`
     },
   }
 }
@@ -166,6 +175,163 @@ export function createSpeakUp({ getConfig, hub, log, isMuted, memory }) {
   const file = () => dataDir('speakup.json')
   const load = () => readJson(file(), () => ({ day: '', count: 0, nextAt: 0, last: 0 }))
   const save = (s) => writeJson(file(), s)
+
+  // ---------------- 她的小闹钟 ----------------
+  // 每条提醒都是她自己在对话里设的一次性闹钟；到点只负责把她叫醒，不直接替她发消息。
+  const REMINDER_FILE = 'speakup-reminders.json'
+  const REMINDER_GRACE_MS = 15 * 60_000
+  const REMINDER_RETRY_MS = 5 * 60_000
+  const REMINDER_WAIT_MS = 4 * 60_000
+  let reminderBusy = false
+
+  const reminderFile = () => dataDir(REMINDER_FILE)
+  const two = (n) => String(n).padStart(2, '0')
+  const reminderText = (at) => {
+    const d = new Date(at)
+    return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`
+  }
+  function parseReminderTime(value) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})$/.exec(String(value || '').trim())
+    if (!m) return 0
+    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), 0, 0)
+    if (d.getFullYear() !== Number(m[1]) || d.getMonth() !== Number(m[2]) - 1 || d.getDate() !== Number(m[3])
+      || d.getHours() !== Number(m[4]) || d.getMinutes() !== Number(m[5])) return 0
+    return d.getTime()
+  }
+  function normalizeReminder(raw) {
+    if (!raw || typeof raw !== 'object') return null
+    const id = String(raw.id || '').trim()
+    const at = Number(raw.at)
+    const note = String(raw.note || '').trim().slice(0, 500)
+    if (!id || !Number.isFinite(at) || !note) return null
+    return {
+      id,
+      at,
+      atText: String(raw.atText || '').trim() || reminderText(at),
+      note,
+      createdAt: Number(raw.createdAt) || at,
+      attempts: Math.max(0, Math.round(Number(raw.attempts) || 0)),
+      nextAt: Number(raw.nextAt) || at,
+      expiresAt: Number(raw.expiresAt) || at + REMINDER_GRACE_MS,
+      lastError: String(raw.lastError || '').slice(0, 180),
+    }
+  }
+  function loadReminders() {
+    const raw = readJson(reminderFile(), () => [])
+    return (Array.isArray(raw) ? raw : []).map(normalizeReminder).filter(Boolean)
+  }
+  function saveReminders(list) { writeJson(reminderFile(), list) }
+  function pruneReminders(now = Date.now()) {
+    const raw = loadReminders()
+    const live = raw.filter((r) => r.expiresAt > now)
+    if (live.length !== raw.length) saveReminders(live)
+    return live
+  }
+  function reminderList(now = Date.now()) {
+    return pruneReminders(now).sort((a, b) => a.at - b.at)
+  }
+  function addReminder(value, noteText) {
+    const cfg = getConfig()
+    if (!cfg.enabled || cfg.speakUp?.enabled === false) return { ok: false, message: '主动搭话没开启' }
+    if (!cfg.speakUp?.reminderEnabled) return { ok: false, message: '小闹钟没开启' }
+    const at = parseReminderTime(value)
+    if (!at) return { ok: false, message: '时间格式不对，要用 yyyy-mm-dd HH:MM，例如 2026-11-12 17:30' }
+    const now = Date.now()
+    if (at <= now) return { ok: false, message: '这个时间已经过去了，请设一个将来的时间' }
+    const note = String(noteText || '').trim().slice(0, 500)
+    if (!note) return { ok: false, message: '要提醒自己什么？把想说的话写进 note' }
+    const live = pruneReminders(now)
+    if (live.length >= (cfg.speakUp.reminderLimit ?? 5)) return { ok: false, message: '你设定的提醒太多了' }
+    const reminder = {
+      id: randomUUID(),
+      at,
+      atText: reminderText(at),
+      note,
+      createdAt: now,
+      attempts: 0,
+      nextAt: at,
+      expiresAt: at + REMINDER_GRACE_MS,
+      lastError: '',
+    }
+    saveReminders([...live, reminder])
+    log.info(`小闹钟：${reminder.atText} ${note}`)
+    return { ok: true, id: reminder.id, at: reminder.atText, message: `已记下，${reminder.atText} 叫醒你` }
+  }
+  function closeReminder(id) {
+    const key = String(id || '').trim()
+    const live = pruneReminders()
+    if (!key || !live.some((r) => r.id === key)) return { ok: false, message: '没找到这个提醒，可能已经过期或关闭了' }
+    saveReminders(live.filter((r) => r.id !== key))
+    return { ok: true, message: '这个小闹钟已关闭' }
+  }
+  function reminderPrompt(reminder, owner) {
+    return `【系统提醒，不是${owner}说的话】你之前给自己定的小闹钟到时间了：${reminder.atText}「${reminder.note}」。现在可以主动找${owner}说这件事；如果你觉得现在不适合打扰，就只回 [沉默]。`
+  }
+  async function attemptReminder(reminder, now = Date.now()) {
+    const cfg = getConfig()
+    const owner = String(cfg.ownerQQ || '')
+    if (!owner || !cfg.enabled || cfg.speakUp?.enabled === false || !cfg.speakUp?.reminderEnabled) return
+    const chatId = `private:${owner}`
+    const outcome = await new Promise((resolve) => {
+      let settled = false
+      const timer = setTimeout(() => finish({ ok: false, error: '等回复超时' }), REMINDER_WAIT_MS)
+      timer.unref?.()
+      const finish = (result) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve(result || { ok: false, error: '没有结果' })
+      }
+      try {
+        const waiting = hub.pushToSession(
+          { chatId, kind: 'private', userId: owner, nickname: cfg.ownerName || '主人' },
+          [{ type: 'text', text: reminderPrompt(reminder, cfg.ownerName || '主人') }],
+          '',
+          { onTurnEnd: finish },
+        )
+        Promise.resolve(waiting).catch((error) => finish({ ok: false, error: error?.message || String(error) }))
+      } catch (error) {
+        finish({ ok: false, error: error?.message || String(error) })
+      }
+    })
+    const live = loadReminders()
+    const current = live.find((r) => r.id === reminder.id)
+    if (!current) return
+    if (outcome.ok) {
+      saveReminders(live.filter((r) => r.id !== reminder.id))
+      log.info(`小闹钟触发：${reminder.atText} ${reminder.note}`)
+      return
+    }
+    const retry = cfg.speakUp?.reminderRetry !== false
+    const at = Date.now()
+    if (!retry) {
+      saveReminders(live.filter((r) => r.id !== reminder.id))
+      log.warn(`小闹钟放弃：${reminder.atText} ${outcome.error || '触发失败'}`)
+      return
+    }
+    // 第一次失败后从现在起保留 15 分钟；之后每 5 分钟再试。
+    if (current.attempts === 0) current.expiresAt = at + REMINDER_GRACE_MS
+    if (at + REMINDER_RETRY_MS >= current.expiresAt) {
+      saveReminders(live.filter((r) => r.id !== reminder.id))
+      log.warn(`小闹钟放弃：${reminder.atText} ${outcome.error || '触发失败'}`)
+      return
+    }
+    current.attempts += 1
+    current.nextAt = at + REMINDER_RETRY_MS
+    current.lastError = String(outcome.error || '触发失败').slice(0, 180)
+    saveReminders(live)
+    log.warn(`小闹钟触发失败，5 分钟后重试：${reminder.atText}（${current.lastError}）`)
+  }
+  async function tickReminders(now = Date.now()) {
+    if (reminderBusy) return false
+    const cfg = getConfig()
+    if (!cfg.enabled || cfg.speakUp?.enabled === false || !cfg.speakUp?.reminderEnabled) return false
+    const due = reminderList(now).find((r) => r.nextAt <= now)
+    if (!due) return false
+    reminderBusy = true
+    try { await attemptReminder(due, now) } finally { reminderBusy = false }
+    return true
+  }
 
   function schedule(s, cfg) {
     const min = cfg.minIntervalMinutes
@@ -190,8 +356,19 @@ export function createSpeakUp({ getConfig, hub, log, isMuted, memory }) {
     '看看现在几点，按时间说点应景的（早上、饭点、深夜）',
   ]
 
+  function followUpReceipt(item) {
+    let counted = false
+    return item ? { onDelivered() {
+      if (counted) return
+      counted = true
+      memory?.()?.markFollowUpAsked?.(item.id)
+    } } : {}
+  }
+
   async function fire(reason = '定时', { nudge = false } = {}) {
     const cfg = getConfig()
+    if (!cfg.enabled || !cfg.speakUp.enabled || !cfg.ownerQQ || isMuted?.(`private:${cfg.ownerQQ}`) || memory?.()?.dislikes?.(cfg.ownerQQ)) return
+    const followUp = !nudge ? memory?.()?.dueFollowUp?.(cfg.ownerQQ) : null
     const owner = cfg.ownerName || '主人'
     const idle = Math.round((Date.now() - lastPrivateAt()) / 60000)
     const angle = ANGLES[Math.floor(Math.random() * ANGLES.length)]
@@ -199,16 +376,19 @@ export function createSpeakUp({ getConfig, hub, log, isMuted, memory }) {
       ? `【系统提醒，不是${owner}说的话】你刚才跟${owner}说「${String(hub.lastBotToOwner?.text || '').slice(-60)}」，${owner}已经 ${idle} 分钟没回了。可以轻轻追一句（比如「人呢」「睡着啦？」，或者换个话题），别催、别抱怨；觉得${owner}在忙就只回 [沉默]。`
       : `【系统提醒，不是${owner}说的话】你已经 ${idle > 600 ? '很久' : idle + ' 分钟'}没和${owner}私聊了，想主动找${owner}说点什么。这次的由头可以是：${angle}。优先用手里真实的素材（最近做过的事、记忆里的、聊天流水里能查到的），没有真实素材就别硬找，也不要编；用你自己的口气，一两句就好，别用模板、别解释为什么来找；实在不想说就只回 [沉默]。`
     log.info(`主动搭话（${reason}）`)
-    await hub.pushToSession({ chatId: `private:${cfg.ownerQQ}`, kind: 'private', userId: cfg.ownerQQ, nickname: owner }, [{ type: 'text', text: prompt }], '')
+    await hub.pushToSession({ chatId: `private:${cfg.ownerQQ}`, kind: 'private', userId: cfg.ownerQQ, nickname: owner }, [{ type: 'text', text: [prompt, followUpHint(followUp)].filter(Boolean).join('\n') }], '', followUpReceipt(followUp))
   }
 
   /** 找白名单里的人：不提主人的事，这是她和对方自己的聊天。 */
   async function fireFriend(qq) {
+    const cfg = getConfig()
+    if (!cfg.enabled || !cfg.speakUp.enabled || !(cfg.speakUp.allow || []).map(String).includes(String(qq)) || isMuted?.(`private:${qq}`) || memory?.()?.dislikes?.(qq)) return
+    const followUp = memory?.()?.dueFollowUp?.(qq)
     const idle = Math.round((Date.now() - (hub.lastPrivateAt?.(qq) || 0)) / 60000)
     const angle = ANGLES[Math.floor(Math.random() * ANGLES.length)]
     const prompt = `【系统提醒，不是对方说的话】你已经 ${idle > 600 ? '很久' : idle + ' 分钟'}没和这位朋友私聊了，想主动找对方说点什么。这次的由头：${angle}。只说你和对方之间的事，别提主人或别人的私事。`
     log.info(`主动搭话（白名单 ${qq}）`)
-    await hub.pushToSession({ chatId: `private:${qq}`, kind: 'private', userId: qq, nickname: qq }, [{ type: 'text', text: prompt }], '')
+    await hub.pushToSession({ chatId: `private:${qq}`, kind: 'private', userId: qq, nickname: qq }, [{ type: 'text', text: [prompt, followUpHint(followUp)].filter(Boolean).join('\n') }], '', followUpReceipt(followUp))
   }
 
   /** 白名单：每人单独算次数和间隔，一分钟最多找一个人，不一口气群发。 */
@@ -238,8 +418,9 @@ export function createSpeakUp({ getConfig, hub, log, isMuted, memory }) {
     const cfg = getConfig()
     const c = cfg.speakUp
     if (!cfg.enabled || !c.enabled) return
+    if (await tickReminders()) return
     if (cfg.ext?.purpose?.enabled === true) return // 目的引擎开着时由它主动找人，两套都跑同一个人会被找两次
-    if (isMuted?.(`private:${cfg.ownerQQ}`) || wrapMuted(`private:${cfg.ownerQQ}`)) { // 主人在私聊里让她闭嘴了 / 她刚收过尾：只管主人这边，白名单照旧
+    if (isMuted?.(`private:${cfg.ownerQQ}`) || wrapMuted(`private:${cfg.ownerQQ}`) || memory?.()?.dislikes?.(cfg.ownerQQ)) { // 主人在私聊里让她闭嘴了 / 她刚收过尾 / 主人不想被打扰：只管主人这边，白名单照旧
       const s = load()
       if (!(await tickFriends(cfg, s))) save(s)
       return
@@ -271,5 +452,12 @@ export function createSpeakUp({ getConfig, hub, log, isMuted, memory }) {
     if (!(await tickFriends(cfg, s))) save(s)
   }
 
-  return { tick, fire, state: load }
+  return {
+    tick,
+    fire,
+    state: () => ({ ...load(), reminders: reminderList() }),
+    reminders: reminderList,
+    addReminder,
+    closeReminder,
+  }
 }
