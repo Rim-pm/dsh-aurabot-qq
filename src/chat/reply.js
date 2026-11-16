@@ -812,6 +812,14 @@ function normalizeParamTags (text) {
   })
 }
 
+/** 完整语音块中的分条标记作为停顿，不能先拆断标签；代码示例和嵌套标签不改写。 */
+function joinVoiceBubbles(text) {
+  return text.replace(/```[\s\S]*?```|`[^`\n]+`|<voice>([\s\S]*?)<\/voice>/g, (block, speech) => {
+    if (speech === undefined || /<\/?voice\b/i.test(speech)) return block
+    return `<voice>${speech.replace(/\|{3,}/g, '\n')}</voice>`
+  })
+}
+
 /** 解析一轮回复；在拆气泡/语音前清洗，避免协议里的竖线被误作气泡分隔符。 */
 export function parseReply(text, options) {
   // 模型偶尔把「戳人」写成方括号动作（[戳了戳你：尾巴往回一收]），插件不认这种写法，
@@ -838,7 +846,7 @@ export function parseReply(text, options) {
     }
   }
   // 连续多写的竖线仍是同一个分隔符，避免 |||| 拆完残留一条 | 消息。
-  for (const bubble of raw.split(/\|{3,}/)) {
+  for (const bubble of joinVoiceBubbles(raw).split(/\|{3,}/)) {
     const part = bubble.trim()
     if (!part) continue
     // 依次切出 poke / reply / voice / sticker / markdown 图片，其余是文字
