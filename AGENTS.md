@@ -36,6 +36,22 @@ npm run check     # lint + test
 - 合进 `main` 一律走分支 + PR + CI（`.github/workflows/pr-check.yml`），**用 merge commit，不要 squash**，否则丢上游提交归属。
 - PR 正文写清楚「哪些差异是有意的」，尤其是与上游相反的设计（见下）。
 
+### 同步上游不开 PR
+
+上游提交已在上游仓过 review + CI，信任传递，不重复走 PR：
+
+```powershell
+git fetch upstream
+git merge upstream/release/1.3.0   # 或 upstream/beta
+npm test                           # 冲突解决后必跑
+git push origin main
+gh workflow run "PR Check" --repo Rim-pm/dsh-aurabot-qq --ref main
+```
+
+最后一步是补 CI 证据：`pr-check.yml` 只监听 `pull_request` 与 `workflow_dispatch`，没有 `push` 触发器，直接 push 不会留测试记录。`--ref main` 表示用 main 当前代码跑，所以必须在 push 之后触发。
+
+例外：如果冲突解决时改动了上游原意（不只是机械合并），就退回走 PR，因为此时结果已经不是「上游审过的那份代码」了。
+
 ## fork 与上游的有意差异（改到这些地方先看这里）
 
 - **B 站只观察不写**：B 站在本 fork 是 `extensions/bili-observer` 扩展，内核没有 `src/bili/`、`src/modules/bili/`；不采用上游「内容平台」页签（`CONTENT_PLATFORMS` / `ContentTab` / `Bili` / `BiliDanmaku` / `ShotCell`），`/bili/*` 根路由不存在。
