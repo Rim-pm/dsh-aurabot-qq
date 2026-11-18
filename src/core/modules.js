@@ -266,6 +266,26 @@ function settleModuleCall(core, verdict, outcome, log) {
 function governedSend(core, id, ask, run, log) {
   const svc = outboundOf(core)
   if (!svc) return run({ sourceModule: id })
+  // 「回合内提示」直发（2026-11-18 生图画前提示重复回归）。
+  //
+  // 只在**调用方显式声明**这条发送是回合内提示时才放行：她回合里的画前/进度提示是对话的一部分，
+  // 走代发决断要等一轮模型，慢工具兜底（1.5s）会先把同一句发出去 → 同一句话发两遍。
+  //
+  // 为什么必须显式声明、不能按 `hub.turnRunning(chatId)` 一刀切：那等于在**任意模块**的回合窗口内
+  // 把外发闸门整体旁路——抖音日报这类「模块主动找主人」的发送只要撞上回合就会绕过代发决断。
+  // 闸门的语义是「谁在说」，不是「什么时候说」，所以判定依据只能是发送侧的意图声明。
+  //
+  // 声明方式（三重条件，缺一不可）：
+  //   1. 调用方带 `turnNotice`（scoped hub 发送方法的第 6 个参数，或模块快捷 API 的 opts）；
+  //   2. 该模块在 TURN_NOTICE_MODULES 白名单里（宿主侧把关，模块自己写不算）；
+  //   3. 此刻这个聊天确实有回合在跑（防止回合结束后有人借标记绕过）。
+  const declaresNotice = Boolean(ask?.turnNotice) && TURN_NOTICE_MODULES.has(id)
+  const inTurn = declaresNotice && typeof core.hub?.turnRunning === 'function'
+    && ask?.chatId && core.hub.turnRunning(ask.chatId)
+  if (inTurn) {
+    safeLog('info', log, `模块「${id}」这条发送声明为回合内提示（画前/进度），直发不经代发决断`)
+    return run({ sourceModule: id, outboundDone: true })
+  }
   // broker 档无可审文本（图片/文件/语音/消息段）发主人私聊：识别不了就直发，不进门闸
   if (unreviewableBrokerSend(core, ask)) {
     safeLog('info', log, `模块「${id}」这条主动发送没有可审文本（图片/文件等），按「识别不了就直发」口径直接发出`)
@@ -386,6 +406,15 @@ async function delegateToHost(core, id, ask, verdict, svc, log) {
 const GOVERNED_HUB_METHODS = new Set(['sendText', 'sendSegments', 'sendImage', 'sendFile', 'sendVoiceFile', 'deliver'])
 
 /**
+ * 允许声明「回合内提示」的模块（宿主侧白名单，模块自己声明不到）。
+ *
+ * 只有这类模块的发送才**可能**在回合内直发：它们发的是「我这就去做」的进度提示，
+ * 与正在进行的回合是同一件事，走代发决断反而会被慢工具兜底抢先、导致同一句发两遍。
+ * 其余模块（抖音日报、RSS、主动私聊等）无论何时都照旧走代发决断——闸门管的是「谁在说」。
+ */
+const TURN_NOTICE_MODULES = new Set(['imagegen'])
+
+/**
  * 按方法名把一次 scopedHub 调用翻译成「治理问题 + 真正执行」。
  * 返回 null 表示这个方法不走治理（按原样转发）。
  *
@@ -394,24 +423,29 @@ const GOVERNED_HUB_METHODS = new Set(['sendText', 'sendSegments', 'sendImage', '
  */
 function governScopedCall(core, id, name, args, log) {
   const [chatId, a, b, c] = args
+  // 回合内提示的声明：模块只能在 opts 里写 `turnNotice: true`（第 6 个参数对 sendText、第 4 个对
+  // sendSegments、第 5 个对 sendImage……统一从「最后一个对象参数」里取）。是否真的放行由
+  // governedSend 结合 TURN_NOTICE_MODULES 与 turnRunning 三重判定，模块单方面声明无效。
+  const optsOf = (...idxs) => { for (const i of idxs) { const v = args[i]; if (v && typeof v === 'object') return v } return null }
+  const turnNotice = (opts) => Boolean(opts && opts.turnNotice === true)
   switch (name) {
     case 'sendText':
       // sendText(chatId, text, replyId, missed, userId, opts)
-      return governedSend(core, id, { chatId, text: a }, (extra) => {
+      return governedSend(core, id, { chatId, text: a, turnNotice: turnNotice(optsOf(5)) }, (extra) => {
         const last = args[5]
         const opts = last && typeof last === 'object' ? { ...last, ...extra } : extra
         return core.hub.sendText(chatId, a, args[2], args[3], args[4], opts)
       }, log)
     case 'sendSegments':
       // sendSegments(chatId, segments, note, opts)
-      return governedSend(core, id, { chatId, text: '' }, (extra) => {
+      return governedSend(core, id, { chatId, text: '', turnNotice: turnNotice(optsOf(3)) }, (extra) => {
         const last = args[3]
         const opts = last && typeof last === 'object' ? { ...last, ...extra } : extra
         return core.hub.sendSegments(chatId, a, b, opts)
       }, log)
     case 'sendImage':
       // sendImage(chatId, src, replyId, userId, opts)
-      return governedSend(core, id, { chatId }, (extra) => {
+      return governedSend(core, id, { chatId, turnNotice: turnNotice(optsOf(4)) }, (extra) => {
         const last = args[4]
         const opts = last && typeof last === 'object' ? { ...last, ...extra } : extra
         return core.hub.sendImage(chatId, a, args[2], args[3], opts)
@@ -426,7 +460,7 @@ function governScopedCall(core, id, name, args, log) {
       // deliver(chatId, text, opts)：第三个参数是 b，不能丢掉 voice / enginePolicy 等发送选项
       const opts = b && typeof b === 'object' ? b : {}
       if (opts.enginePolicy) return core.hub.deliver(chatId, a, opts)
-      return governedSend(core, id, { chatId, text: a }, (extra) => core.hub.deliver(chatId, a, { ...opts, ...extra }), log)
+      return governedSend(core, id, { chatId, text: a, turnNotice: turnNotice(opts) }, (extra) => core.hub.deliver(chatId, a, { ...opts, ...extra }), log)
     }
     default:
       return null

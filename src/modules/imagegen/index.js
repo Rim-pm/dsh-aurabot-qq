@@ -170,9 +170,17 @@ export default {
           if (buf) extraRefs.push(buf)
         }
         const text = typeof notice === 'string' ? notice.trim().slice(0, 200) : ''
-        let acknowledged = text ? await hub.sendText(chat.chatId, text) : null
+        // 画前提示是「她这个回合正在做的事」的进度说明，与最终回复是同一轮的产物。
+        // 显式声明 turnNotice：宿主据此在回合内直发（不经代发决断），否则慢工具兜底会在 1.5s 后
+        // 先把同一句发出去、9s 后代发决断再发一遍（2026-11-18 主人私聊实测）。
+        // 其余模块不声明这个标记，仍一律走代发决断。
+        const NOTICE_OPTS = { turnNotice: true }
+        let acknowledged = text ? await hub.sendText(chat.chatId, text, undefined, undefined, undefined, NOTICE_OPTS) : null
+        // 「正在做」提示已经以 notice 发出去了：立刻登记，hub 的慢工具兜底（1.5s 定时器）就不再发
+        // 她当轮正文——否则 notice 和兜底各发一遍，同样的话出现两次（2026-11-18 主人私聊实测）。
+        if (acknowledged && typeof hub.markSlowNotice === 'function') hub.markSlowNotice(sessionId)
         const simulatedNotice = () => acknowledged === null && Boolean(cfg.debug || cfg.dryRun)
-        if (!acknowledged && !simulatedNotice()) acknowledged = await hub.sendText(chat.chatId, '好，我来画。')
+        if (!acknowledged && !simulatedNotice()) acknowledged = await hub.sendText(chat.chatId, '好，我来画。', undefined, undefined, undefined, NOTICE_OPTS)
         if (!acknowledged && !simulatedNotice()) return { ok: false, message: '没能发送画图回复，请检查 QQ 网关' }
         const progress = async (error, retrying) => {
           const issue = reason(error); const facts = retrying ? '刚才失败，正在尝试下一个备用模型，结果尚未确定' : '生图最终失败，没有图片'
