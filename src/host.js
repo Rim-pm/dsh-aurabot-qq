@@ -16,7 +16,9 @@ import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import net from 'node:net'
 import { isDeepStrictEqual } from 'node:util'
-import { loadConfig, saveConfig, publicConfig, mergeFromPanel, ownerAuthorizationRevision } from './core/config.js'
+import { randomUUID } from 'node:crypto'
+import { loadConfig, saveConfig, commitConfig, configRevision, publicConfig, mergeFromPanel, ownerAuthorizationRevision } from './core/config.js'
+import { quietWindowOf } from './core/time-window.js'
 import { createLogger } from './core/logger.js'
 import { encodeResponse } from './core/http-compress.js'
 import { registerSecret, redact } from './core/redact.js'
@@ -24,6 +26,7 @@ import { createOneBotClient } from './onebot/client.js'
 import { createOutbox } from './onebot/outbox.js'
 import { createSnowLumaManager, DOWNLOAD_PAGE } from './snowluma/manager.js'
 import { createHub, workspaceDirOf } from './chat/hub.js'
+import { createPersonaMemoryRuntime } from './core/persona-memory-bridge.js'
 import { normalizeSelection } from './chat/chat-model.js'
 import { grantOwner, moveWorkspace, realWorkspace } from './core/workspace-move.js'
 import { createLocal, fileOf, toImageBuffer } from './local/local.js'
@@ -34,7 +37,7 @@ import { createMediaAccess } from './core/media.js'
 import { buildFaceIndex } from './chat/faces.js'
 import { FACE_TABLE } from './chat/face-table.js'
 import { dataDir, ensureDir } from './core/store.js'
-import { initUsage, usageReport } from './core/usage.js'
+import { initUsage, usageReport, closeUsage } from './core/usage.js'
 import { createUpdateChecker, changelogSection, hostEnv, updatePlan, repoOf } from './core/update.js'
 import { parseCommand, runCommand, createMutes, commandList } from './chat/commands.js'
 import { isOwner, groupResponseMode } from './chat/access.js'
@@ -56,7 +59,7 @@ import { createAuditor } from './autotelic/audit.js'
 import { setSsrpMode, assertPublicUrl, fetchGuarded } from './core/net.js'
 import { BUILTINS } from './modules/index.js'
 import { createOutboundPolicy } from './chat/outbound-policy.js'
-import { createPurposePolicy, createSpeakupPolicy, createSharedBudget } from './features/proactive-policy.js'
+import { createPurposePolicy, createSharedBudget } from './features/proactive-policy.js'
 
 export const name = 'aurabot'
 export const inject = ['agents', 'sessions', 'webServer', 'timer', 'workspaceRegistry', 'attachments', 'systemPrompt', 'llm']
@@ -142,6 +145,13 @@ export function isChatSession(hub, session) {
 export function apply(ctx) {
   const logger = createLogger({ dsh: ctx })
   const log = logger.child('core')
+  // ---------- 面板首屏提速（方案 §二） ----------
+  // bootId：本次宿主装配的唯一标识，面板用它判定「同一进程」的读写与保存回执；重启即换新。
+  const bootId = randomUUID()
+  // 核心配置与面板路由就绪前，三条轻量 GET（/panel/bootstrap|pulse|config）回 503 BOOTSTRAPPING。
+  let panelCoreReady = false
+  // 模块目录尚未就绪时 bootstrap 里 modulesReady=false（面板先画已知入口，占位等确认）。
+  let modsReady = false
   // 恢复备份必须在读配置之前：读完配置后内存里的旧状态会写回去
   try {
     const restored = applyPendingRestore()
@@ -149,12 +159,12 @@ export function apply(ctx) {
   } catch (error) { log.error('恢复备份失败：', error.message) }
   let cfg = loadConfig()
   if (cfg.ownerQQ && !ownerAuthorizationRevision(cfg)) {
-    try { cfg = saveConfig(cfg, cfg) }
+    try { cfg = commitConfig(cfg, cfg) }
     catch { log.warn('初始化主人授权记录失败，本次启动使用会话授权') }
   }
   // 全新安装（根目录还没有记忆、会话和流水）：当前人格直接认领根目录。老用户升级要主人在面板里认领。
   if (!dataOwner(cfg) && !hasRootData()) {
-    try { cfg = saveConfig({ ...cfg, persona: { ...cfg.persona, dataOwner: safeId(cfg.persona.current) || 'dafeiyu' } }, cfg) }
+    try { cfg = commitConfig({ ...cfg, persona: { ...cfg.persona, dataOwner: safeId(cfg.persona.current) || 'dafeiyu' } }, cfg) }
     catch { log.warn('记录数据归属人格失败，本次启动所有人格共用根目录') }
   }
   let mods = null
@@ -168,11 +178,14 @@ export function apply(ctx) {
   // 已注册的策略源实例（name → policy），给 deliver 的 enginePolicy 解析用
   const enginePolicies = new Map()
   const getConfig = () => cfg
+  const personaMemoryRuntime = createPersonaMemoryRuntime({ getConfig })
   setSsrpMode(() => (getConfig().security && getConfig().security.ssrfMode === 'loose' ? 'loose' : 'strict'))
   const secrets = () => { for (const k of ['webuiPassword', 'httpToken', 'wsToken']) registerSecret(cfg.snowluma[k]); registerSecret(cfg.imageGen.apiKey); for (const e of cfg.imageGen.fallbacks || []) registerSecret(e.apiKey); registerSecret(cfg.bridge.token); registerSecret(cfg.backup?.remote?.token); registerSecret(cfg.backup?.remote?.webdav?.password) } // backup 令牌/WebDAV 密码也按密钥脱敏（云备份）
   const setConfig = (next) => {
     const before = cfg
-    cfg = saveConfig(next, before)
+    // 统一提交函数（方案 §2.2）：落盘 + 发布 + configRevision 递增都收敛在 commitConfig 里；
+    // 值与已发布配置完全一致时不落盘不递增（面板「只提交没变化字段」回执取接纳时版本）。
+    cfg = commitConfig(next, before)
     // 改机器人号后旧连接的核对结果立刻失效，必须重新核对才能处理消息或完成向导。
     if (before.botQQ !== cfg.botQQ) {
       wrongAccount = ''
@@ -188,7 +201,7 @@ export function apply(ctx) {
   secrets()
   seedPersonas()
   // token 用量与花费（面板「概览」）：价格表可以在 config.usage.pricing 里覆盖
-  initUsage(cfg.usage?.pricing, cfg.cost?.offPeakHolidays)
+  initUsage(cfg.usage?.pricing)
 
   // ---------- 人格与规则：通过提示词变量注入到 Aurabot 的两个 preset ----------
   const variable = (n, fn) => ctx.effect(() => ctx.systemPrompt.variable(n, (...args) => captureSystemPrompt(n, cleanText(fn(...args)))), `aurabot: 变量 ${n}`)
@@ -236,6 +249,9 @@ export function apply(ctx) {
   // 连上后先核对登录的是不是机器人号，核对通过前不处理任何消息；不是就断开，不再自动重连
   let loginOk = false
   let wrongAccount = ''
+  // 已核验登录快照（方案 §二「连接摘要」）：checkLogin 核对时顺手缓存，面板轻量接口只读它，
+  // 绝不为了首屏现打 get_login_info（5 秒超时那个就是首屏卡顿的元凶）。断线即作废。
+  let loginSnapshot = { uin: '', nickname: '', at: 0 }
   // 核对期间收到的事件先攒着：核对通过就补处理，核对失败就丢掉。
   // 直接丢弃的话，刚连上那几百毫秒里主人发的消息就没了（登录核对要等一次 get_login_info 往返）。
   let verifying = false
@@ -249,9 +265,12 @@ export function apply(ctx) {
     pendingEvents = []
     try {
       let uin = ''
+      let info = null
       try {
-        const info = await onebot.call('get_login_info', {}, { timeoutMs: 10000 })
+        info = await onebot.call('get_login_info', {}, { timeoutMs: 10000 })
         uin = String(info?.user_id ?? '')
+        // 核对往返顺带更新登录快照（昵称一起缓存；核对本身不增加任何额外网络调用）
+        loginSnapshot = { uin, nickname: info?.nickname || '', at: Date.now() }
       } catch (error) {
         logger.child('onebot').warn('核对登录的 QQ 号失败：', error.message)
       }
@@ -319,7 +338,7 @@ export function apply(ctx) {
       onebotState = s
       if (s === 'connected' || s === 'stopped' || s === 'unconfigured') { gatewayWarmSince = 0; warmupPhase = { phase: '', label: '' } }
       else if (!gatewayWarmSince && cfg.enabled) gatewayWarmSince = Date.now()
-      if (s !== 'connected') { loginOk = false; pendingEvents = [] }
+      if (s !== 'connected') { loginOk = false; pendingEvents = []; loginSnapshot = { uin: '', nickname: '', at: loginSnapshot.at } }
       else checkLogin().then(() => { if (loginOk) flushOutbox() }).catch((error) => log.warn('核对登录号出错：', error.message))
       // 预热阶段 connecting/disconnected 会每 3 秒来回刷：首次和每 20 秒记一条 info，其余进 debug
       const line = `QQ 网关：${s}${d ? '（' + d + '）' : ''}`
@@ -344,14 +363,23 @@ export function apply(ctx) {
       handleEvent(ev)
     },
   })
+  let flushingOutbox = false
   async function flushOutbox () {
-    if (onebotState !== 'connected' || !loginOk) return
+    if (flushingOutbox || onebotState !== 'connected' || !loginOk) return
+    flushingOutbox = true
     try {
       const r = await outbox.flush((action, params, opts) => onebot.call(action, params, { ...opts, retries: 0 }),
-        item => !item.incomingReply || item.action !== 'send_group_msg' || groupResponseMode(cfg, item.params?.group_id) === 'chat')
+        item => !item.incomingReply || item.action !== 'send_group_msg' || groupResponseMode(cfg, item.params?.group_id) === 'chat',
+        (item, result) => {
+          if (item.action !== 'send_private_msg' || item.chatId !== `private:${item.params?.user_id}` ||
+              item.deliveryScope?.botQQ !== loginSnapshot.uin || result?.queued) return
+          personaMemoryRuntime.confirmDelivery(item.chatId, result?.message_id, item.deliveryScope)
+        })
       if (r.sent || r.dropped || r.left) log.info(`补发队列：成功 ${r.sent}，丢弃 ${r.dropped}，剩余 ${r.left}`)
     } catch (error) {
       logger.child('onebot').warn('补发队列出错：', error.message)
+    } finally {
+      flushingOutbox = false
     }
   }
   // 连接后漏掉的、或补发中途又断网的，定时再试；没连接时直接返回。
@@ -515,6 +543,10 @@ export function apply(ctx) {
       model: (sel, chat) => mods.filterSync('model', sel, chat),
       poke: (ev) => mods.claim('poke', ev),
       journal: (row) => mods?.emit('chat/log', row),
+      deliveryScope: (chatId, personaId, botQQ) => loginOk && loginSnapshot.uin === botQQ
+        ? personaMemoryRuntime.captureDelivery(chatId, personaId, botQQ)
+        : null,
+      delivery: personaMemoryRuntime.confirmDelivery,
     },
   })
 
@@ -800,12 +832,91 @@ export function apply(ctx) {
         return { get image() { return references[0]?.image || null }, references, appearance: id ? readLook(id).appearance : '' }
       },
     },
-    getConfig, setConfig,
+    getConfig,
   }
-  mods = createModules({ ctx, core, getConfig, setConfig, logger, version: VERSION, builtins: BUILTINS })
+  mods = createModules({ ctx, core, getConfig, setConfig, logger, version: VERSION, builtins: BUILTINS, personaMemoryRuntime })
   bridge = createBridge({ ctx, getConfig, setConfig, hub, mods, log: logger.child('bridge'), version: VERSION, apiVersion: API_VERSION, overview: () => overview() })
   core.bridge = bridge
   core.modules = mods
+
+  // ---------- 面板首屏：三条轻量只读接口（GET /panel/bootstrap|pulse|config，方案 §二/§2.1） ----------
+  // 铁规矩：只读宿主内存——绝不触发 SnowLuma/OneBot 网络探测、不启动网关、不重扫模块目录。
+  // 鉴权/Host/CSRF 与其它管理面一致（route() 内统一过闸）；no-store 由 send() 统一带上。
+  // 常用开关的界面显示值（试运行口径与 publicConfig 相同：调试开着时试运行显示为关）。
+  const controlsView = () => ({
+    enabled: Boolean(cfg.enabled),
+    dryRun: Boolean(cfg.dryRun && !cfg.debug),
+    debug: Boolean(cfg.debug),
+    safeMode: Boolean(cfg.safeMode),
+  })
+  // 连接快照：QQ 直连只用事件状态（onebotState）+ 已核验登录快照（checkLogin 顺带缓存），
+  // 原因码只给可公开的机器值（reason），不给内部细节。
+  const connectionsView = () => {
+    const connected = onebotState === 'connected'
+    const verified = connected && loginOk
+    let stage = 'connecting'
+    let reason = 'gateway_connecting'
+    if (!cfg.enabled) { stage = 'disabled'; reason = 'disabled_in_config' }
+    else if (connected && verified) { stage = 'connected'; reason = 'ok' }
+    else if (connected) { stage = 'verifying'; reason = wrongAccount ? 'wrong_account' : 'verifying_login' }
+    else if (onebotState === 'unconfigured') { stage = 'unconfigured'; reason = 'gateway_unconfigured' }
+    else if (onebotState === 'stopped') { stage = 'disconnected'; reason = 'gateway_disconnected' }
+    else if (gatewayWarmSince) { reason = 'gateway_warming' }
+    return [{
+      platform: 'qq',
+      instanceId: 'onebot',
+      enabled: Boolean(cfg.enabled),
+      stage, // connected | verifying | connecting | disconnected | unconfigured | disabled
+      verified,
+      reason, // ok | wrong_account | verifying_login | gateway_warming | gateway_connecting | gateway_disconnected | gateway_unconfigured | disabled_in_config
+      login: verified ? { uin: loginSnapshot.uin, nickname: loginSnapshot.nickname } : null,
+      warmupSeconds: gatewayWarmSince ? Math.max(0, Math.round((Date.now() - gatewayWarmSince) / 1000)) : 0,
+    }]
+  }
+  // 导航摘要：mods 尚未装配时给空表（bootstrap 用 modulesReady=false 提示面板先占位）。
+  const navSummary = () => (mods ? mods.summarizeModules() : { navigationRevision: 0, modules: [] })
+  const navRevision = () => (mods ? mods.navigationRevision() : 0)
+  // 核心配置/路由未就绪：三条轻量 GET 统一回 503 BOOTSTRAPPING（方案 §2.1「启动与失败」）。
+  const bootstrapping = (res) => {
+    if (panelCoreReady) return false
+    send(res, 503, { ok: false, code: 'BOOTSTRAPPING', bootId })
+    return true
+  }
+  route('/panel/bootstrap', async (req, res) => {
+    if (bootstrapping(res)) return
+    const nav = navSummary()
+    return {
+      ok: true,
+      bootId,
+      configRevision: configRevision(),
+      version: VERSION,
+      setupDone: Boolean(cfg.setupDone),
+      controls: controlsView(),
+      connections: connectionsView(),
+      modulesReady: modsReady,
+      navigationRevision: nav.navigationRevision,
+      modules: nav.modules,
+    }
+  })
+  route('/panel/pulse', async (req, res) => {
+    if (bootstrapping(res)) return
+    return {
+      ok: true,
+      bootId,
+      configRevision: configRevision(),
+      navigationRevision: navRevision(),
+      setupDone: Boolean(cfg.setupDone),
+      controls: controlsView(),
+      connections: connectionsView(),
+    }
+  })
+  route('/panel/config', async (req, res) => {
+    if (bootstrapping(res)) return
+    // 面板草稿唯一的初始化/刷新来源：现有 publicConfig 的脱敏结果（密码/token 不回传原文）。
+    return { ok: true, bootId, configRevision: configRevision(), config: publicConfig(cfg) }
+  })
+  // 配置已加载、上述路由已注册：之后轻量读接口直接回 200（503 只覆盖装配早期）。
+  panelCoreReady = true
 
   // 出站门闸接进 hub（第二道保险：模块直调 api.core.hub.sendText / scopedHub 也都被覆盖）。
   // 判定的来源因果由调用方带 sourceModule / enginePolicy 时生效；没带标记的内部发送完全不受影响。
@@ -849,10 +960,10 @@ export function apply(ctx) {
     const say = (msg) => logger.child('出站策略').info(msg)
     const budget = createSharedBudget({ ownerQQ: cfg.ownerQQ, dataDir: dir, log: say })
     try {
-      // 目的引擎（默认关）：模块在跑且配置开着才注册。引擎未启用 / 未 ready 时不注册，
-      // 服务自己会处理 managed=false 与 deny 语义（设计稿故障语义：不得静默 pass）。
+      // 目的引擎（P1/Q1 拍板默认开）：模块在跑且配置未显式关才注册。键缺省=开、显式 false 不注册；
+      // 引擎未 ready 时不注册，服务自己会处理 managed=false 与 deny 语义（设计稿故障语义：不得静默 pass）。
       const pu = use('purpose')
-      if (cfg.ext?.purpose?.enabled === true && pu) {
+      if (cfg.ext?.purpose?.enabled !== false && pu) {
         const policy = createPurposePolicy({
           getConfig, engine: pu, state: () => pu.state?.() || null,
           dataDir: dir, log: say, budget,
@@ -867,29 +978,17 @@ export function apply(ctx) {
         enginePolicies.delete('purpose')
         use('purpose')?.setEnginePolicySource?.(null) // 策略源撤了，凭据一并撤
       }
-      // 主动搭话（现行默认）：speakup 模块在跑就注册
-      const sp = use('speakup')
-      if (cfg.speakUp?.enabled !== false && sp) {
-        const policy = createSpeakupPolicy({
-          getConfig, speakup: sp,
-          // 与 companion.js 同口径：私聊「最近一次来往」= max(主人最后说话, 她最后发给主人)。
-          // 注意不能把 hub.lastPrivateAt 直接传进来：那个函数按 QQ 号查，策略源调用时不带参数。
-          lastPrivateAt: () => Math.max(hub.lastOwnerChatAt || 0, hub.lastBotToOwner?.at || 0),
-          // 策略源传进来的是完整 chatId（'private:QQ'），直接问 mutes 即可
-          isMuted: (chatId) => { try { return Boolean(mutes?.muted?.(chatId)) } catch { return false } },
-          dataDir: dir, log: say, budget,
-        })
-        outbound.registerPolicySource(policy)
-        enginePolicies.set('speakup', policy)
-      } else {
-        outbound.unregisterPolicySource('speakup')
-        enginePolicies.delete('speakup')
-      }
+      // 主动搭话策略源（P3 收拢）：不再注册 speakup 源——主动搭话已并入目的引擎（P1），
+      // 出站治理只认 purpose。createSpeakupPolicy 代码暂留（P5 清理批次处置）；
+      // 存量账本 speakup-policy.json 保留原文不合并（两套口径不同，见方案 §6）。
+      outbound.unregisterPolicySource('speakup')
+      enginePolicies.delete('speakup')
       // 主人换号：旧 pending 一律作废（设计稿「接收人固定」）
       outbound.syncOwnerQQ?.(cfg.ownerQQ)
-      // 面板存过的 activePolicy 要在重启后重新生效（否则配置写了却只有服务实例的默认值在跑）
-      const active = (cfg.ext?.outboundPolicy && cfg.ext.outboundPolicy.activePolicy) || 'auto'
-      outbound.setActivePolicy?.(active)
+      // 面板存过的 activePolicy 要在重启后重新生效（否则配置写了却只有服务实例的默认值在跑）；
+      // P3 存量归一化：老配置里存的 'speakup' 生效为 'purpose'（服务侧 setActivePolicy 也兜一层）
+      const rawActive = (cfg.ext?.outboundPolicy && cfg.ext.outboundPolicy.activePolicy) || 'auto'
+      outbound.setActivePolicy?.(rawActive === 'speakup' ? 'purpose' : rawActive)
     } catch (error) {
       // 装配失败不能拖垮宿主启动：服务会因「无 ready 策略源」拒绝并显示原因
       logger.child('出站策略').warn('策略源装配失败：', error && error.message)
@@ -985,6 +1084,7 @@ export function apply(ctx) {
   let unloaded = false
   const community = createCommunity({ mods, getConfig, setConfig, log, version: VERSION, alive: () => !unloaded })
   const booted = mods.boot()
+  booted.then(() => { modsReady = true /* 模块目录就绪：bootstrap 的 modulesReady 转 true */ }).catch(() => {})
   booted.then(() => injectPetPort()).catch(() => {})
   booted.then(() => { if (getConfig().debug) hub.ensureDebugSession().catch((error) => log.warn('建调试会话失败：', error.message)) }).catch(() => {})
   // 模块起来之后再把策略源接上（此时 use('speakup') / use('purpose') 才拿得到实例）
@@ -1101,9 +1201,10 @@ export function apply(ctx) {
     try {
       const d = event?.data || {}
       const sid = String(session?.id || '')
-      const callId = String(d.callId || '')
-      if (!sid || !callId) return
+      if (!sid) return
       if (event.type === 'tool/call' && d.name === 'ask_user_question') {
+        const callId = String(d.callId || '')
+        if (!callId) return
         let qs = []
         try { qs = JSON.parse(String(d.arguments || '{}')).questions || [] } catch (error) {}
         if (!Array.isArray(qs) || !qs.length) return
@@ -1114,9 +1215,13 @@ export function apply(ctx) {
         const id = `q:${sid}:${callId}`
         const queued = noticeRelay?.announce('question', { id, sessionId: sid, title, questions: qs })
         log.info(`提问上报：${qs.length} 个问题（${title}）→ ${queued ? '已入队' : (noticeRelay?.enabled('question', sid) ? '重复/已在队列' : '被开关挡掉')}`)
-      } else if (event.type === 'tool/result' && d.toolCallId) {
-        // 问题答完 / 超时跳过：把还没推出去的那条撤掉
-        noticeRelay?.cancel(`q:${sid}:${d.toolCallId}`)
+      } else if (event.type === 'tool/result') {
+        // 问题答完 / 超时跳过：把还没推出去的那条撤掉。
+        // 两处旧写法都取不到 id，导致这条取消路径从来没跑过（30 秒内答完照样推过期提醒）：
+        //   1. 函数开头要求 d.callId，但 tool/result 的 data 只有 turn/step/message/meta；
+        //   2. 这里读 d.toolCallId，实际字段在 d.message.toolCallId（本机 1369 条实测）。
+        const tcid = String(d.message?.toolCallId || d.toolCallId || '')
+        if (tcid) noticeRelay?.cancel(`q:${sid}:${tcid}`)
       }
     } catch (error) {
       log.debug?.('提问上报失败：', error.message)
@@ -1183,6 +1288,7 @@ export function apply(ctx) {
     dangerGuard?.dispose()
     approvalRelay?.dispose()
     hub.dispose()
+    closeUsage()
     bridge.dispose()
     mods.dispose()
     onebot.stop()
@@ -1229,7 +1335,8 @@ export function apply(ctx) {
       stickers: { count: stickers.library().items.length },
       diary: diary ? { next: diary.nextTime(), last: diary.history()[0] || null } : { next: 0, last: null },
       qzoneSocial: use('qzone-social')?.state?.() ?? null,
-      speakUp: use('speakup')?.state?.() ?? { count: 0 },
+      // P3：今日次数改读目的引擎（主动搭话已并入 purpose；speakup 策略源不再注册）
+      speakUp: use('purpose')?.state?.() ?? { count: 0 },
       purpose: purposeOverview(),
       pet: petStatus(),
       memory: { lastConsolidate: memory?.lastConsolidate?.() ?? 0 },
@@ -1263,13 +1370,14 @@ export function apply(ctx) {
     const pu = use('purpose')
     const ext = (cfg.ext && cfg.ext.purpose) || {}
     const sp = cfg.speakUp || {}
-    const pad2 = (n) => String(n % 24).padStart(2, '0')
-    const awakeFrom = Number.isFinite(sp.awakeFrom) ? sp.awakeFrom : 8
-    const awakeTo = Number.isFinite(sp.awakeTo) ? sp.awakeTo : 23
-    const quiet = awakeTo >= 24 || awakeFrom >= awakeTo ? { quietStart: '00:00', quietEnd: '00:00' } : { quietStart: pad2(awakeTo) + ':00', quietEnd: pad2(awakeFrom) + ':00' }
+    // P3：醒着窗口的读法与 purposeConfig 对齐（ext.purpose 覆写位优先、speakUp 兜底），
+    // 键仍冻结在 speakUp.awake*（Q3 拍板），只是概览展示别再绕过覆写位。
+    const awakeFrom = Number.isFinite(ext.awakeFrom) ? ext.awakeFrom : (Number.isFinite(sp.awakeFrom) ? sp.awakeFrom : 8)
+    const awakeTo = Number.isFinite(ext.awakeTo) ? ext.awakeTo : (Number.isFinite(sp.awakeTo) ? sp.awakeTo : 23)
+    const quiet = quietWindowOf(awakeFrom, awakeTo)
     return {
       available: typeof pu?.status === 'function',
-      enabled: ext.enabled === true,
+      enabled: ext.enabled !== false, // P1/Q1 默认开：键缺省=开，显式 false 才算关（与 purposeConfig 同口径）
       status: pu?.status?.() ?? null,
       count: pu?.state?.().count ?? 0,
       carrier: ext.carrier === 'pet' ? 'pet' : 'qq',
@@ -1280,7 +1388,7 @@ export function apply(ctx) {
         : null,
       quietStart: quiet.quietStart,
       quietEnd: quiet.quietEnd,
-      dailyMax: Number.isFinite(sp.maxPerDay) ? sp.maxPerDay : null,
+      dailyMax: Number.isFinite(ext.maxPerDay) ? ext.maxPerDay : (Number.isFinite(sp.maxPerDay) ? sp.maxPerDay : null),
       awakeFrom,
       awakeTo,
     }
@@ -1292,6 +1400,21 @@ export function apply(ctx) {
   // ?range=today|yesterday|7|30|all —— 面板点哪张指标卡就按哪个区间出明细
   route('/usage', async (req) => ({ ok: true, ...usageReport({ range: query(req).range || '7' }) }))
 
+  // JSON Pointer（RFC 6901）小工具：保存回执按 /voice/enabled 这类路径逐字段确认（方案 §2.2）。
+  const pointerGet = (obj, pointer) => String(pointer || '').split('/').slice(1)
+    .map((s) => s.replace(/~1/g, '/').replace(/~0/g, '~'))
+    .reduce((o, k) => (o && typeof o === 'object' ? o[k] : undefined), obj)
+  // 面板提交体 → 提交字段路径：对象逐层展开；数组按整字段确认（不拆下标）；空对象也算整字段。
+  const pointerPaths = (v, prefix = '') => {
+    if (prefix && (Array.isArray(v) || v === null || typeof v !== 'object')) return [prefix]
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return prefix ? [prefix] : []
+    const keys = Object.keys(v)
+    if (!keys.length) return prefix ? [prefix] : []
+    return keys.flatMap((k) => pointerPaths(v[k], prefix + '/' + k.replace(/~/g, '~0').replace(/\//g, '~1')))
+  }
+  // 校验失败的回执：没有发生任何提交，committed/unchanged 都是空、版本取当前值（原返回形状不变，只多字段）。
+  const saveEnvelope = (body) => ({ bootId, configRevision: configRevision(), committedPaths: [], unchangedPaths: [], ...body })
+
   route('/save', async (req) => {
     const body = await readBody(req)
     // 面板草稿可能早于 QQ 的 /quiet /chatty；拒绝覆盖期间改过的群设置。
@@ -1299,18 +1422,18 @@ export function apply(ctx) {
     if (body?.memory && Object.hasOwn(body.memory, 'passiveGroups')) {
       const raw = body.memory.passiveGroups
       const ids = Array.isArray(raw) ? raw : typeof raw === 'string' ? raw.split(/[\s,，;；]+/).filter(Boolean) : null
-      if (!ids || ids.some(id => !/^[1-9]\d{4,11}$/.test(String(id).trim()))) return {
+      if (!ids || ids.some(id => !/^[1-9]\d{4,11}$/.test(String(id).trim()))) return saveEnvelope({
         ok: false, code: 'invalid_passive_groups', message: '旁听名单请填 5～12 位数字群号，用换行或逗号分隔，不要混入文字。本次没有保存。',
-      }
+      })
     }
     for (const ids of [body?.group?.moduleOnlyGroups, ...(body?._groupSettingsBase?.groups ? [body?.allow?.groups] : [])]) {
-      if (ids !== undefined && (!Array.isArray(ids) || ids.some(id => !/^[1-9]\d{4,11}$/.test(String(id))))) return {
+      if (ids !== undefined && (!Array.isArray(ids) || ids.some(id => !/^[1-9]\d{4,11}$/.test(String(id))))) return saveEnvelope({
         ok: false, code: 'invalid_group_ids', message: '群号请填 5～12 位数字，不要混入文字。本次没有保存。',
-      }
+      })
     }
-    if (body && Object.hasOwn(body, 'memberFilter') && !validMemberFilter(body.memberFilter)) return {
+    if (body && Object.hasOwn(body, 'memberFilter') && !validMemberFilter(body.memberFilter)) return saveEnvelope({
       ok: false, code: 'invalid_member_filter', message: '不回应名单未保存：请填有效的 QQ 号和群号（5～12 位数字），每人只添加一次，并明确选择所有群或指定群；最多 100 人、每人 100 个群。',
-    }
+    })
     const expected = body?._groupSettingsBase
     if (body) delete body._groupSettingsBase
     if (expected && (
@@ -1318,12 +1441,29 @@ export function apply(ctx) {
       (Object.hasOwn(expected, 'memberFilter') && !isDeepStrictEqual(expected.memberFilter, cfg.memberFilter)) ||
       (Object.hasOwn(expected, 'group') && !isDeepStrictEqual(expected.group, cfg.group)) ||
       (Object.hasOwn(expected, 'passiveGroups') && !isDeepStrictEqual(expected.passiveGroups, cfg.memory.passiveGroups))
-    )) return { ok: false, code: 'group_settings_conflict', message: '群设置已在别处修改，本次没有保存。请记下要保留的改动，再点「读取最新设置」放弃草稿。' }
+    )) return saveEnvelope({ ok: false, code: 'group_settings_conflict', message: '群设置已在别处修改，本次没有保存。请记下要保留的改动，再点「读取最新设置」放弃草稿。' })
     const before = cfg
+    // ---- 保存回执（方案 §2.2）：按提交前后（归一化后）的实际结果逐字段确认。 ----
+    // body 此时已剥掉 _groupSettingsBase 与 snowluma.webuiPassword（密码走单独通道，不算普通配置字段）。
+    // 提交字段路径先收集，分类在下面 setConfig 之后做（提交前 cfg===before，分类会全落 unchanged）。
+    const submittedPaths = pointerPaths(body)
     // 控制台密码不能只改配置（SnowLuma 那边还是旧的）：拿出来单独去 SnowLuma 改
     const newPw = typeof body?.snowluma?.webuiPassword === 'string' ? body.snowluma.webuiPassword : ''
     if (body?.snowluma) delete body.snowluma.webuiPassword
     setConfig(mergeFromPanel(cfg, body))
+    // committed/unchanged 分类必须在提交之后：commitConfig 返回新的归一化对象（变化时），
+    // 逐字段对比 before（提交前）与 cfg（提交后）——真写了的进 committedPaths，
+    // 显式提交但值相同（含 mergeFromPanel 归一化后等值）的进 unchangedPaths（草稿别一直标脏）。
+    const committedPaths = []
+    const unchangedPaths = []
+    for (const p of submittedPaths) {
+      if (isDeepStrictEqual(pointerGet(cfg, p), pointerGet(before, p))) unchangedPaths.push(p)
+      else committedPaths.push(p)
+    }
+    // 本次请求的回执（定义在提交之后、使用之前，避免 pw 失败分支的 TDZ）：
+    // 版本 = 本次请求触发的全部同步提交后的最高版本（如 SnowLuma 密码自动保存会再提交一次）；
+    // 异步回执不得借用别的请求版本，所以在这里闭包当场取值。
+    const saveReceipt = () => ({ bootId, configRevision: configRevision(), committedPaths, unchangedPaths })
     let pw = null
     if (newPw && newPw !== before.snowluma.webuiPassword) pw = await snowluma.setPassword(newPw)
     const changedConn = before.gateway !== cfg.gateway || ['httpUrl', 'wsUrl', 'httpToken', 'wsToken', 'dir'].some((k) => before.snowluma[k] !== cfg.snowluma[k])
@@ -1338,7 +1478,7 @@ export function apply(ctx) {
     await mods.sync().catch(() => {})
     // 模块启停 / 生图开关变化后工具清单可能变了：已挂载的会话重新挂一遍
     try { hub.remountAll?.('设置已保存') } catch (error) { log.debug('重挂工具失败：', error.message) }
-    if (pw && !pw.ok) return { ...(await overview()), ok: false, message: '其他设置保存了，但控制台密码没改：' + pw.message }
+    if (pw && !pw.ok) return { ...(await overview()), ...saveReceipt(), ok: false, message: '其他设置保存了，但控制台密码没改：' + pw.message }
     let debugNote = ''
     if (cfg.debug) {
       try {
@@ -1348,7 +1488,7 @@ export function apply(ctx) {
         log.debug('建调试会话失败：', error.message)
       }
     }
-    return { ...(await overview()), message: '保存好了' + (pw ? '，' + pw.message : '') + debugNote }
+    return { ...(await overview()), ...saveReceipt(), message: '保存好了' + (pw ? '，' + pw.message : '') + debugNote }
   })
 
   route('/debug/session', async () => {
@@ -1432,6 +1572,8 @@ export function apply(ctx) {
     const patch = {}
     const extPatch = {}
     if (typeof b.enabled === 'boolean') extPatch.enabled = b.enabled
+    // 追问开关（P1 翻键）：写入口从 speakUp.nudge 翻到 ext.purpose.nudge（读侧 purposeConfig 双层兼容）。
+    if (typeof b.nudge === 'boolean') extPatch.nudge = b.nudge
     if (b.carrier === 'qq' || b.carrier === 'pet') extPatch.carrier = b.carrier
     if (typeof b.petFallbackToQQ === 'boolean') extPatch.petFallbackToQQ = b.petFallbackToQQ
     if (['conservative', 'default', 'active'].includes(b.pacing)) extPatch.pacing = b.pacing
@@ -1463,8 +1605,10 @@ export function apply(ctx) {
     return readBody(req).then((b) => {
       const patch = {}
       if (['pass', 'gate', 'broker'].includes(b.tier)) patch.tier = b.tier
-      if (['auto', 'purpose', 'speakup'].includes(b.activePolicy)) patch.activePolicy = b.activePolicy
-      if (!Object.keys(patch).length) return { ok: false, message: '没有可保存的字段（tier 只认 pass/gate/broker，activePolicy 只认 auto/purpose/speakup）', outbound: outboundView().outbound }
+      // P3 存量归一化：老面板/老配置提交的 'speakup' 落盘为 'purpose'（不弹错、行为等价）
+      const wantActive = b.activePolicy === 'speakup' ? 'purpose' : b.activePolicy
+      if (['auto', 'purpose'].includes(wantActive)) patch.activePolicy = wantActive
+      if (!Object.keys(patch).length) return { ok: false, message: '没有可保存的字段（tier 只认 pass/gate/broker，activePolicy 只认 auto/purpose）', outbound: outboundView().outbound }
       const now = getConfig()
       const cur = (now.ext && now.ext.outboundPolicy) || {}
       setConfig({ ...now, ext: { ...now.ext, outboundPolicy: { ...cur, ...patch } } })
@@ -1493,8 +1637,10 @@ export function apply(ctx) {
     ready: { label: '就绪', tone: 'ok' },
     error: { label: '出错', tone: 'bad' },
   }
-  const ACTIVE_VIEW = { auto: '自动（挑就绪的那个）', purpose: '目的引擎', speakup: '主动搭话' }
-  const POLICY_NAME_VIEW = { purpose: '目的引擎', speakup: '主动搭话' }
+  // P3：活跃策略下拉收拢为 purpose/auto（speakup 档已从服务与面板两侧移除；
+  // 存量 'speakup' 由服务 setActivePolicy 与 /panel/outbound-policy 写入口归一化为 'purpose'）
+  const ACTIVE_VIEW = { auto: '自动（挑就绪的那个）', purpose: '目的引擎' }
+  const POLICY_NAME_VIEW = { purpose: '目的引擎' }
   const LEDGER_STATE_VIEW = {
     pending: '待投递', sending: '发送中', sent: '已送达', dropped: '已丢弃',
     failed: '失败', uncertain: '结果未明', expired: '已过期', 'transport-queued': '已交由网关',

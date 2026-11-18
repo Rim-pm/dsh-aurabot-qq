@@ -43,7 +43,7 @@ const find = (node, pred) => {
   return find(node.children, pred)
 }
 const text = (node) => (node == null || node === false ? '' : typeof node !== 'object' ? String(node) : Array.isArray(node) ? node.map(text).join('') : text(node.children))
-const personas = [{ id: 'shoko', name: '翔子' }, { id: 'dafeiyu', name: '大肥鱼' }]
+const personas = [{ id: 'xiaoxing', name: '小星' }, { id: 'dafeiyu', name: '大肥鱼' }]
 
 test('认领横幅：不待认领时不显示', () => {
   const p = loadPanel()
@@ -53,15 +53,15 @@ test('认领横幅：不待认领时不显示', () => {
 
 test('认领横幅：默认选大肥鱼，可以改选，确认后发认领请求，成功后消失', async () => {
   const p = loadPanel()
-  const st = { personas, persona: { current: 'shoko', dataOwner: '', claimPending: true } }
+  const st = { personas, persona: { current: 'xiaoxing', dataOwner: '', claimPending: true } }
   let tree = p.render(st)
   assert.match(text(tree), /升级前攒下的记忆和会话属于哪个人格/)
   const select = find(tree, (n) => n.type === 'select')
   assert.equal(select.props.value, 'dafeiyu', '默认选随插件自带的人格')
-  assert.deepEqual(select.children.flat().map((o) => o.props.value), ['shoko', 'dafeiyu'])
-  select.props.onChange({ target: { value: 'shoko' } })
+  assert.deepEqual(select.children.flat().map((o) => o.props.value), ['xiaoxing', 'dafeiyu'])
+  select.props.onChange({ target: { value: 'xiaoxing' } })
   tree = p.render(st)
-  assert.equal(find(tree, (n) => n.type === 'select').props.value, 'shoko')
+  assert.equal(find(tree, (n) => n.type === 'select').props.value, 'xiaoxing')
 
   p.env.answer = false
   await find(tree, (n) => n.type?.name === 'Btn').props.onClick()
@@ -72,7 +72,7 @@ test('认领横幅：默认选大肥鱼，可以改选，确认后发认领请�
   assert.equal(p.calls.length, 1)
   assert.match(p.calls[0].url, /\/persona\/data-owner$/)
   assert.equal(p.calls[0].method, 'POST')
-  assert.deepEqual(p.calls[0].body, { id: 'shoko' })
+  assert.deepEqual(p.calls[0].body, { id: 'xiaoxing' })
   assert.deepEqual(p.toasts.at(-1), { msg: '认领好了', kind: 'ok' })
   assert.equal(p.render(st), null, '认领成功后横幅消失')
 })
@@ -80,7 +80,7 @@ test('认领横幅：默认选大肥鱼，可以改选，确认后发认领请�
 test('认领横幅：失败时提示原因，横幅留着', async () => {
   const p = loadPanel()
   p.env.reply = { ok: false, message: '根目录的数据已经认领过了' }
-  const st = { personas, persona: { current: 'shoko', dataOwner: '', claimPending: true } }
+  const st = { personas, persona: { current: 'xiaoxing', dataOwner: '', claimPending: true } }
   await find(p.render(st), (n) => n.type?.name === 'Btn').props.onClick()
   assert.deepEqual(p.toasts.at(-1), { msg: '根目录的数据已经认领过了', kind: 'err' })
   assert.notEqual(p.render(st), null)

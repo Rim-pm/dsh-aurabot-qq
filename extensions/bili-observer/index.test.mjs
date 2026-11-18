@@ -27,6 +27,8 @@ before(async () => {
     'core/llm.js': await import(new URL('core/llm.js', base)),
     'core/img.js': await import(new URL('core/img.js', base)),
     'core/net.js': await import(new URL('core/net.js', base)),
+    'core/offpeak.js': await import(new URL('core/offpeak.js', base)),
+    'core/time-window.js': await import(new URL('core/time-window.js', base)),
     'chat/reply.js': await import(new URL('chat/reply.js', base)),
     'chat/session-backoff.js': await import(new URL('chat/session-backoff.js', base)),
     'tools/tools.js': await import(new URL('tools/tools.js', base)),

@@ -15,6 +15,7 @@ import { dataDir } from './store.js'
 import { registerSecretField } from './config.js'
 import { defineTool } from '../tools/tools.js'
 import { selfName, personaScope, personaNow } from '../persona/personas.js'
+import { PERSONA_MEMORY_MODULE } from './persona-memory-bridge.js'
 
 /** 扩展接口版本：只加不改。哪天不得不改已有的东西才升到 2，并在更新说明里写清楚怎么迁移。 */
 export const API_VERSION = 1
@@ -440,8 +441,10 @@ function governScopedCall(core, id, name, args, log) {
  * - scopedCore：Proxy 转发 core 的其余属性（bridge / modules 后挂的也可见），
  *   但 getPrototypeOf 掐成 null —— Object.getPrototypeOf(api.core).hub 也绕不回去。
  */
-export function scopeCoreForModule(core, id) {
-  if (!core || !core.hub || typeof core.hub.subagentFor !== 'function') return core || {}
+export function scopeCoreForModule(core, id, setCoreConfig, compat = null) {
+  if (!core || !core.hub || typeof core.hub.subagentFor !== 'function') {
+    return setCoreConfig ? { ...core, setConfig: setCoreConfig } : core || {}
+  }
   const obLog = outboundLogOf(core)
   const scopedHub = {}
   for (const name of Object.getOwnPropertyNames(core.hub)) {
@@ -472,6 +475,8 @@ export function scopeCoreForModule(core, id) {
   return new Proxy(core, {
     get(target, key, recv) {
       if (key === 'hub') return scopedHub
+      if (key === 'setConfig' && setCoreConfig) return setCoreConfig
+      if (key === 'personaMemoryBridge') return id === PERSONA_MEMORY_MODULE ? compat?.personaMemoryBridge : undefined
       // 出站治理服务不下发给模块：模块能拿到原始 svc 就能自己填 moduleId 冒充别人，
       // 也会绕过 api.proactive 的身份绑定。模块只能走 api.proactive（见 makeApi）。
       if (key === 'outbound') return undefined
@@ -481,7 +486,7 @@ export function scopeCoreForModule(core, id) {
   })
 }
 
-export function createModules({ ctx, core, getConfig, setConfig, logger, version, builtins }) {
+export function createModules({ ctx, core, getConfig, setConfig, logger, version, builtins, personaMemoryRuntime }) {
   const log = logger.child('modules')
   const builtinDefs = new Map(builtins.map((d) => [d.id, d]))
   const live = new Map() // id → 运行中的模块（见 start）
@@ -491,6 +496,10 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
   const revisions = new Map() // id → 停止次数，取消在途 import
   // 模块每次（重）启动都递增一次「代际」：hub 用它判断会话里挂的工具是不是旧模块实例的闭包。
   let generation = 0
+  // 导航版本：模块安装/启停/失败/重载（含可用平台随定义变化）时递增；
+  // 面板首屏轮询 /panel/pulse 拿它判断要不要重新拉导航摘要（方案 §二/§2.1）。
+  let navigationRevisionCounter = 0
+  const bumpNavigation = () => { navigationRevisionCounter++ }
   let userSeen = new Map() // id → { dir, file, stamp }
   let watching = null
   let disposed = false
@@ -506,8 +515,8 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
   function makeApi(id, source, rec) {
     const mlog = logger.child(id)
     const active = () => !disposed && !rec.stopped && live.get(id) === rec
-    const writable = (label, fn) => (...args) => {
-      if (!active()) {
+    const writable = (label, fn, allowed = active) => (...args) => {
+      if (!allowed()) {
         const error = new Error(`模块「${id}」已停止，不能调用 ${label}`)
         mlog.warn(error.message)
         throw error
@@ -535,10 +544,24 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
     // 内置模块和替换它的版本用原来的路径（内置的面板页照常能用）；新模块放在 /ext/模块id/ 下
     const prefix = routesAtRoot(id) ? '' : `/ext/${id}`
     const def = rec.def
+    const setModuleConfig = writable('setConfig', (patch) => setConfig(typeof patch === 'function' ? patch(getConfig()) : deepMerge(getConfig(), patch)))
+    // 兼容在同步收尾里恢复设置的模块；迟到的回调和旧实例不能再写。
+    const setCoreConfig = writable('core.setConfig', (patch) => {
+      if (!isObj(patch)) throw new TypeError('core.setConfig 需要配置对象')
+      return setConfig(deepMerge(getConfig(), patch))
+    }, () => active() || (rec.cleaning && !live.has(id)))
     // 模块拿到的 core：hub 换成「宿主按模块身份封装」的白名单副本（三审 #177：原型链斩断，
     // 模块摸不到原始 runSubagentTurn / subagentFor）；core 本体用 Proxy 转发，
     // getPrototypeOf 也掐断，防 getPrototypeOf(api.core).hub 绕回原始入口。
-    const scopedCore = scopeCoreForModule(core, id)
+    const bridgeActive = () => active() && isUserOn() && isEnabled(id)
+    const personaMemoryBridge = id === PERSONA_MEMORY_MODULE && bridgeActive()
+      ? personaMemoryRuntime?.forModule(bridgeActive, track)
+      : undefined
+    const scopedCore = scopeCoreForModule(core, id, setCoreConfig, {
+      get personaMemoryBridge() {
+        return bridgeActive() ? personaMemoryBridge : undefined
+      },
+    })
     // 出站治理的日志口（模块快捷发送层的判定/结算都往这里记；未注入服务时不会用到）
     const obLog = outboundLogOf(core)
     const api = {
@@ -551,7 +574,7 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
       log: mlog,
       // ---- 配置 ----
       config: () => getConfig(),
-      setConfig: writable('setConfig', (patch) => setConfig(typeof patch === 'function' ? patch(getConfig()) : deepMerge(getConfig(), patch))),
+      setConfig: setModuleConfig,
       settings: () => ({ ...(def.defaults || {}), ...(getConfig().ext?.[id] || {}) }),
       saveSettings: writable('saveSettings', (patch) => {
         const cfg = getConfig()
@@ -709,11 +732,13 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
       }
       rec.exports = exports
       log.info(`模块「${def.name || id}」${source !== 'user' ? '' : existsSync(join(rec.dir, '.aurabot-source.json')) ? '（模块市场）' : '（自己写的）'}已启动`)
+      bumpNavigation() // 新实例进了注册表：导航摘要可能变（新增/替换）
       emit('module/start', id)
     } catch (error) {
       if (disposed || rec.stopped || live.get(id) !== rec) return null
       stop(id, { quiet: true })
       errors.set(id, { message: String(error && error.message ? error.message : error).slice(0, 800), at: Date.now(), source })
+      bumpNavigation() // 启动失败也进导航（availability=error）
       log.warn(`模块「${def.name || id}」启动失败：`, error.message)
     }
     return live.get(id)
@@ -728,12 +753,17 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
     generation++ // 内置模块（重）启动也换代际：会话里的工具要在下一轮重挂
     if (errors.get(id)?.source !== 'user') errors.delete(id) // 替换版的报错留着给面板看
     try {
-      const r = def.setup(makeApi(id, 'builtin', rec))
+      const api = makeApi(id, 'builtin', rec)
+      const r = id === 'memory' && personaMemoryRuntime
+        ? def.setup(api, { registerNativePreview: read => api.onDispose(personaMemoryRuntime.registerNativePreview(read)) })
+        : def.setup(api)
       if (r && typeof r.then === 'function') throw new Error('内置模块的 setup 要同步返回')
       rec.exports = r ?? {}
+      bumpNavigation() // 内置模块（重）启动：导航摘要可能变
     } catch (error) {
       stop(id, { quiet: true })
       errors.set(id, { message: String(error.message || error).slice(0, 800), at: Date.now(), source: 'builtin' })
+      bumpNavigation() // 启动失败也进导航（availability=error）
       log.error(`内置模块「${def.name || id}」启动失败：`, error.message)
     }
   }
@@ -744,9 +774,15 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
     if (!rec) return false
     live.delete(id)
     generation++ // 停止或替换也使会话工具缓存失效
+    bumpNavigation() // 模块停了/被替换：导航摘要可能变
     rec.stopped = true
-    for (const off of rec.offs.splice(0).reverse()) cleanup(off)
-    cleanup(() => rec.exports?.dispose?.())
+    rec.cleaning = true
+    try {
+      for (const off of rec.offs.splice(0).reverse()) cleanup(off)
+      cleanup(() => rec.exports?.dispose?.())
+    } finally {
+      rec.cleaning = false
+    }
     rec.exports = null
     // 路由和监听器由各自的 off 按实例撤销，清理期间可能已经启动了同名新实例。
     if (rec.dshTools.length) core.bridge?.refresh()
@@ -795,6 +831,7 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
       if (disposed || (revisions.get(u.id) || 0) !== revision) return null
       if (!stillWanted()) { resyncRequested = true; return null }
       errors.set(u.id, { message: String(error.message || error).slice(0, 800), at: Date.now(), source: 'user', fallback: builtinDefs.has(u.id) })
+      bumpNavigation() // 加载失败也进导航（availability=error）
       log.warn(`模块「${u.id}」加载失败：`, error.message)
       userSeen.set(u.id, { ...u, stamp: stampOf(u.dir) })
       return null
@@ -877,7 +914,7 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
         if (back) { back.fallback = true; log.warn(`模块「${id}」：你的版本没加载成功，先用内置的`) }
       }
     }
-    for (const id of [...userSeen.keys()]) if (!users.some((u) => u.id === id)) { userSeen.delete(id); if (errors.get(id)?.source === 'user') errors.delete(id) }
+    for (const id of [...userSeen.keys()]) if (!users.some((u) => u.id === id)) { userSeen.delete(id); if (errors.get(id)?.source === 'user') errors.delete(id); bumpNavigation() /* 安装的模块被删了：导航摘要要变 */ }
   }
 
   function sync() {
@@ -913,7 +950,7 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
 
   // ---------- 事件 ----------
   function emit(event, ...args) {
-    if (disposed) return
+    if (disposed || event === 'chat/delivery') return
     for (const { fn } of listeners.get(event) || []) {
       try { const r = fn(...args); if (r && typeof r.catch === 'function') r.catch(() => {}) } catch (error) {}
     }
@@ -1079,6 +1116,45 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
     return names
   }
 
+  // ---------- 面板首屏：导航摘要（方案 §二/§2.1） ----------
+  /**
+   * 从内存注册表生成导航摘要：内置定义（builtinDefs）+ 用户模块扫描缓存（userSeen）+
+   * 运行记录（live）+ 错误表（errors）+ 配置（modCfg）。**绝不调 scanUser() 重扫模块目录，
+   * 也不执行工具构造器**（toolNames 那套不走）——首屏读取只准碰内存。
+   * 每项：id/name/tab/navGroup/hasSettings/hasPanel/enabled/running/platforms/availability。
+   */
+  function summarizeModules() {
+    const ids = new Set([...builtinDefs.keys(), ...userSeen.keys(), ...live.keys()])
+    const modules = [...ids].sort().map((id) => {
+      const b = builtinDefs.get(id)
+      const seen = userSeen.get(id)
+      const rec = live.get(id)
+      const def = rec?.def || b || {}
+      const m = modCfg(id)
+      const err = errors.get(id)
+      const enabled = m.enabled !== false
+      const availability = rec ? 'ready'
+        : err ? 'error'
+        : !enabled ? 'disabled'
+        : (b || seen) ? 'stopped' // 有定义/有安装记录但没在跑（被关、被替换、等待加载）
+        : 'unloaded' // 只有扫描缓存残影，定义还没拿到
+      return {
+        id,
+        name: def.name || id,
+        tab: def.tab || '',
+        navGroup: typeof def.navGroup === 'string' ? def.navGroup : '',
+        hasSettings: Array.isArray(def.settings) && def.settings.length > 0,
+        hasPanel: Boolean(rec && def.panel),
+        enabled,
+        running: rec ? rec.source : null, // 'builtin' | 'user' | null
+        platforms: Array.isArray(def.platforms) ? def.platforms.map(String) : [],
+        availability, // ready | error | disabled | stopped | unloaded
+        error: err && !rec ? err.message : '',
+      }
+    })
+    return { navigationRevision: navigationRevisionCounter, modules }
+  }
+
   /** file 是不是在 root 目录里面（root 自己不算；越过 root 的 ../ 一律不算）。 */
   function inside(root, file) {
     const rel = relative(resolve(root), resolve(file))
@@ -1170,6 +1246,8 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
     boot, sync, reload, stop, dispose, status, create, fork, promptFor, panelSource,
     use: exportsOf, has: (id) => live.has(id), running: (id) => live.get(id)?.source || null, generation: () => generation,
     capabilitiesOf,
+    // 面板首屏提速：导航摘要（纯内存）与导航版本号（安装/启停/失败/重载时递增）
+    summarizeModules, navigationRevision: () => navigationRevisionCounter,
     emit, claim, filter, filterSync, buildTools,
     // 插件核心自己听事件（不属于任何模块，不会被撤掉）
     listen: (event, fn) => { const item = { id: '@core', fn }; listeners.set(event, [...(listeners.get(event) || []), item]); return () => listeners.set(event, (listeners.get(event) || []).filter((x) => x !== item)) }, contextFor, rules, commands, dshTools, builtinOff, handle,

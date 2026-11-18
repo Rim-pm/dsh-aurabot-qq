@@ -21,9 +21,9 @@ test('persona-data 里的记忆库按 WAL 快照备份，SHM 不进包，恢复�
     rmSync(root, { recursive: true, force: true })
   })
   writeFileSync(join(root, 'config.json'), '{}')
-  const dir = join(root, 'persona-data', 'shoko')
+  const dir = join(root, 'persona-data', 'xiaoxing')
   mkdirSync(dir, { recursive: true })
-  const expected = { items: [{ id: 's1', text: '翔子记得主人喜欢草莓', at: 1 }] }
+  const expected = { items: [{ id: 's1', text: '小星记得主人喜欢草莓', at: 1 }] }
   const store = createMemoryStorage({ directory: dir, log })
   t.after(() => store.close())
   store.save({ items: [{ id: 's1', text: '旧的', at: 1 }] })
@@ -38,7 +38,7 @@ test('persona-data 里的记忆库按 WAL 快照备份，SHM 不进包，恢复�
   const backup = await createBackup()
   assert.deepEqual(backup.skipped, [])
   await stageRestore(backup.file)
-  const staged = join(root, '.restore', 'persona-data', 'shoko')
+  const staged = join(root, '.restore', 'persona-data', 'xiaoxing')
   assert.ok(existsSync(join(staged, 'memory.sqlite')))
   assert.ok(existsSync(join(staged, 'memory.sqlite-wal')))
   assert.equal(existsSync(join(staged, 'memory.sqlite-shm')), false)
@@ -49,5 +49,5 @@ test('persona-data 里的记忆库按 WAL 快照备份，SHM 不进包，恢复�
   const restored = createMemoryStorage({ directory: dir, log })
   t.after(() => restored.close())
   assert.deepEqual(restored.load().items, expected.items)
-  assert.ok(existsSync(join(root, 'backups', 'pre-restore-995', 'persona-data', 'shoko', 'memory.sqlite')), '恢复前的库留底')
+  assert.ok(existsSync(join(root, 'backups', 'pre-restore-995', 'persona-data', 'xiaoxing', 'memory.sqlite')), '恢复前的库留底')
 })

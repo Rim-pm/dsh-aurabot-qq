@@ -10,6 +10,7 @@ const __lib = globalThis.aurabot.lib // 插件内部源码（复制出来后靠�
 // 过滤词表和轮询节奏参考了 astrbot_plugin_bilibili（AGPL-3.0）；这里只借思路，代码是自己写的。
 
 const { dataDir, readJson, writeJson } = __lib('core/store.js')
+const { inHourWindow } = __lib('core/time-window.js')
 import { createBiliApi, UA } from './api.js'
 import { createJudge, formatSummary, formatDigest, pickImages } from './judge.js'
 import { cleanExamples } from './examples.js'
@@ -541,8 +542,7 @@ export function createSubs({ getConfig, setConfig, hub, memory, log, api: inject
   async function tick() {
     const g = getConfig()
     if (!g.enabled || !g.bili.enabled || !subs().length) return
-    const h = new Date().getHours()
-    if (h < g.speakUp.awakeFrom || h >= g.speakUp.awakeTo) return
+    if (!inHourWindow(Date.now(), g.speakUp.awakeFrom, g.speakUp.awakeTo)) return
     if (Date.now() - (load().lastPoll || 0) < intervalMs()) return
     try {
       await poll()

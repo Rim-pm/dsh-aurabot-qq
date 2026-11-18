@@ -131,7 +131,11 @@ test('契约：引用里套的合并转发也展开，字数上限单独放宽',
 })
 
 test('契约：面板上有这两个开关', () => {
-  assert.ok(clientSrc.includes("title: '合并转发'"), '面板缺「合并转发」卡')
+  // 「合并转发」的两种合法形态都接受：
+  //   - 卡片形态 `h(Card, { title: '合并转发', ... })`（上游现状）
+  //   - 组行形态 `h(Row, { label: '合并转发', ... })`（本机面板组行重排后的形态）
+  // 只要求面板上确实存在这一项，不锁死布局细节。
+  assert.ok(clientSrc.includes("'合并转发'"), '面板缺「合并转发」开关')
   assert.ok(clientSrc.includes("f.sw('forward.expandEarly')"), '缺早展开开关')
   assert.ok(clientSrc.includes("f.sw('forward.expandHistory')"), '缺补展开开关')
 })

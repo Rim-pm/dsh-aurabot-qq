@@ -15,6 +15,8 @@ import { lookWithVision, visionState, findFfmpeg } from './vision.js'
 import { createShotStore, shotPath, clockOf } from './shots.js'
 const { isSilence, cleanOutboundText } = __lib('chat/reply.js')
 const { isSessionBackoff } = __lib('chat/session-backoff.js')
+const { offpeakSkipReason } = __lib('core/offpeak.js')
+const { inHourWindow } = __lib('core/time-window.js')
 
 // 这些错误说明今天先别写了：没登录 / Cookie 过期、csrf 不对、风控、要验证码、太频繁
 const PAUSE_CODES = { '-101': 'B 站没登录或 Cookie 过期了', '-111': 'Cookie 里的 bili_jct 不对', '-352': '被 B 站风控了', '-509': '写得太频繁', '12015': 'B 站要求验证码' }
@@ -513,9 +515,20 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
     const c = g.bili
     if (!g.enabled || !c.enabled) return
     if (c.subsOnly) return // 只要订阅：刷视频整条线都不跑
-    const h = new Date().getHours()
-    if (h < g.speakUp.awakeFrom || h >= g.speakUp.awakeTo) return
+    if (!inHourWindow(Date.now(), g.speakUp.awakeFrom, g.speakUp.awakeTo)) return
     const s = today(load())
+    // 只在谷时刷：峰时跳过整个定时流程，把原因记进状态给面板看，不占额度
+    const skipReason = offpeakSkipReason(g)
+    if (skipReason) {
+      if (s.lastSkipReason !== skipReason) {
+        s.lastSkipReason = skipReason
+        s.lastSkipAt = Date.now()
+        save(s)
+        log.info(`B 站定时刷跳过：${skipReason}`)
+      }
+      return
+    }
+    if (s.lastSkipReason) { s.lastSkipReason = ''; s.lastSkipAt = 0; save(s) }
     await maybeDigest(s)
     if (c.autoBrowse && s.runs < c.maxRunsPerDay && Date.now() - (s.lastRun || 0) > c.intervalHours * 3600_000) await run()
   }
@@ -555,6 +568,7 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
         runs: s.runs, likes: s.likes || 0, favs: s.favs || 0, skipped: s.skipped || 0, noSubtitle: s.noSubtitle || 0,
         comments: s.comments, replies: s.replies,
         lastRun: s.lastRun, history: s.history.slice(0, 20), canPost: canPost(s),
+        lastSkipReason: s.lastSkipReason || '', lastSkipAt: s.lastSkipAt || 0,
         pauseReason: s.pauseDay === dayKey() ? s.pauseReason : '', posture: cfg().posture,
         digestDay: s.digestDay || '', seenTotal: loadSeen().items.length,
         vision: visionState(cfg()), shots: { count: shots.count() },

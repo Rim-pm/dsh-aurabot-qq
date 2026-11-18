@@ -275,7 +275,7 @@ test('规则：画画、唱歌只在功能真的能用时告诉她', async () =>
   const off = rulesText('social', normalize({ imageGen: { enabled: true } }))
   assert.doesNotMatch(off, /你会画画|你会唱歌/, '没配生图服务就不说会画')
   const on = rulesText('social', normalize({ imageGen: { enabled: true, baseUrl: 'https://x/v1', model: 'm' }, song: { enabled: true } }))
-  assert.match(on, /你会画画：只给主人画/)
+  assert.match(on, /你会画画：只给管理者画/)
   assert.match(on, /你会唱歌/)
 })
 
@@ -440,4 +440,19 @@ test('群聊：接话提示告诉她连着说了几次，让她自己停', () =>
   assert.doesNotMatch(engagedHint(1), /连着接了/)
   assert.match(engagedHint(3), /连着接了 2 次/)
   assert.match(engagedHint(3), /\[沉默\]/)
+})
+
+test('parseMessageEvent：群聊 @ 别人保留目标账号', () => {
+  const e = {
+    post_type: 'message', message_type: 'group', group_id: 555, user_id: 777, message_id: 43, self_id: SELF,
+    sender: { nickname: '小明', card: '明明', role: 'member' },
+    message: [
+      { type: 'at', data: { qq: '888', name: '小红' } },
+      { type: 'text', data: { text: ' 来唱一首' } },
+    ],
+  }
+  const m = parseMessageEvent(e, SELF)
+  assert.equal(m.mentioned, false)
+  assert.equal(m.atOthers, true)
+  assert.deepEqual(m.atTargets, [{ qq: '888', name: '小红' }])
 })

@@ -42,6 +42,14 @@
 - 返回：换好声音的 wav 路径（一般就是 `output`）
 - 开了这个之后，翻唱不再需要内置的 Applio 和音色模型（人声分离环境还是要装）
 
+#### Windows Applio 的可选 CPU 配置
+
+已使用 Applio、且 CPU 推理在 `ConvTranspose1d` 崩溃时，可把插件安装目录 `src/local/templates/song-cpu-infer.py` 复制到翻唱根目录的 `setup/`（同级应有 `Applio/`）。让现有 `song-convert.mjs` 用翻唱环境的 Python 调用这个文件，替代 `core.py`；后面的 `infer --input-path ... --output-path ...` 等参数保持不变。
+
+这个入口关闭 MKLDNN、保留短分段并限定 PyTorch 线程数；默认单线程。在现有 `spawn` 的子进程 `env` 中加入 `AURABOT_RVC_CPU_THREADS: '4'`，可试用四线程，删掉该字段便恢复默认。不用修改系统环境变量或人格，也不改变普通 TTS。只在这条本地换声路径启用，不会自动改变其他用户的内置推理。
+
+先用同一段已分离的人声比较 1、2、4 线程，再用完整长片段验证：线程越多不一定越快，短片段通过也不代表长输入不会崩溃。i5-12450H / 16 GB / PyTorch 2.11 CPU 的一次10秒同源测试，含启动和加载耗时约68、50、41秒；这是换声阶段，不是点歌到发送的总耗时。音色模型、RMVPE、检索比例和采样率保持不变。未通过稳定性检查时回到原线程数，不要为速度撤掉已有防崩溃措施。
+
 ### asr.mjs
 - 参数：`{ file, log }`（`file` 是 16kHz 单声道 wav）
 - 返回：识别出的文字，或 `{ text }`；听不清返回空字符串
