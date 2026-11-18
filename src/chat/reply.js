@@ -10,10 +10,10 @@
 //   - 整轮只输出 `[沉默]`（或空）= 这次不说话（群聊插话用）
 // 另外顺手把模型偶尔漏出来的 Markdown 洗掉——QQ 不渲染 Markdown。
 
-import { contextInjectionRanges, currentPromptSources, promptFingerprint, promptTextRanges } from '../security/leak-guard.js'
+import { chatRecordRanges, contextInjectionRanges, currentPromptSources, memoryTranscriptRanges, promptFingerprint, promptTextRanges } from '../security/leak-guard.js'
 import { stripWrapMarkers } from './wrap-up.js'
 import { stripMarkers } from './reply-marker.js'
-import { stripHtmlFragments } from './html-fragments.js'
+import { stripHtmlFragments, fenceRanges } from './html-fragments.js'
 
 export const SILENCE = '[沉默]'
 
@@ -60,6 +60,91 @@ export function stripMarkdown(text) {
     .trim()
 }
 
+// 假媒体动作：模型声称「图片/照片已经发出」或「刚拍了一张」，但回复里根本没有对应的
+// 图片段/工具调用（这台机器也没有拍照硬件）。这些动作描写原样发到 QQ，主人会以为图在路上，
+// 实际永远收不到，所以要在出站清洗时剥掉。
+//
+// 只认「整个括号内容都是这类短动作短语」的圆括号/方括号：普通括号动作（（笑）、（凑近看了看））、
+// 颜文字（（￣▽￣））、[图片] 这类占位，以及代码示例里的字面量都不动。
+const FAKE_MEDIA_NOUN = '(?:图片|照片|相片|自拍照?|截图|图)'
+const FAKE_MEDIA_TAIL = '[\\s，。！!？?、~～…]*$'
+const FAKE_MEDIA_SEND = [
+  // 图片发出 / 图片已发出 / 图片发出来了 / 图片发送成功 / 照片发你了 / 图片给你发过去了 / 图发你了
+  new RegExp(
+    '^(?:我|这边|现在)?(?:已经|已|刚刚|刚才|刚|这就|就|先)?' + FAKE_MEDIA_NOUN + '(?:我)?' +
+    '(?:已经|已|刚刚|刚才|刚)?(?:给你)?' +
+    '(?:发出(?:出去|过去|给|你|给你)?(?:了|啦|哦|喔|呀|哈|呢)?(?:成功|完毕)?' +
+    '|(?:发|传)出来(?:了|啦|哦|喔|呀|哈|呢)?(?:成功|完毕)?' +
+    '|发送(?:出去|过去|给|你|给你)?(?:了|啦|哦|喔|呀|哈|呢|成功|完毕)?' +
+    '|(?:发|传)(?:出去|过去|给你|给|你)(?:了|啦|哦|喔|呀|哈|呢)?(?:成功|完毕)?' +
+    '|(?:发|传)(?:了|啦|哦|喔|呀|哈|呢)(?:出去|过去)?(?:成功|完毕)?' +
+    '|(?:发|传)(?:了|啦|哦|喔|呀|哈|呢)?(?:成功|完毕)?)' + FAKE_MEDIA_TAIL,
+  ),
+  // 发了图 / 发了一张新图 / 发图了 / 传图了
+  new RegExp(
+    '^(?:我)?(?:已经|已|刚刚|刚才|刚|这就|就)?(?:给你)?(?:发送|发出|发|传)(?:出去|过去)?' +
+    '(?:了|过)(?:一?[张个])?(?:新(?:的)?)?' + FAKE_MEDIA_NOUN + FAKE_MEDIA_TAIL,
+  ),
+  new RegExp(
+    '^(?:我)?(?:已经|已|刚刚|刚才|刚|这就|就)?(?:给你)?(?:发送|发出|发|传)(?:出去|过去)?' +
+    '(?:一?[张个])?(?:新(?:的)?)?' + FAKE_MEDIA_NOUN + '(?:了|啦|哦|喔|呀)' + FAKE_MEDIA_TAIL,
+  ),
+  // 我发图给你 / 发照片给你了
+  new RegExp(
+    '^(?:我)?(?:已经|已|刚刚|刚才|刚|这就|就|先)?(?:给你)?(?:发送|发出|发|传)(?:出去|过去)?' +
+    '(?:了|过)?(?:一?[张个])?(?:新(?:的)?)?' + FAKE_MEDIA_NOUN +
+    '(?:给你|给|你)(?:了|啦|哦|喔|呀|哈|呢)?' + FAKE_MEDIA_TAIL,
+  ),
+]
+// 拍了一张新的 / 拍了张新照片 / 刚拍了一张 / 拍照了 / 拍了张照片给你 / 照了张照片
+// 注意：裸「拍好了」「拍到了」「拍完了」「照了」没有量词/媒体名词，按正常叙述保留。
+const FAKE_PHOTO_ACTION = new RegExp(
+  '^(?:我)?(?:已经|已|刚刚|刚才|刚|又|才|这就|就|先)?' +
+  '(?:' +
+    '(?:拍照|自拍)(?:了|啦|哦|喔|呀|哈|呢)' +
+    '|拍(?:(?:了|过)(?:一?[张个])?(?:新(?:的)?)?(?:的)?' + FAKE_MEDIA_NOUN + '?' +
+      '|(?:一?[张个])(?:新(?:的)?)?(?:的)?' + FAKE_MEDIA_NOUN + '?' +
+      '|(?:新(?:的)?)?(?:的)?' + FAKE_MEDIA_NOUN + ')' +
+    '|照(?:(?:了|好|到|完)(?:一?[张个])?(?:新(?:的)?)?(?:的)?)?' + FAKE_MEDIA_NOUN +
+  ')' +
+  '(?:给你)?(?:了|啦|哦|喔|呀|哈|呢)?' + FAKE_MEDIA_TAIL,
+)
+// 照片拍好了 / 图片已经拍完了
+const FAKE_PHOTO_DONE = new RegExp(
+  '^(?:这张|新的)?' + FAKE_MEDIA_NOUN + '(?:已经|已)?拍(?:好|完|到|了)(?:了|啦|哦|呀)?' + FAKE_MEDIA_TAIL,
+)
+// 照片拍给你了 / 图片拍给你了
+const FAKE_PHOTO_GIVE = new RegExp(
+  '^(?:这张|新的)?' + FAKE_MEDIA_NOUN + '(?:已经|已)?拍(?:给你|给|你)(?:了|啦|哦|喔|呀|哈|呢)?' + FAKE_MEDIA_TAIL,
+)
+// 圆括号/中文方括号与 ASCII 方括号分开配对：不能把「（图片发出]」这种混括号当动作，
+// 也不能漏掉模型常写的 [图片发出] / [照片发你了]；[图片] 仍是占位，不在动作词表里所以保留。
+const FAKE_MEDIA_BRACKETS = [
+  /[（(【]\s*([^（）()【】\n]{1,40}?)\s*[）)】]/gu,
+  /\[([^\[\]\n]{1,40}?)\]/gu,
+]
+const isFakeMediaPhrase = (value) => FAKE_MEDIA_SEND.some((re) => re.test(value)) ||
+  FAKE_PHOTO_ACTION.test(value) || FAKE_PHOTO_DONE.test(value) || FAKE_PHOTO_GIVE.test(value)
+
+/** 假媒体动作在原文里的删除区间；代码块/行内代码中的示例保持原样。 */
+function fakeMediaActionRanges(raw) {
+  const text = String(raw || '')
+  if (!text) return []
+  // 代码围栏（``` / ~~~）和行内代码里的示例原样保留。
+  const code = [...codeRanges(text), ...fenceRanges(text)]
+  const ranges = []
+  for (const pattern of FAKE_MEDIA_BRACKETS) {
+    for (const match of text.matchAll(pattern)) {
+      const start = match.index
+      const end = start + match[0].length
+      if (insideCode(code, start, end)) continue
+      if (!isFakeMediaPhrase(match[1].trim())) continue
+      ranges.push({ start, end })
+    }
+  }
+  return ranges
+}
+
 // 模型偶尔把自己那边的内部语法漏进正文，这些都不能发到 QQ，得在解析入口洗掉：
 //   - 工具调用的收尾标记，比如 </｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>（全角竖线包着关键字）
 //   - 上下文插件给历史消息挂的编号（m00896 / m00896b），提示词里说了不许抄，但它会抄
@@ -83,12 +168,72 @@ export function stripModelArtifacts(text) {
     .trim()
 }
 
+const SILENCE_MARK_SOURCE = '\\[沉默\\]|［沉默］|\\(沉默\\)|（沉默）'
+
+// 模型内部状态标签：<state> / </state>（2026-11-08 群友反馈消息结尾带 <state></state>）。
+// 仓库里的提示词没有要求输出这个标签，属于模型自身内部格式漏进正文；无论来源，出站都不能露出。
+// 只认完整标签名 state（后面必须是空白、/ 或 >），<statement>、<stateful> 这类正常文字不误伤；
+// 代码块/行内代码里的示例保留。
+const STATE_TAG = /<\/?\s*state(?=[\s/>])[^<>]*>/gi
+
+/** 收集 state 标签的删除区间：成对的开闭标签连中间内容一起删，孤立标签只删标签本身。 */
+function stateTagRanges(raw) {
+  const code = codeRanges(raw)
+  const tokens = []
+  for (const m of raw.matchAll(STATE_TAG)) {
+    if (insideCode(code, m.index, m.index + m[0].length)) continue
+    tokens.push({ start: m.index, end: m.index + m[0].length, closing: /^<\s*\//.test(m[0]), selfClose: /\/\s*>$/.test(m[0]) })
+  }
+  const ranges = []
+  const stack = []
+  for (const t of tokens) {
+    if (t.closing) {
+      const open = stack.pop()
+      ranges.push({ start: open ? open.start : t.start, end: t.end })
+    } else if (t.selfClose) {
+      ranges.push({ start: t.start, end: t.end })
+    } else {
+      stack.push(t)
+    }
+  }
+  for (const open of stack) ranges.push({ start: open.start, end: open.end })
+  return ranges
+}
+
 /** 是不是「这次不说话」：整条只由沉默标记、空白、标点组成才算。 */
-const SILENCE_MARK = /\[沉默\]|［沉默］|\(沉默\)|（沉默）/g
+const SILENCE_MARK = new RegExp(SILENCE_MARK_SOURCE, 'g')
+// 标记周边通常还跟着空格：一起带走，免得剥完正文留下「嗯  我在」这种多空格。
+const SILENCE_MARK_WITH_SPACE = new RegExp(`[ \\t]*(?:${SILENCE_MARK_SOURCE})[ \\t]*`, 'g')
 export function isSilence(text) {
   const t = String(text || '').trim()
   if (t === '') return true
   return t.replace(SILENCE_MARK, '').replace(/[\s\p{P}]/gu, '') === ''
+}
+
+/** 剥掉正文里残留的沉默标记；整条只有标记时会变成空串，由 isSilence 判沉默。 */
+export function stripSilenceMarks(text) {
+  return String(text || '').replace(SILENCE_MARK_WITH_SPACE, '')
+}
+
+/** 沉默标记的删除区间：统一出站清洗按原文坐标并进 cuts，消息段映射才不会错位。 */
+function silenceMarkRanges(text) {
+  const ranges = []
+  const re = new RegExp(SILENCE_MARK_WITH_SPACE.source, 'g')
+  for (const m of String(text || '').matchAll(re)) ranges.push({ start: m.index, end: m.index + m[0].length })
+  return ranges
+}
+
+// 戳一戳只有 <poke> / <poke/> 是动作；</poke> 是模型收尾时漏出来的闭合标签，
+// 任何出口都不能把标签文字发出去（2026-11 群友截图：「嗯？ <poke>」）。
+// 只删闭合标签，<poke> 原样留给 parseReply 触发真戳一戳。
+const POKE_CLOSE_TAG = /[ \t]*<\s*\/\s*poke\s*>[ \t]*/gi
+
+/** 收集 poke 闭合标签的删除区间；统一出站清洗和 parseReply 共用。 */
+function pokeCloseTagRanges(text) {
+  const ranges = []
+  const re = new RegExp(POKE_CLOSE_TAG.source, 'gi')
+  for (const m of String(text || '').matchAll(re)) ranges.push({ start: m.index, end: m.index + m[0].length })
+  return ranges
 }
 
 const ZERO_WIDTH_CHARS = new Set(['\u200B', '\u200C', '\u200D', '\uFEFF', '\u2060'])
@@ -375,7 +520,7 @@ export function stripToolText(text) {
 
 function visibleContent(text) {
   const content = stripMarkdown(text)
-    .replace(/<\/?(?:voice|reply|at|poke|sticker|face|wait|close)\b[^>]*>/gi, '')
+    .replace(/<\/?(?:voice|reply|at|poke|sticker|face|state|wait|close)\b[^>]*>/gi, '')
     .replace(/[@＠][^\s@＠<>|｜]+/g, '')
     .replace(/\|\|\|/g, '')
     .trim()
@@ -389,10 +534,21 @@ export function cleanOutboundText(text, { warn, promptSources, fingerprint, user
   const raw = String(text || '')
   // 先剥 HTML 残片：它们和工具调用、提示词复读互不重叠，按原文坐标并进同一份区间表。
   const { cuts: htmlCuts } = stripHtmlFragments(raw)
+  // 假媒体动作（「（图片发出）」「（拍了一张新的）」）是纯文字描写，按原文坐标并进同一份区间表。
+  const mediaCuts = fakeMediaActionRanges(raw)
   // time-context 注入不是提示词复读，主人私聊的复读豁免不该放过它，这里直接并进必删区间。
-  const tools = [...toolTextRanges(raw, { ownerPrivate }), ...contextInjectionRanges(raw)]
+  const toolRanges = toolTextRanges(raw, { ownerPrivate })
+  const contextRanges = contextInjectionRanges(raw)
+  // 沉默标记也按区间删：turn/end 之外（空间说说、模块代发等）同样不能把标记当正文发出去。
+  const silence = silenceMarkRanges(raw)
+  const stateRanges = stateTagRanges(raw)
+  // 模型自己编的格式化聊天记录同样不是提示词复读，按整行删除，避免冒充「对方发言」。
+  const recordRanges = [...chatRecordRanges(raw), ...memoryTranscriptRanges(raw)]
+  const pokeRanges = pokeCloseTagRanges(raw)
+  const noiseCount = toolRanges.length + contextRanges.length + htmlCuts.length
+  const tools = [...toolRanges, ...contextRanges, ...silence, ...stateRanges, ...recordRanges, ...pokeRanges]
     .sort((a, b) => a.start - b.start || b.end - a.end)
-  const baseRanges = mergeRanges([...tools, ...htmlCuts])
+  const baseRanges = mergeRanges([...tools, ...htmlCuts, ...mediaCuts])
   const toolClean = withoutToolRanges(raw, baseRanges)
   const prompts = (allowPromptEcho ? [] : promptTextRanges(toolClean, fingerprint || promptFingerprint(sources, userText ?? active?.userText ?? '')))
     .sort((a, b) => a.start - b.start || b.end - a.end)
@@ -413,8 +569,12 @@ export function cleanOutboundText(text, { warn, promptSources, fingerprint, user
     ranges = mergeRanges([...baseRanges, ...prompts.map((p) => ({ start: offsets[p.start], end: offsets[p.end - 1] + 1 }))])
   }
   let clean = withoutToolRanges(raw, ranges)
-  if (ranges.length && isSilence(visibleContent(clean))) {
-    warn?.(removePrompts ? '模型输出整段都是提示词复读，已拦下并按沉默处理' : '模型输出整段都是工具调用文字，已拦下并按沉默处理')
+  // 只有沉默标记/state 标签/中文时间注入/伪造聊天记录/poke 闭合标签/假媒体动作时按正常沉默或内部残留处理，不要误报成工具调用或提示词复读。
+  const fakeMediaOnly = mediaCuts.length > 0 && isSilence(visibleContent(withoutToolRanges(raw, mediaCuts)))
+  if ((noiseCount > 0 || removePrompts || fakeMediaOnly) && isSilence(visibleContent(clean))) {
+    warn?.(removePrompts ? '模型输出整段都是提示词复读，已拦下并按沉默处理'
+      : fakeMediaOnly ? '模型输出整段都是假媒体动作，已拦下并按沉默处理'
+        : '模型输出整段都是工具调用文字，已拦下并按沉默处理')
     clean = ''
   }
   onRanges?.(ranges)
@@ -448,18 +608,32 @@ export function capOutboundSegments (message, max = MAX_OUTBOUND_CHARS) {
 export function cleanOutboundSegments(message, options) {
   const texts = message.filter((seg) => seg.type === 'text')
   if (!texts.length) return message
-  const raw = texts.map((seg) => String(seg.data?.text || '')).join('')
+  // 相邻 text 段直接拼；中间隔着 image / at / reply 时插入换行当段边界。
+  // 假媒体动作的括号正则不跨换行，所以「（图片」+ 真图 +「发出）」不会被拼成假动作；
+  // 工具调用/提示词等其它清洗仍允许跨段识别（它们本来就可能在多个 text 段里被拆开）。
+  let raw = ''
+  const spans = []
+  let prevText = false
+  for (const seg of message) {
+    if (seg.type !== 'text') { prevText = false; continue }
+    if (raw && !prevText) raw += '\n'
+    const start = raw.length
+    const value = String(seg.data?.text || '')
+    raw += value
+    spans.push({ seg, start, end: start + value.length })
+    prevText = true
+  }
   let ranges
   const clean = cleanOutboundText(raw, { ...options, onRanges: (value) => { ranges = value } })
   if (clean === raw) return message
-  let offset = 0
-  const result = message.flatMap((seg) => {
-    if (seg.type !== 'text') return [seg]
-    const start = offset
-    offset += String(seg.data?.text || '').length
-    const value = clean ? withoutToolRanges(raw, ranges, start, offset) : ''
-    return value ? [{ ...seg, data: { ...seg.data, text: value } }] : []
-  })
+  const result = []
+  let spanIndex = 0
+  for (const seg of message) {
+    if (seg.type !== 'text') { result.push(seg); continue }
+    const span = spans[spanIndex++]
+    const value = clean ? withoutToolRanges(raw, ranges, span.start, span.end) : ''
+    if (value) result.push({ ...seg, data: { ...seg.data, text: value } })
+  }
   // 只剩引用和 @ 不能单独发，尤其是自动 @ 后面只跟着一个结束标记时。
   return result.some((seg) => seg.type === 'text' ? seg.data.text.trim() : !['reply', 'at'].includes(seg.type)) ? result : []
 }
@@ -487,7 +661,7 @@ export function parseReply(text, options) {
   if (isSilence(raw)) return { silent: true, items: [] }
   // 工具显式指定语音：仍经过同一份清洗，但正文不再当作媒体/气泡指令解析。
   if (options?.voice === true) {
-    const value = stripMarkdown(raw)
+    const value = stripSilenceMarks(stripMarkdown(raw))
     return { silent: !value, items: value ? [{ kind: 'voice', value }] : [] }
   }
   const items = []
@@ -502,8 +676,8 @@ export function parseReply(text, options) {
   for (const bubble of raw.split(/\|{3,}/)) {
     const part = bubble.trim()
     if (!part) continue
-    // 依次切出 reply / voice / sticker / markdown 图片，其余是文字
-    const re = /<poke\s*\/?>|<reply:\s*(\d+)\s*>|<voice>([\s\S]*?)<\/voice>|<sticker:([^>]+?)>(?:\s*<\/sticker>)?|!\[[^\]]*\]\(\s*([^)\s]+)\s*\)/g
+    // 依次切出 poke / reply / voice / sticker / markdown 图片，其余是文字
+    const re = /<poke\s*\/?>|<\/poke\s*>|<reply:\s*(\d+)\s*>|<voice>([\s\S]*?)<\/voice>|<sticker:([^>]+?)>(?:\s*<\/sticker>)?|!\[[^\]]*\]\(\s*([^)\s]+)\s*\)/g
     let last = 0
     let m
     while ((m = re.exec(part)) !== null) {
@@ -516,7 +690,7 @@ export function parseReply(text, options) {
       } else if (m[1] !== undefined) {
         replyTo = m[1]
       } else if (m[2] !== undefined) {
-        const v = stripMarkdown(m[2])
+        const v = stripSilenceMarks(stripMarkdown(m[2]))
         if (v) items.push({ kind: 'voice', value: v })
       } else if (m[3] !== undefined) {
         const v = m[3].trim()
@@ -598,7 +772,8 @@ export function itemsToLine(items, resolveSticker = () => null) {
 }
 
 function pushText(items, s) {
-  const t = stripMarkdown(String(s || '').replace(/<\/?reply[^>]*>/g, '')) // 写坏的引用标签直接去掉
+  // 写坏的引用标签直接去掉；混在正文里的沉默标记也全部剥掉，整行只剩标记时按沉默跳过。
+  const t = stripSilenceMarks(stripMarkdown(String(s || '').replace(/<\/?reply[^>]*>/g, '')))
   if (!t || isSilence(t)) return
   for (const line of splitLines(t)) if (!isSilence(line)) items.push({ kind: 'text', value: line })
 }

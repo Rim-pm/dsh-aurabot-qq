@@ -6,6 +6,11 @@ import { createSongStudio, checkRoot, listDrives } from '../../song/studio.js'
 import { privateCapabilityAllowed } from '../../chat/access.js'
 import { defineTool, str, int, bool } from '../../tools/tools.js'
 
+/** 翻唱完成后的心情变化：原因记到这次唱歌所在的聊天，别成为全局原因。 */
+export function nudgeMoodAfterSong(mood, title, chatId) {
+  mood?.nudge?.(8, `唱完了「${title}」`, chatId)
+}
+
 export default {
   id: 'song',
   name: '翻唱',
@@ -39,7 +44,7 @@ export default {
       },
       onSung: (title, chatId) => {
         const cfg = api.config()
-        mood.nudge?.(8, `唱完了「${title}」`)
+        nudgeMoodAfterSong(mood, title, chatId)
         // 唱过的歌记成她的经历：私聊记到对方头上
         const uid = String(chatId).startsWith('private:') ? String(chatId).slice(8) : ''
         const who = uid === String(cfg.ownerQQ) ? cfg.ownerName || '主人' : uid ? '对方' : '群里'
@@ -51,8 +56,8 @@ export default {
     // 面板里打开了才给她（没开就别让她答应唱歌）
     api.tool(({ chat, sessionId }) => (api.config().song.enabled && chat.kind !== 'system' ? defineTool({
       name: 'qq_song_cover',
-      description: '用你自己的声音翻唱一首歌，做好后自动以语音条发到当前聊天（耗时取决于长度和电脑性能，成功排队后再说已开始准备）。song 只写歌名和用户指定的歌手，比如「小幸运 田馥甄」；没指定歌手就按歌名搜索，不臆造指定版本。pitch 是变调半音：你是女声，原唱是男声时一般 +12，原唱是女声时 0。别人说清唱、不要伴奏时 acapella 填 true。只唱一段时用 start_sec 指定从第几秒开始，duration_sec 指定唱多少秒；只填时长则从头唱，两项都不填沿用面板截取设置，不能超过面板的最长时长。例如「红日，李克勤的，从第30秒开始，翻唱8秒」应填 song="红日 李克勤", start_sec=30, duration_sec=8。权限限制是限制谁能点歌，不是限制只能发到私聊；被拒时未开始制作。',
-      properties: { song: str('歌名（可以带歌手）'), pitch: int('变调半音：原唱男声 +12，女声 0'), acapella: bool('清唱：只留人声，不要伴奏'), start_sec: int('开始位置，整数秒，0 表示从头'), duration_sec: int('唱多少秒，正整数；不能超过面板最长时长') },
+      description: '用你自己的声音翻唱一首歌，做好后自动以语音条发到当前聊天（耗时取决于长度和电脑性能，成功排队后再说已开始准备）。song 只写歌名和用户指定的歌手，比如「小幸运 田馥甄」；没指定歌手就按歌名搜索，不臆造指定版本。pitch 一般不填：会听原唱人声自动判断男声女声、按你的声线定变调；只有别人明确要求升调降调时才填半音数。别人说清唱、不要伴奏时 acapella 填 true。只唱一段时用 start_sec 指定从第几秒开始，duration_sec 指定唱多少秒；只填时长则从头唱，两项都不填沿用面板截取设置，不能超过面板的最长时长。例如「红日，李克勤的，从第30秒开始，翻唱8秒」应填 song="红日 李克勤", start_sec=30, duration_sec=8。权限限制是限制谁能点歌，不是限制只能发到私聊；被拒时未开始制作。',
+      properties: { song: str('歌名（可以带歌手）'), pitch: int('变调半音：一般不填，自动按原唱定；别人明确要求升降调时才填'), acapella: bool('清唱：只留人声，不要伴奏'), start_sec: int('开始位置，整数秒，0 表示从头'), duration_sec: int('唱多少秒，正整数；不能超过面板最长时长') },
       required: ['song'],
       slow: '好，我这就去弄，稍等一会儿（做好了发你）。',
       execute: async ({ song: name, pitch, acapella, start_sec, duration_sec }) => {

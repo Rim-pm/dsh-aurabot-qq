@@ -11,6 +11,21 @@ import { askModel, canSeeImages } from '../core/llm.js'
 
 const dir = () => dataDir('stickers')
 const indexFile = () => join(dir(), 'index.json')
+
+/**
+ * 表情原件的体积上限。跟聊天收图用的 MAX_IMAGE_BYTES（src/chat/hub.js）取同一个量级：
+ * QQ 动图 5~15MB 很常见，1.2.0 说好了「图片不再限制 MB 大小」，收表情这条路不能还卡在 5MB。
+ * 所有入口（偷表情 / 工具存 / 工具加 / 从 QQ 导入）都必须用这一个值，否则同一张图
+ * 会出现「偷得到、存不进」「她看得见、说存不了」这种自相矛盾的表现（#332）。
+ */
+export const MAX_STICKER_BYTES = 1024 * 1024 * 1024
+
+/**
+ * 面板「上传」那一档单独放宽但另有上限：那条路是 JSON + base64（体积 ×1.33、整份在内存里），
+ * 跟 QQ 侧的下载链路不是一回事，不能照搬 1GB。这不是隐藏限制 —— 超了会明确告诉主人多大、上限多少。
+ */
+export const PANEL_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
+
 const ext = (mime) => ({ 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp' })[mime] || 'jpg'
 
 export const DEFAULT_TAGS = ['开心', '卖萌', '生气', '委屈', '无语', '嘲讽', '疑惑', '早晚安']
@@ -82,6 +97,22 @@ export function pickEvict(items) {
 export function createStickerStore({ dsh, getConfig, onebot, log }) {
   const recent = [] // 每小时限额
 
+  /** 有些 OneBot 网关把 add_custom_face 的 file 当本地路径，不认 base64://；先试 base64，再退回刚写下的本地路径。 */
+  async function addToQQ(buf, localPath, label = '') {
+    let last = null
+    for (const file of ['base64://' + buf.toString('base64'), localPath].filter(Boolean)) {
+      try {
+        const r = await onebot.call('add_custom_face', { file })
+        return String(r?.emoji_id || '')
+      } catch (error) {
+        last = error
+        if (!/ENAMETOOLONG|base64|stat|EINVAL/i.test(String(error?.message || ''))) break
+      }
+    }
+    log.debug('收藏到 QQ 失败（本地已留档' + (label ? '：' + label : '') + '）：', last?.message || '未知错误')
+    return ''
+  }
+
   /** 面板里给起名单独挑的模型；没挑（或者只填了一半）就返回 null = 跟随聊天用的模型。 */
   function captionModelOf(cfg = getConfig()) {
     const m = cfg && cfg.stickers && cfg.stickers.captionModel
@@ -138,7 +169,7 @@ export function createStickerStore({ dsh, getConfig, onebot, log }) {
     const d = seg.data || {}
     let buf
     try {
-      buf = await segmentBytes(seg, onebot, { maxBytes: 1024 * 1024 * 1024 })
+      buf = await segmentBytes(seg, onebot, { maxBytes: MAX_STICKER_BYTES })
     } catch (error) {
       return { ok: false, reason: '下载失败：' + error.message }
     }
@@ -158,12 +189,7 @@ export function createStickerStore({ dsh, getConfig, onebot, log }) {
     recent.push(now)
     // 收藏到 QQ
     if (!getConfig().dryRun) {
-      try {
-        const r = await onebot.call('add_custom_face', { file: 'base64://' + buf.toString('base64') })
-        item.emojiId = String(r?.emoji_id || '')
-      } catch (error) {
-        log.warn('收藏到 QQ 失败（本地已留档）：', error.message)
-      }
+      item.emojiId = await addToQQ(buf, join(dir(), file), '自动收藏')
     }
     lib.items.push(item)
     saveLibrary(lib)
@@ -229,12 +255,9 @@ export function createStickerStore({ dsh, getConfig, onebot, log }) {
     const { width, height } = imageSize(buf)
     const item = { md5, file, name: String(name).slice(0, 12), tags, from, at: Date.now(), width, height, bytes: buf.length, emojiId: '' }
     if (toQQ && !getConfig().dryRun) {
-      try {
-        const r = await onebot.call('add_custom_face', { file: 'base64://' + buf.toString('base64') })
-        item.emojiId = String(r?.emoji_id || '')
-        if (item.emojiId && item.name) await onebot.call('modify_custom_face', { emoji_id: item.emojiId, desc: item.name })
-      } catch (error) {
-        log.warn('收藏到 QQ 失败（本地已留档）：', error.message)
+      item.emojiId = await addToQQ(buf, join(dir(), file), '手动收藏')
+      if (item.emojiId && item.name) {
+        try { await onebot.call('modify_custom_face', { emoji_id: item.emojiId, desc: item.name }) } catch (error) { log.debug('收藏备注写回失败：', error.message) }
       }
     }
     lib.items.push(item)
@@ -341,7 +364,7 @@ export function createStickerStore({ dsh, getConfig, onebot, log }) {
       const named = []
       for (const url of urls) {
         let buf
-        try { buf = await fetchImage(url, { maxBytes: 1024 * 1024 * 1024 }) } catch (error) { failed++; continue }
+        try { buf = await fetchImage(url, { maxBytes: MAX_STICKER_BYTES }) } catch (error) { failed++; continue }
         const md5 = createHash('md5').update(buf).digest('hex')
         if (loadLibrary().items.some((i) => i.md5 === md5)) { existed++; continue }
         const r = await addFromBuffer(buf, { from: 'qq', toQQ: false })

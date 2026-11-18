@@ -302,7 +302,7 @@ export interface Api {
     modules: any
     root: string
     getConfig(): any
-    setConfig(cfg: any): any
+    setConfig(patch: Record<string, unknown>): any
   }
   /** DSH 给插件的 ctx：dsh.get('服务名') 拿 DSH 的任何服务 */
   dsh: any

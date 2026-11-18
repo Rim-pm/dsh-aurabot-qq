@@ -2,7 +2,7 @@
 // 导出 createMemoryStore 的返回值：add / addEvent / recall / list / contextFor / topicScore / consolidate ……
 // 别的模块（空间日记、B 站、翻唱）会往这里记她的经历；记忆模块关着时它们自己跳过。
 
-import { createMemoryStore, memoryLine, looksLikeRuleMemory, parseValidityDate, parseMemoryCommand } from '../../features/memory.js'
+import { createMemoryStore, memoryLine, looksLikeRuleMemory, parseValidityDate, parseMemoryCommand, NATIVE_MEMORY_VIEW } from '../../features/memory.js'
 export { looksLikeRuleMemory } from '../../features/memory.js'
 // 记忆星图：算法全在 memory-graph.js（原样搬自记忆中枢 0.9.2 的 graph.mjs，纯函数）。
 // 这里只用它的建边/布局/亮度和 tier 值域映射，不搬中枢的 assoc.mjs 和 pipeline.mjs。
@@ -10,7 +10,7 @@ import { buildEdges, layoutGraph3d, brightness, regionOf, FADING_THRESHOLD, LAYO
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { dataDir } from '../../core/store.js'
-import { personaScope, personaNow, personaDataDir, personaDataRoots } from '../../persona/personas.js'
+import { personaScope, personaNow, personaDataDir, personaDataRoots, readPersona, safeId } from '../../persona/personas.js'
 import { defineTool, str } from '../../tools/tools.js'
 
 /** 把「2026-03-05」或「2026-03-01..2026-03-31」解析成检索用的时间窗；裸的年月算整月。 */
@@ -36,7 +36,7 @@ export default {
   // 面板拆页后记忆有自己的页（beta 原先挂在心情页）
   tab: 'memory',
   files: ['features/memory.js', 'features/memory-rules.js', 'features/memory-store.js', 'features/memory-vector.js'],
-  setup(api, { fetchImpl } = {}) {
+  setup(api, { fetchImpl, registerNativePreview } = {}) {
     const { hub, http } = api.core
     // 每个人格一个记忆库，目录见 personas.js。同一个目录只开一个实例（老用户还没认领时大家共用根目录那一个）；
     // 库的每个方法都在调用它的人格下跑，里面读流水、取角色名都按这个人格，整理到一半切人格也不会串。
@@ -80,10 +80,15 @@ export default {
     const extra = { handleCommand, setNoMemory, closePersona }
     // 面板接口和别的模块（日记、B 站……）都用当前人格（定时任务、收消息时已固定）的记忆库
     const memory = new Proxy({}, {
-      get: (_, k) => extra[k] || current()[k],
-      has: (_, k) => k in extra || k in current(),
+      get: (_, k) => k === NATIVE_MEMORY_VIEW ? undefined : extra[k] || current()[k],
+      has: (_, k) => k !== NATIVE_MEMORY_VIEW && (k in extra || k in current()),
     })
     memory.list('') // 启动时完成旧 JSON 迁移，不必等第一条聊天或打开面板。
+    registerNativePreview?.(({ personaId, chatId }, page) => {
+      const cfg = api.config()
+      if (!cfg.memory.enabled) return null
+      return stores.get(personaDataDir(cfg, personaId))?.[NATIVE_MEMORY_VIEW](chatId, page) ?? null
+    })
 
     api.context(({ chat, sessionId }) => (chat.kind === 'system' ? '' : memoryOf(sessionId).contextFor(chat, sessionId)))
     // #79：随消息变化的相关记忆放在「交给她的内容」里，不放进每轮都会追加的运行时上下文快照
@@ -571,6 +576,53 @@ export default {
     api.route('/memory/import/commit', async (req) => {
       const n = memory.importCommit((await http.body(req)).items || [])
       return { ok: true, message: `存进记忆库 ${n} 条` }
+    })
+
+    // ---------- 记忆继承：当前人格从另一个人格继承记忆（见 features/memory-inherit.js） ----------
+    // 面板先要计划、再一批批请求（进度条按批走，失败只重试那一批），最后提交勾选的。
+    // 每一步都核对当前人格还是开始时那个：切了人格就作废，免得写进别的人格。
+    function inheritPair(b) {
+      const cfg = api.config()
+      const to = personaNow(cfg)
+      const from = safeId(b?.from)
+      if (b?.to !== undefined && safeId(b.to) !== to) return { ok: false, message: '人格已经切换了，请重新导入' }
+      if (!from || from === to || !readPersona(from)) return { ok: false, message: '选一个别的人格' }
+      if (personaDataDir(cfg, from) === personaDataDir(cfg, to)) return { ok: false, message: '根目录的数据还没认领，所有人格现在共用一份记忆，不用继承' }
+      return { ok: true, from, to }
+    }
+    const nameOf = (id) => readPersona(id)?.name || id
+    const tokensOf = (batches) => {
+      const asked = batches.filter((b) => b.kind !== 'diary')
+      const chars = asked.reduce((n, b) => n + b.records.reduce((m, r) => m + r.text.length + (r.note || '').length + 20, 0), 0)
+      return { calls: asked.length, tokens: Math.round((chars * 2.5 + asked.length * 2500) * 0.7) } // 粗估：输入 + 输出（改后文字和理由），中文约 0.7 token / 字
+    }
+    api.route('/memory/inherit/plan', async (req) => {
+      const pair = inheritPair(await http.body(req))
+      if (!pair.ok) return pair
+      const batches = storeOf(pair.from).inheritPlan()
+      if (!batches.length) return { ok: false, message: `「${nameOf(pair.from)}」还没有可以继承的记忆` }
+      return {
+        ok: true, from: pair.from, to: pair.to, fromName: nameOf(pair.from), toName: nameOf(pair.to),
+        records: batches.reduce((n, b) => n + b.records.length, 0), ...tokensOf(batches),
+        batches: batches.map(({ kind, label, part, parts, records }) => ({ kind, label, part, parts, count: records.length })),
+      }
+    })
+    api.route('/memory/inherit/batch', async (req) => {
+      const b = await http.body(req)
+      const pair = inheritPair(b)
+      if (!pair.ok) return pair
+      const batch = storeOf(pair.from).inheritPlan()[Number(b.index)]
+      if (!batch) return { ok: false, message: '来源人格的记忆变了，请重新导入' }
+      try {
+        const results = await storeOf(pair.from).inheritBatch(batch, { from: nameOf(pair.from), to: nameOf(pair.to), toBody: readPersona(pair.to)?.body || '' })
+        return { ok: true, kind: batch.kind, label: batch.label, part: batch.part, parts: batch.parts, results }
+      } catch (error) { return { ok: false, message: `${batch.label}这一批没整理成：${error.message}` } }
+    })
+    api.route('/memory/inherit/commit', async (req) => {
+      const b = await http.body(req)
+      const pair = inheritPair(b)
+      if (!pair.ok) return pair
+      return storeOf(pair.to).inheritCommit(storeOf(pair.from).inheritState(), Array.isArray(b.items) ? b.items : [], pair.from)
     })
     api.route('/style/save', async (req) => {
       const b = await http.body(req)

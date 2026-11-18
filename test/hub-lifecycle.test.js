@@ -583,3 +583,26 @@ test('敏感命令执行前发现授权代次已变化', async (t) => {
   assert.equal(executed, false)
 })
 
+
+test('用量接入：真实会话事件记一次，失败重试分别记，非 Aurabot 会话不记', async (t) => {
+  const s = setup(t)
+  const usage = await import('../src/core/usage.js')
+  usage.initUsage()
+  t.after(() => usage.closeUsage())
+  await s.hub.onMessage(event('建立用量测试会话'))
+  await settle()
+  const sid = s.hub.sessions()[CHAT]?.sessionId
+  assert.ok(sid)
+  const at = Date.now()
+  const e = { seq: 10000, time: at, type: 'assistant/attempt', data: { turn: 70, step: 0, usage: { inputTokens: 100, outputTokens: 10, cacheReadTokens: 800, cacheWriteTokens: 100 } } }
+  s.hub.onSessionEvent({ id: sid }, e)
+  s.hub.onSessionEvent({ id: sid }, e)
+  s.hub.onSessionEvent({ id: 'session-unrelated' }, e)
+  const read = () => usage.usageReport({ range: 'all' }).current
+  assert.equal(read().totalTokens, 1010)
+  assert.equal(read().byChat[0].key, CHAT)
+  s.hub.onSessionEvent({ id: sid }, { seq: 10001, time: at, type: 'llm/retry-started', data: { turn: 70, step: 0 } })
+  s.hub.onSessionEvent({ id: sid }, { ...e, seq: 10002 })
+  assert.equal(read().runs, 2)
+  assert.equal(read().totalTokens, 2020)
+})

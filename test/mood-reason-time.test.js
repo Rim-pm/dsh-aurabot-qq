@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createMood } from '../src/features/companion.js'
+import { createMood } from '../src/features/mood.js'
 import { normalize } from '../src/core/config.js'
 import { moodReason } from '../src/features/mood-context.js'
 import moodModule from '../src/modules/mood/index.js'
@@ -109,15 +109,15 @@ test('普通聊天和主动搭话共用有时效的心情提示，只放本轮�
     route: () => {},
     context: () => assert.fail('动态心情不得进入常驻上下文'),
   })
-  mood.nudge(30, '被主人夸了')
+  mood.nudge(30, '被主人夸了', 'private:10001')
   t.mock.timers.setTime(now + HOUR)
   for (const prompt of ['你好', '【系统提醒，不是主人说的话】想主动找主人说点什么']) {
     const content = [{ type: 'text', text: prompt }]
-    const result = handlers.get('prompt')(content, { chat: { kind: 'private' } })
+    const result = handlers.get('prompt')(content, { chat: { kind: 'private', chatId: 'private:10001' } })
     assert.match(result.at(-1).text, /1 小时前因为被主人夸了/)
     assert.equal(content.length, 1)
     t.mock.timers.setTime(now + 3 * HOUR)
-    assert.doesNotMatch(handlers.get('prompt')(content, { chat: { kind: 'private' } }).at(-1).text, /因为|被主人夸了/)
+    assert.doesNotMatch(handlers.get('prompt')(content, { chat: { kind: 'private', chatId: 'private:10001' } }).at(-1).text, /因为|被主人夸了/)
     t.mock.timers.setTime(now + HOUR)
   }
   const content = [{ type: 'text', text: '后台' }]

@@ -31,8 +31,8 @@ before(async () => {
   mkdirSync(join(dataDir, 'ws'), { recursive: true })
   mkdirSync(join(dataDir, 'personas'), { recursive: true })
   mkdirSync(join(dataDir, 'chatlog'), { recursive: true })
-  // 老版本留下的数据：主人当时已经切到翔子，但根目录里的东西主要是大肥鱼的
-  writeFileSync(join(dataDir, 'personas', 'shoko.md'), '---\nname: 翔子\ntags: []\n---\n\n你是牧之原翔子。\n')
+  // 老版本留下的数据：主人当时已经切到小星，但根目录里的东西主要是大肥鱼的
+  writeFileSync(join(dataDir, 'personas', 'xiaoxing.md'), '---\nname: 小星\ntags: []\n---\n\n你是小星。\n')
   writeFileSync(join(dataDir, 'memories.json'), JSON.stringify({ items: [{ id: 'old1', text: '主人喜欢吃辣', about: '', aboutName: '', importance: 0.6, source: 'panel', at: Date.now() }] }))
   writeFileSync(join(dataDir, 'sessions.json'), JSON.stringify({ chats: {} }))
   writeFileSync(join(dataDir, 'chatlog', '2026-01-01.jsonl'), JSON.stringify({ t: 1, chatId: `private:${OWNER}`, who: '主人', text: '老聊天' }) + '\n')
@@ -44,7 +44,7 @@ before(async () => {
     botQQ: BOT,
     ownerQQ: OWNER,
     allow: { private: [OWNER], groups: [] },
-    persona: { current: 'shoko' },
+    persona: { current: 'xiaoxing' },
     snowluma: { autoStart: false, autoAttach: false, httpUrl: mock.httpUrl, wsUrl: mock.wsUrl, httpToken: mock.token, wsToken: mock.token, dir: join(dataDir, 'no-snowluma') },
     voice: { engine: 'windows', autoChance: 0 },
     stickers: { autoChance: 0 },
@@ -73,7 +73,7 @@ async function say(t) {
 }
 const sessionsOf = (dir) => JSON.parse(readFileSync(join(dir, 'sessions.json'), 'utf8')).chats
 const memories = async () => (await fake.call('/memories')).json().items
-const shokoDir = (...parts) => join(dataDir, 'persona-data', 'shoko', ...parts)
+const xiaoxingDir = (...parts) => join(dataDir, 'persona-data', 'xiaoxing', ...parts)
 
 test('没认领时不自动认领，面板能看到待认领', async () => {
   assert.equal(api.getConfig().persona.dataOwner || '', '')
@@ -90,24 +90,24 @@ test('待认领期间和老版本一样：当前人格也用根目录', async ()
   assert.equal(entry.title, 'QQ · 主人私聊', '标题不变')
   pendingSession = entry.sessionId
   assert.ok((await memories()).some((m) => m.text === '主人喜欢吃辣'))
-  assert.equal(existsSync(shokoDir()), false)
+  assert.equal(existsSync(xiaoxingDir()), false)
 })
 
 test('认领前切换人格也要检查参数；认领不存在的人格被拒绝', async () => {
   assert.equal((await fake.call('/persona/data-owner', { id: 'nobody' })).json().ok, false)
 })
 
-test('认领给大肥鱼后：翔子换用自己的目录，根目录数据归大肥鱼', async () => {
+test('认领给大肥鱼后：小星换用自己的目录，根目录数据归大肥鱼', async () => {
   const r = (await fake.call('/persona/data-owner', { id: 'dafeiyu' })).json()
   assert.equal(r.ok, true, JSON.stringify(r))
   assert.equal(api.getConfig().persona.dataOwner, 'dafeiyu')
-  assert.equal(api.getConfig().persona.current, 'shoko', '认领不改当前人格')
+  assert.equal(api.getConfig().persona.current, 'xiaoxing', '认领不改当前人格')
   assert.equal((await fake.call('/personas')).json().claimPending, false)
-  assert.ok(!(await memories()).some((m) => m.text === '主人喜欢吃辣'), '翔子不再看到根目录的记忆')
-  await say('翔子来了')
-  assert.notEqual(sessionsOf(shokoDir())[`private:${OWNER}`].sessionId, pendingSession)
+  assert.ok(!(await memories()).some((m) => m.text === '主人喜欢吃辣'), '小星不再看到根目录的记忆')
+  await say('小星来了')
+  assert.notEqual(sessionsOf(xiaoxingDir())[`private:${OWNER}`].sessionId, pendingSession)
   assert.equal(sessionsOf(dataDir)[`private:${OWNER}`].sessionId, pendingSession, '根目录会话留给大肥鱼')
-  assert.equal((await fake.call('/persona/data-owner', { id: 'shoko' })).json().ok, false, '认领只能做一次')
+  assert.equal((await fake.call('/persona/data-owner', { id: 'xiaoxing' })).json().ok, false, '认领只能做一次')
 })
 
 test('切换人格不会冲掉认领结果', async () => {
@@ -119,9 +119,9 @@ test('切换人格不会冲掉认领结果', async () => {
 test('删除人格：正在用的人格换个写法也删不掉；可以连数据一起删，根目录不受影响', async () => {
   assert.equal((await fake.call('/persona/delete', { id: 'dafeiyu!' })).json().ok, false)
   assert.ok(existsSync(join(dataDir, 'personas', 'dafeiyu.md')))
-  const r = (await fake.call('/persona/delete', { id: 'shoko', withData: true })).json()
+  const r = (await fake.call('/persona/delete', { id: 'xiaoxing', withData: true })).json()
   assert.equal(r.ok, true, JSON.stringify(r))
-  assert.equal(existsSync(shokoDir()), false)
+  assert.equal(existsSync(xiaoxingDir()), false)
   assert.ok(existsSync(join(dataDir, 'sessions.json')))
   assert.ok(existsSync(join(dataDir, 'chatlog')))
 })

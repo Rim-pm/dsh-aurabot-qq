@@ -130,7 +130,7 @@ test('端到端：gate 档 + 策略源拒绝预算 → 模块发不出去', asyn
     hooks: { fsSync: false },
   })
   svc.registerPolicySource({
-    name: 'speakup',
+    name: 'purpose',
     state: () => 'ready',
     ready: () => true,
     reserve: () => ({ ok: false, reason: 'budget' }),
@@ -152,7 +152,7 @@ test('端到端：gate 档 + 策略源放行 → 正常发出', async (t) => {
     hooks: { fsSync: false },
   })
   svc.registerPolicySource({
-    name: 'speakup',
+    name: 'purpose',
     state: () => 'ready',
     ready: () => true,
     reserve: () => ({ ok: true, reserveId: 'r1' }),

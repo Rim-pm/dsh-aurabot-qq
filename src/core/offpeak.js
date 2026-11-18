@@ -104,3 +104,17 @@ export function shouldDeferBackground (cfg, now = new Date()) {
   const holidays = Array.isArray(cfg.cost.offPeakHolidays) ? cfg.cost.offPeakHolidays : []
   return isPeak(now, { holidays })
 }
+
+/**
+ * B 站「只在谷时刷」的跳过原因（纯函数，测试友好）。
+ * 开关关着 → ''（照常跑）；开着且现在是峰时 → 返回中文原因。
+ * 峰谷口径见本文件：北京时间工作日 09:00–12:00、14:00–18:00 为峰时，周末和法定节假日全天谷价。
+ * @param {object} cfg 插件配置
+ * @param {Date} [now]
+ * @returns {string}
+ */
+export function offpeakSkipReason (cfg, now = new Date()) {
+  if (cfg?.bili?.offpeak !== true) return ''
+  const holidays = Array.isArray(cfg?.cost?.offPeakHolidays) ? cfg.cost.offPeakHolidays : []
+  return isPeak(now, { holidays }) ? '峰时（北京时间工作日 09:00–12:00、14:00–18:00），等谷时再刷' : ''
+}

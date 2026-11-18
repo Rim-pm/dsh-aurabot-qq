@@ -8,6 +8,8 @@ import * as config from '../../src/core/config.js'
 import * as llm from '../../src/core/llm.js'
 import * as img from '../../src/core/img.js'
 import * as net from '../../src/core/net.js'
+import * as offpeak from '../../src/core/offpeak.js'
+import * as timeWindow from '../../src/core/time-window.js'
 import * as reply from '../../src/chat/reply.js'
 import * as sessionBackoff from '../../src/chat/session-backoff.js'
 import * as tools from '../../src/tools/tools.js'
@@ -18,6 +20,8 @@ const libs = {
   'core/llm.js': llm,
   'core/img.js': img,
   'core/net.js': net,
+  'core/offpeak.js': offpeak,
+  'core/time-window.js': timeWindow,
   'chat/reply.js': reply,
   'chat/session-backoff.js': sessionBackoff,
   'tools/tools.js': tools,

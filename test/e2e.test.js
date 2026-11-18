@@ -820,13 +820,12 @@ test('面板接口：token 用量（今日 / 昨日 / 近 7 天 / 近 30 天 + �
     assert.equal(typeof r.totalTokens, 'number', key + ' 要有合计 token')
     assert.equal(typeof r.promptTokens, 'number', key + ' 要有输入 token')
     assert.equal(typeof r.cachedTokens, 'number', key + ' 要有缓存命中 token')
-    assert.equal(typeof r.cost, 'number', key + ' 要有花费')
+    assert.equal(r.cost, null, key + ' 未确认渠道价格，不冒充零费用')
   }
   assert.equal(u.ranges.last30.runs >= u.ranges.last7.runs, true, '近 30 天不会比近 7 天少')
   assert.ok(u.current, '要带所选区间的明细')
   for (const dim of ['byModule', 'byChat', 'byModel']) assert.ok(Array.isArray(u.current[dim]), dim + ' 要是个列表')
-  assert.equal(typeof u.current.cacheHitRate, 'number')
-  assert.equal(typeof u.current.peakRatio, 'number')
+  assert.ok(u.current.cacheHitRate === null || typeof u.current.cacheHitRate === 'number')
   // ?range= 决定 current 是哪个区间（面板点指标卡就是切这个）
   const today = (await fake.call('/usage?range=today')).json()
   assert.equal(today.range, 'today')
@@ -854,9 +853,9 @@ test('用量归属：聊天里让她刷 B 站，处理工具结果那次调用�
   const biliBefore = runsOf(before, '刷 B 站')
 
   // 这一轮：她调 bili_watch（step 1），然后处理看回来的内容（step 2，带 usage）
-  fake.emit('session/event', sess, { type: 'tool/call', data: { turn: 9001, step: 1, callId: 'c1', name: 'bili_watch', arguments: '{"link":"BV1xx"}' } })
+  fake.emit('session/event', sess, { seq: 90010, time: Date.now(), type: 'tool/call', data: { turn: 9001, step: 1, callId: 'c1', name: 'bili_watch', arguments: '{"link":"BV1xx"}' } })
   fake.emit('session/event', sess, {
-    type: 'assistant/message',
+    seq: 90011, type: 'assistant/message',
     time: Date.now(),
     data: {
       turn: 9001,
@@ -875,9 +874,9 @@ test('用量归属：聊天里让她刷 B 站，处理工具结果那次调用�
   const mid = await read()
   const chat2 = runsOf(mid, '聊天')
   const bili2 = runsOf(mid, '刷 B 站')
-  fake.emit('session/event', sess, { type: 'tool/call', data: { turn: 9002, step: 1, callId: 'c2', name: 'qq_send_message', arguments: '{}' } })
+  fake.emit('session/event', sess, { seq: 90020, time: Date.now(), type: 'tool/call', data: { turn: 9002, step: 1, callId: 'c2', name: 'qq_send_message', arguments: '{}' } })
   fake.emit('session/event', sess, {
-    type: 'assistant/message',
+    seq: 90021, type: 'assistant/message',
     time: Date.now(),
     data: {
       turn: 9002,
