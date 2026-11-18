@@ -13,7 +13,9 @@
     "./package.json": "./package.json"
   },
   "scripts": {
-    "test": "node --test \"test/**/*.test.js\" \"extensions/**/*.test.mjs\""
+    "test": "node --test \"test/**/*.test.js\" \"extensions/**/*.test.mjs\"",
+    "lint": "node --experimental-vm-modules --no-warnings scripts/lint.js",
+    "check": "npm run lint && npm test"
   },
   "dsh": {
     "bundle": {
