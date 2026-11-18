@@ -66,7 +66,20 @@ export default {
     })
     // P4：接住原 speakup 壳的「网关未连接不空跑」守卫（scheduler-gateway-idle.test.js 锁的行为）——
     // 网关没连上时 tick 跑了只会白白触发请求和日志（小闹钟触发也走 pushToSession → 网关）。
-    api.every(60_000, () => (api.core.onebot?.state && api.core.onebot.state !== 'connected' ? undefined : purpose.tick()), '目的引擎')
+    // 守卫要网关感知（与 bili 同款）：先看多平台网关的实例状态（飞书等平台在跑时不该被
+    // QQ onebot 的状态一票否决），没有网关实例再回落 QQ onebot 状态。
+    // 背景（2026-11-18 实测报障）：裸读 api.core.onebot.state 在「宿主直连 QQ」+
+    // 多平台配置共存（platforms 里 qq 显式 disabled、别的实例键存在）时，部分宿主版本
+    // 的模块作用域会把这个快照判成 stopped —— 网关明明连着，定时任务却被静默跳过，
+    // 且不打任何日志（状态文件不写、日志零记录），用户看到的就是「到点不来找」。
+    const gatewayIdle = () => {
+      const insts = api.core.gateway?.instances?.()
+      if (Array.isArray(insts) && insts.some((s) => s?.enabled && s.caps !== null)) {
+        return !insts.some((s) => s?.enabled && s.state === 'connected')
+      }
+      return Boolean(api.core.onebot?.state && api.core.onebot.state !== 'connected')
+    }
+    api.every(60_000, () => (gatewayIdle() ? undefined : purpose.tick()), '目的引擎')
     // ---------- 她的小闹钟（P2b 自 speakup 迁入，Q2 拍板） ----------
     // 工具常驻在主人私聊里；「小闹钟」开关（speakUp.reminderEnabled，键冻结 Q3 口径）关着时
     // 执行层如实拒绝。数据兼容读旧 speakup-reminders.json、新写 purpose/reminders.json。
