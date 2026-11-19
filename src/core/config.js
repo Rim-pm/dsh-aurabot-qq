@@ -1356,6 +1356,10 @@ export function commitConfig(cfg, previous = loadConfig()) {
 export function publicConfig(cfg) {
   const c = structuredClone(cfg)
   maskPools(c.voice?.keyPools)
+  // vector.mode 回传面板（#520）：面板切到「在线服务」后重载又回退「本地模型」。
+  // 现在 mode 是 normalize 里直接赋值的常规字段，structuredClone 已能带上；这行留着兜住
+  // 旧配置里从派生值过来的情形，不额外造字段。
+  if (c.memory?.vector && cfg?.memory?.vector?.mode) c.memory.vector.mode = cfg.memory.vector.mode
   delete c.ownerAuthorization
   // 面板上的「试运行」只表示「试运行但不调试」：调试开着时它显示为关
   c.dryRun = Boolean(c.dryRun && !c.debug)
