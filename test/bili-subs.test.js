@@ -214,6 +214,43 @@ test('订阅：一次最多推 subMaxPerPoll 条（推最新的几条）', async
   assert.equal(engine.list()[0].cursor, '105')
 })
 
+test('订阅：推送发送失败时不推进游标，下一轮补发，不吞动态', async () => {
+  reset()
+  let items = [item('100')]
+  let broken = false
+  const state = { cfg: normalize({ enabled: true, dryRun: false, ownerQQ: '10000001', bili: { enabled: true, subs: [{ mid: '161775300', name: 'A' }], subGapSec: 0 } }) }
+  const sent = []
+  const engine = dyn.createSubs({
+    getConfig: () => state.cfg,
+    setConfig: (fn) => { state.cfg = normalize(typeof fn === 'function' ? fn(state.cfg) : fn) },
+    hub: {
+      sendText: async (to, text) => {
+        if (broken) throw new Error('网关挂了')
+        sent.push({ to, text })
+        return { message_id: '1' }
+      },
+      sendImage: async () => ({ message_id: '2' }),
+    },
+    log: { info() {}, warn() {}, debug() {} },
+    api: { dynamicFeed: async () => items, card: async (mid) => ({ mid, name: 'A' }), searchUser: async () => [], dynamicAuthor: async () => ({ mid: '161775300', name: 'A' }) },
+    sleep: async () => {},
+  })
+  await engine.poll({ force: true })
+  assert.equal(engine.list()[0].cursor, '100')
+
+  broken = true
+  items = [item('101', '重要公告'), item('100')]
+  const bad = await engine.poll({ force: true })
+  assert.equal(bad.pushed, 0)
+  assert.equal(engine.list()[0].cursor, '100', '没发出去就不能推进游标，否则这条动态永远丢了')
+
+  broken = false
+  const retry = await engine.poll({ force: true })
+  assert.equal(retry.pushed, 1, '下一轮要补发')
+  assert.match(sent.at(-1).text, /重要公告/)
+  assert.equal(engine.list()[0].cursor, '101')
+})
+
 test('订阅：试运行只记日志，不发消息', async () => {
   reset()
   let items = [item('100')]
