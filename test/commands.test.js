@@ -25,6 +25,41 @@ test('解析：英文、中文别名、全角斜杠、中文命令不加空格',
   assert.equal(parseCommand('在吗'), null)
 })
 
+// 模块命令（尤其单字中文命令）不能把更长的内置命令前缀吃掉：
+// 「/记住我不吃香菜」同时是模块「记」和内置「记住」的前缀，按最长匹配走内置。
+const extCommands = () => [
+  { name: '身体', aliases: ['身体状态'], module: 'real-life' },
+  { name: '身体测试', aliases: ['真人测试'], module: 'real-life' },
+  { name: '本子', module: 'little-notes' },
+  { name: '记', module: 'little-notes' },
+  { name: '翻', module: 'little-notes' },
+  { name: '天气', aliases: ['tq'], module: 'weather' },
+]
+
+test('解析：模块命令和内置命令的中文前缀按最长匹配，内置不被单字模块命令吃掉', () => {
+  const extra = extCommands()
+  assert.deepEqual(parseCommand('/记住我不吃香菜', extra), { name: 'remember', arg: '我不吃香菜' })
+  assert.deepEqual(parseCommand('/记一下 明天买菜', extra), { name: 'remember', arg: '明天买菜' })
+  assert.deepEqual(parseCommand('/翻唱 晴天', extra), { name: 'sing', arg: '晴天' })
+  assert.deepEqual(parseCommand('/身体测试 经期1', extra), { name: '身体测试', arg: '经期1', ext: extra[1] })
+  assert.deepEqual(parseCommand('/身体', extra), { name: '身体', arg: '', ext: extra[0] })
+  assert.deepEqual(parseCommand('/身体状态', extra), { name: '身体', arg: '', ext: extra[0] })
+  // 模块自己的前缀匹配仍然可用
+  assert.deepEqual(parseCommand('/记 买菜', extra), { name: '记', arg: '买菜', ext: extra[3] })
+  assert.deepEqual(parseCommand('/翻 快递', extra), { name: '翻', arg: '快递', ext: extra[4] })
+  assert.deepEqual(parseCommand('/天气北京', extra), { name: '天气', arg: '北京', ext: extra[5] })
+  // 没有模块时行为不变
+  assert.deepEqual(parseCommand('/记住我不吃香菜'), { name: 'remember', arg: '我不吃香菜' })
+  assert.deepEqual(parseCommand('/翻唱 晴天'), { name: 'sing', arg: '晴天' })
+})
+
+test('解析：和内置同名的模块命令仍然优先（文档承诺的覆盖行为）', () => {
+  const extra = [{ name: 'status', desc: '假的', module: 'fake' }, { name: '状态', module: 'fake2' }]
+  assert.equal(parseCommand('/status', extra).ext.module, 'fake')
+  assert.equal(parseCommand('/状态', extra).ext.module, 'fake2')
+  assert.deepEqual(parseCommand('/state'), null, '不存在的命令仍然返回 null')
+})
+
 function deps() {
   let cfg = normalize({ enabled: true, ownerQQ: '10000001', allow: { groups: ['555'] } })
   const calls = []

@@ -8,7 +8,7 @@
 2. 五个模块的 `api: 1`、`minPluginVersion: 1.2.0`、`requires: []`（无硬依赖），本机 `1.3.0-beta.2` 全部满足。
 3. 本地 zip 的 sha256 与 registry `index.json` 一致，可放心从市场装（见附录 A）。
 4. **风险按影响面排序**：`real-life`（接管 message + 拦截 send）> `love-mode`（无开关 + 每轮一次 `api.ask`）> `little-notes`（两个定时器各调 `api.think` + 主动发消息）> `meme-wiki`（外网同步 + `node:sqlite`）> `livin`（默认关，零行为）。
-5. **有一个必须先决策的问题**：装上 `little-notes` 后，内置命令 `/记住`、`/翻唱` 会被模块命令劫持（详见第四节）。这是 `parseCommand` 的既有优先级问题，不是模块的错。
+5. **命令前缀冲突已修**：`little-notes` 的 `/记`、`real-life` 的 `/身体` 原本会吃掉内置 `/记住`、`/翻唱`、`/身体测试`；`parseCommand` 已改成按最长匹配（详见第四节）。
 
 ## 二、为什么装模块不产生仓库 diff
 
@@ -82,9 +82,9 @@
 - 5 个命令 + 别名，3 个工具（`real_life_status` / `real_life_interact` / `real_life_routine`），7 条 route。
 - 可选 `api.use('mood')` / `('memory')`，缺失时降级。
 
-## 四、必须先决策：命令前缀劫持
+## 四、命令前缀劫持（已修）
 
-`src/chat/commands.js:21` 先遍历模块命令（`extra`），再查内置 `ALIASES` / `COMMANDS`；而且模块命令的「中文前缀匹配」在内置命令之前生效。实测（`parseCommand` 直接调用）：
+`src/chat/commands.js` 原来先遍历模块命令（含中文前缀匹配），再查内置 `ALIASES` / `COMMANDS`。实测装上 `little-notes` + `real-life` 后：
 
 ```
 /记住我不吃香菜  -> 记 [little-notes] arg="住我不吃香菜"      # 应为内置 remember
@@ -93,15 +93,15 @@
 /身体测试 经期1   -> 身体 [real-life] arg="测试 经期1"         # 应为 身体测试
 ```
 
-也就是说：装上 `little-notes` 会吃掉 `/记住` 和 `/翻唱` 两个高频内置命令；装上 `real-life` 后 `/身体测试` 会被 `/身体` 前缀吃掉。
+**已修**：`parseCommand` 的优先级改成「保留命令 → 模块精确命中 → 内置精确命中 → 中文前缀命中」，且前缀阶段把模块和内置放在一起**按最长匹配**取胜。这样：
 
-三个选项：
+- 和内置同名的模块命令仍然优先（`API.md` 的承诺不变）；
+- `/记住我不吃香菜` 命中内置 `记住`（2 字）而不是模块 `记`（1 字）；
+- `/身体测试 经期1` 命中模块 `身体测试` 而不是 `身体`；
+- 模块自己的前缀写法 `/记 买菜`、`/天气北京` 照常可用。
 
-1. **改 `parseCommand`：让内置精确匹配优先于模块前缀匹配**。最小改动、不动第三方模块，但要新增测试并说明是有意改变优先级。
-2. **只在文档里写明**，让用户改用 `/记住 我不吃香菜`（带空格）——不行，带空格时 `word` 仍是 `记住`，模块的 `names.includes('记住')` 不匹配，但前缀匹配 `记` 仍命中。**这个办法无效**。
-3. **改模块命令名**（把 `记` 改成 `小本`）：要 fork 第三方模块，违背「模块不进仓库」的约定，还得跟上游。
+配套改动：`src/modules/API.md` 的命令行说明补了最长匹配的规则，`test/commands.test.js` 新增两组用例（含「没有模块时行为不变」和「同名模块仍然优先」的回归）。
 
-建议选 1，但这是内核行为变更，需要单独一个 PR，不和「装模块」混在一起。
 
 ## 五、落地顺序（按爆炸半径）
 
@@ -110,7 +110,7 @@
 | 0 | 无（准备沙箱） | `AURABOT_DATA_DIR` 指向临时目录，先确认能起来 |
 | 1 | `livin` | 默认关，装上后除面板多一页外零行为；验证模块加载、面板渲染、`/modules` 列表 |
 | 2 | `meme-wiki` | 只读注入 + 只记 `lastText`，不接管消息；验证 `node:sqlite`、首次同步、`/梗`、聊天页嵌入 |
-| 3 | `little-notes` | 有主动发消息和定时 `api.think`，但可单独关 `nightlyTidy` / `dueRemind`；同时验证第四节命令劫持 |
+| 3 | `little-notes` | 有主动发消息和定时 `api.think`，但可单独关 `nightlyTidy` / `dueRemind`；顺带回归第四节修好的命令匹配 |
 | 4 | `love-mode` | 无开关，装上即每轮私聊多一次 `api.ask`；验证 token 消耗与降级路径 |
 | 5 | `real-life` | 唯一接管 message + 拦截 send；放最后，且先 `/身体测试` 走一遍状态机再放真实聊天 |
 
@@ -145,7 +145,7 @@
 
 - [ ] `/记 明天下午三点取快递` 能记上，`/本子` 能翻到
 - [ ] 先关 `nightlyTidy` 与 `dueRemind`，确认夜间不会主动发消息
-- [ ] **回归第四节**：`/记住我不吃香菜` 是否仍走内置 `remember`
+- [ ] **回归第四节**：`/记住我不吃香菜` 走内置 `remember`、`/记 买菜` 走模块
 - [ ] 打开 `dueRemind` 后，到期条目在次日 8 点后被提起
 
 阶段 4 `love-mode`：
@@ -163,7 +163,7 @@
 - [ ] `/身体测试 深睡` 后确认 `purpose` 的主动搭话被拦截（`api.on('send')` 返回 `null`）
 - [ ] `/投喂 红糖姜茶 热 一份` 数值变化正确
 - [ ] `/改状态 饥饿=80` 生效
-- [ ] **回归第四节**：`/身体测试` 是否被 `/身体` 吃掉
+- [ ] **回归第四节**：`/身体测试 经期1` 走模块 `身体测试` 而不是 `身体`
 
 ## 七、分支策略
 
@@ -177,7 +177,7 @@
 
 - **一条**分支承载「文档 + 冒烟脚本 + 踩坑」，命名 `feat/private-mods-compat`，本文档就在这条线上。
 - 真正隔离用 `AURABOT_DATA_DIR`：`$env:AURABOT_DATA_DIR = 'E:\scratch\tmp\aurabot-sandbox'`，把 `modules/` 与 `modules-data/` 拷进去，随便折腾，不影响本机真实数据。
-- **只有**某个模块需要改内核时才单独开分支（例如第四节 `parseCommand` 的优先级修复 → `fix/command-priority`；如果以后要修 `love-mode` 的 `dafeiyu.md` 硬编码，那是 fork 模块，不进本仓库）。
+- **只有**某个模块需要改内核时才单独开分支（`parseCommand` 的最长匹配修复就是这么做的，分支 `fix/command-priority`；如果以后要修 `love-mode` 的 `dafeiyu.md` 硬编码，那是 fork 模块，不进本仓库）。
 
 ## 八、回滚
 
