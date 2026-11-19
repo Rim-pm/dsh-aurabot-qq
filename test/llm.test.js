@@ -140,3 +140,37 @@ test('温度参数被模型明确拒绝：去掉 temperature 重试一次并缓�
   await askModel(dsh, { cfg: CFG, text: '在吗' })
   assert.equal('temperature' in calls[before], false, '同模型后续直接不带温度')
 })
+
+test('signal：透传给 llm.stream，取消后不再重试', async () => {
+  clearReasoningCache()
+  const ctrl = new AbortController()
+  let n = 0
+  const { dsh, calls } = fakeDsh({
+    reasoning: null,
+    stream: async function * (params) {
+      n++
+      // 第一次返回空输出（平时会触发放宽重试），但这次已经被取消，不能再试
+      ctrl.abort()
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    },
+  })
+  const text = await askModel(dsh, { cfg: CFG, text: '在吗', signal: ctrl.signal })
+  assert.equal(text, '')
+  assert.equal(calls[0].signal, ctrl.signal, 'signal 要一路透传给底层 stream')
+  assert.equal(n, 1, '取消之后不能放宽预算重试')
+})
+
+test('signal：流里报错时如果已取消，直接抛出去，不再降级重试', async () => {
+  clearReasoningCache()
+  const ctrl = new AbortController()
+  const { dsh, calls } = fakeDsh({
+    reasoning: { efforts: [{ id: 'low' }], defaultEffort: 'low' },
+    stream: async function * () {
+      ctrl.abort()
+      yield { type: 'finish', reason: { kind: 'error', failure: { code: 'UNSUPPORTED_REASONING_EFFORT', message: 'does not support reasoning effort' } } }
+    },
+  })
+  await assert.rejects(() => askModel(dsh, { cfg: CFG, text: '在吗', signal: ctrl.signal }), /模型报错|请求已取消/)
+  assert.equal(calls.length, 1, '取消了就别再发一次不带档位的请求')
+})
+

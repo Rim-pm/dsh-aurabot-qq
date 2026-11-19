@@ -147,6 +147,15 @@ const isUnsupportedTemperature = (error) => {
   return /unsupported parameter[^\n]*temperature|temperature[^\n]*(?:not supported|unsupported|does not support)/i.test(msg)
 }
 
+/** 中断时统一造一个错误：上层按 message 区分「被取消」和「模型报错」。 */
+const abortError = (signal) => {
+  const error = new Error('请求已取消')
+  error.name = 'AbortError'
+  error.code = 'ABORT_ERR'
+  if (signal && signal.reason) error.reason = signal.reason
+  return error
+}
+
 /** 最近一次模型一个字没写时流里有什么：排查「模型没返回内容」用。 */
 let lastEmpty = ''
 export const lastEmptyInfo = () => lastEmpty
@@ -181,7 +190,7 @@ async function runStream (llm, params, onUsage) {
 
 /**
  * @param {object} dsh 宿主 ctx
- * @param {{system:string, text:string, images?:Array<{data:string, mediaType:string}>, maxTokens?:number, temperature?:number, reasoningEffort?:string, cfg?:object, model?:{provider:string, model:string}}} o
+ * @param {{system:string, text:string, images?:Array<{data:string, mediaType:string}>, maxTokens?:number, temperature?:number, reasoningEffort?:string, cfg?:object, model?:{provider:string, model:string}, signal?:AbortSignal}} o
  * @returns {Promise<string>}
  */
 export async function askModel (dsh, o) {
@@ -212,23 +221,31 @@ export async function askModel (dsh, o) {
     // 固定值即可：它只用来让上游把同一来源的请求归到一条路由上。
     sessionId: o.sessionId || 'aurabot-background',
   }
+  // 调用方给了中断信号就一路透传：超时 / 取消时真的把底层请求掐掉，
+  // 否则只是外层 reject，流还在后台继续烧 token
+  if (o.signal) base.signal = o.signal
   let temperature = o.temperature ?? 0.3
   let effort = await pickReasoningEffort(dsh, t.provider, t.model, o.reasoningEffort === undefined ? 'low' : o.reasoningEffort)
   let widened = false
   let temperatureTried = false
   // 记用量：模块名由调用方给（模块 API 会自动带上自己的 id），没给就算后台任务
   const onUsage = (usage) => recordUsage({ module: moduleLabel(o.module || 'background'), provider: t.provider, model: t.model, usage })
+  const aborted = () => Boolean(o.signal && o.signal.aborted)
   for (let attempt = 0; ; attempt++) {
+    // 已经中断了就别再开下一轮：重试只会让被取消的请求又跑一遍
+    if (aborted()) throw abortError(o.signal)
     const params = { ...base }
     if (temperature !== undefined && !temperatureUnsupported(t.provider, t.model)) params.temperature = temperature
     if (effort) params.reasoningEffort = effort
     try {
       const out = await runStream(llm, params, onUsage)
       // 推理模型可能把输出预算全花在思考上，一个字没写：放宽预算再试一次
-      if (out || widened) return out
+      if (out || widened || aborted()) return out
       widened = true
       base.maxTokens = Math.max(base.maxTokens, Math.min(4000, base.maxTokens * 3))
     } catch (error) {
+      // 被中断了就直接抛：不要再降级重试，那等于把已经取消的请求重新发一遍
+      if (aborted()) throw error
       // 能力探测没查到 / 模型临时不认：去掉思考强度再来一次
       if (!temperatureTried && temperature !== undefined && isUnsupportedTemperature(error)) {
         temperatureTried = true
