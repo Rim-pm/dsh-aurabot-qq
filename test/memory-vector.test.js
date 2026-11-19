@@ -44,7 +44,9 @@ const items = () => [
 
 test('默认开着本地模型，配置不全时不请求；密钥遮罩并在面板保存时保留', async (t) => {
   const s = setup(t)
-  // beta 1.3 起向量默认关、provider 可配；mode 是派生值（不可枚举），单独断言
+  // beta 1.3 起向量默认关、provider 可配
+  // mode 是派生值（不可枚举，见 config.js 的 defineProperty）：它不进这份形状比对，
+  // 免得升级兼容要求把它写进配置文件后变成「用户显式选择」（#520）。下一行单独断言它的值。
   assert.deepEqual(normalize({}).memory.vector, {
     enabled: false,
     provider: 'siliconflow',
