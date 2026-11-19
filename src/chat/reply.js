@@ -228,6 +228,23 @@ function silenceMarkRanges(text) {
 // 只删闭合标签，<poke> 原样留给 parseReply 触发真戳一戳。
 const POKE_CLOSE_TAG = /[ \t]*<\s*\/\s*poke\s*>[ \t]*/gi
 
+// 目的引擎内部备忘（【目的】【需求】【情绪】【感受】【类型】【状态】【待续】【持续】）。
+// #446 之后目的回合直接在她的聊天会话里跑，提示词模板和带备忘的回答会留在会话历史里；
+// 之后普通回复模型照猫画虎也写备忘，而普通回复不走目的模块的 cleanReply——
+// 所以统一出站清洗必须自己兜底（2026-11-19 实测：对方都看见「状态栏」并问起来了）。
+// 判据要保守：正文里出现 ≥2 个不同备忘头才当备忘块（只出现 1 个可能是真在聊「目的」二字），
+// 命中就从第一个备忘头连到消息末尾整段删（备忘永远在回答末尾）。
+const MEMO_HEADER = /[【\[]\s*(?:目的|需求|情绪|感受|类型|状态|待续|持续)\s*[】\]]/g
+
+/** 收集目的引擎备忘块的删除区间：≥2 个备忘头时，从第一个头删到末尾；不足 2 个不动。 */
+function memoLeakRanges(raw) {
+  const text = String(raw || '')
+  const hits = []
+  for (const m of text.matchAll(MEMO_HEADER)) hits.push({ start: m.index, end: m.index + m[0].length })
+  if (hits.length < 2) return []
+  return [{ start: hits[0].start, end: text.length }]
+}
+
 /** 收集 poke 闭合标签的删除区间；统一出站清洗和 parseReply 共用。 */
 function pokeCloseTagRanges(text) {
   const ranges = []
@@ -545,8 +562,9 @@ export function cleanOutboundText(text, { warn, promptSources, fingerprint, user
   // 模型自己编的格式化聊天记录同样不是提示词复读，按整行删除，避免冒充「对方发言」。
   const recordRanges = [...chatRecordRanges(raw), ...memoryTranscriptRanges(raw)]
   const pokeRanges = pokeCloseTagRanges(raw)
+  const memoRanges = memoLeakRanges(raw)
   const noiseCount = toolRanges.length + contextRanges.length + htmlCuts.length
-  const tools = [...toolRanges, ...contextRanges, ...silence, ...stateRanges, ...recordRanges, ...pokeRanges]
+  const tools = [...toolRanges, ...contextRanges, ...silence, ...stateRanges, ...recordRanges, ...pokeRanges, ...memoRanges]
     .sort((a, b) => a.start - b.start || b.end - a.end)
   const baseRanges = mergeRanges([...tools, ...htmlCuts, ...mediaCuts])
   const toolClean = withoutToolRanges(raw, baseRanges)
