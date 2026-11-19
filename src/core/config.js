@@ -414,6 +414,8 @@ export const DEFAULTS = {
     gistEnabled: true, gistDays: 180, impressionDays: 365, gistDailyBatches: 6, tierDays: { ...DEFAULT_TIER_DAYS },
     extractIdleMinutes: 30, extractMinLines: 20, extractDailyBatches: 24, capacity: { auto: 2000, event: 600, diary: 400 }, eventExpireDays: 90, vector: {
       enabled: false,
+      // mode 不写进 DEFAULTS：它是派生值（见下方 normalize 的 defineProperty），
+      // 写进来会变成「用户显式选择」，害得老客户端只传地址时切不到在线服务（#520）。
       // provider 只影响面板预置的地址/模型；请求统一走 OpenAI 兼容的 {baseUrl}/embeddings
       provider: 'siliconflow',
       baseUrl: '',
@@ -1014,13 +1016,18 @@ export function normalize(raw) {
   const declaredMode = String(rawVec.mode || '').trim().toLowerCase()
   // mode 是**派生值**（本地小模型 / 在线服务），不是用户直接填的配置项：
   // 定义成不可枚举属性，这样 Object.entries / deepEqual 看不到它（升级兼容测试要求
-  // 配置结构和 DEFAULTS 完全一致），但 cfg.memory.vector.mode 仍能正常读。
+  // 配置结构和 DEFAULTS 完全一致），也不会被写进配置文件「变成用户显式选择」，
+  // 但 cfg.memory.vector.mode 仍能正常读（#520 与 #527 两处都按这个口径）。
+  const explicitMode = declaredMode === 'remote' || declaredMode === 'local'
   Object.defineProperty(vector, 'mode', {
-    value: declaredMode === 'remote' || declaredMode === 'local' ? declaredMode : (vector.baseUrl ? 'remote' : 'local'),
+    value: explicitMode ? declaredMode : (vector.baseUrl ? 'remote' : 'local'),
     enumerable: false,
     writable: true,
     configurable: true,
   })
+  // 区分「用户明确选了 local/remote」和「没写 mode、按 baseUrl 推出来的默认」。
+  // 前者在 partial 保存时必须保留；后者要让老客户端只传 baseUrl 仍能切到 remote（#520 兼容）。
+  Object.defineProperty(vector, 'modeExplicit', { value: explicitMode, enumerable: false, writable: true, configurable: true })
   if (!isObj(c.memory.rerank)) c.memory.rerank = structuredClone(DEFAULTS.memory.rerank)
   const rerank = c.memory.rerank
   rerank.enabled = bool(rerank.enabled, false)
@@ -1337,7 +1344,7 @@ export function saveConfig(cfg, previous = loadConfig()) {
   const input = (() => {
     const hasMode = cfg?.memory?.vector && Object.hasOwn(cfg.memory.vector, 'mode')
     const prevMode = previous?.memory?.vector?.mode
-    if (hasMode || !prevMode) return cfg
+    if (hasMode || !prevMode || previous?.memory?.vector?.modeExplicit !== true) return cfg
     return { ...(cfg || {}), memory: { ...(cfg?.memory || {}), vector: { ...(cfg?.memory?.vector || {}), mode: prevMode } } }
   })()
   const c = normalize(input)
@@ -1404,7 +1411,9 @@ export function mergeFromPanel(current, incoming) {
   // 面板局部保存不带 vector 时用上一份 mode 补回，否则 baseUrl 会把用户选中的 local
   // 在 normalize 里重新推成 remote（#520）。
   const incomingMode = incoming?.memory?.vector?.mode
-  const keepMode = incomingMode === 'local' || incomingMode === 'remote' ? incomingMode : current?.memory?.vector?.mode
+  const keepMode = incomingMode === 'local' || incomingMode === 'remote'
+    ? incomingMode
+    : (current?.memory?.vector?.modeExplicit === true ? current.memory.vector.mode : '')
   if (next.memory?.vector && keepMode) next.memory.vector.mode = keepMode
   // 面板明确带了非空 chatEfforts（面板上改过单个聊天的档位）就以面板为准；
   // 没带或带的是空对象（旧版面板 / 面板没动过）时保留当前值——QQ 里 /effort 设过的不被清掉。
