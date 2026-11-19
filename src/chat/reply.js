@@ -10,7 +10,7 @@
 //   - 整轮只输出 `[沉默]`（或空）= 这次不说话（群聊插话用）
 // 另外顺手把模型偶尔漏出来的 Markdown 洗掉——QQ 不渲染 Markdown。
 
-import { chatRecordRanges, contextInjectionRanges, currentPromptSources, memoryTranscriptRanges, promptFingerprint, promptTextRanges } from '../security/leak-guard.js'
+import { chatRecordRanges, contextInjectionRanges, currentPromptSources, imageHandleRanges, memoryTranscriptRanges, promptFingerprint, promptTextRanges } from '../security/leak-guard.js'
 import { stripWrapMarkers } from './wrap-up.js'
 import { stripMarkers } from './reply-marker.js'
 import { stripHtmlFragments, fenceRanges } from './html-fragments.js'
@@ -708,8 +708,10 @@ export function cleanOutboundText(text, { warn, promptSources, fingerprint, user
   // 这是所有出站口的**公共必经点**，放这里一次就覆盖 deliver / sendText / sendSegments / 语音 /
   // 模块快捷 API 全部出口，不必在每个出口各写一遍。
   const acpRanges = acpLeakRanges(raw)
-  const noiseCount = toolRanges.length + contextRanges.length + htmlCuts.length + acpRanges.length
-  const tools = [...toolRanges, ...contextRanges, ...silence, ...stateRanges, ...recordRanges, ...pokeRanges, ...memoRanges, ...acpRanges]
+  // 图片句柄与真实附件路径（#518）同样在这一层一次收干净。
+  const imageRanges = imageHandleRanges(raw)
+  const noiseCount = toolRanges.length + contextRanges.length + htmlCuts.length + acpRanges.length + imageRanges.length
+  const tools = [...toolRanges, ...contextRanges, ...silence, ...stateRanges, ...recordRanges, ...pokeRanges, ...memoRanges, ...acpRanges, ...imageRanges]
     .sort((a, b) => a.start - b.start || b.end - a.end)
   const baseRanges = mergeRanges([...tools, ...htmlCuts, ...mediaCuts])
   const toolClean = withoutToolRanges(raw, baseRanges)
