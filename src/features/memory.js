@@ -40,7 +40,7 @@ function isSelfFact(fact, cfg) {
   })
 }
 
-const NO_ARRAY = '提炼记忆时模型没有返回 JSON 数组'
+const NO_ARRAY = '提炼记忆时模型输出无法解析为 JSON 数组'
 const EXTRACT_RETRY_TOKENS = 16000
 const VIA_NAMES = { douyin: '抖音', heybox: '小黑盒' }
 export const RELATED_MIN_SCORE = 0.8
@@ -2638,9 +2638,21 @@ export function createMemoryStore({ dsh, getConfig, hub, log, fetchImpl, setConf
     let out = await ask()
     // 推理模型可能把预算全花在思考上，一个字没写就被截断；有的模型思考关不掉，所以同时放宽预算
     if (!out) out = await ask({ reasoningEffort: 'off', maxTokens: EXTRACT_RETRY_TOKENS })
-    const result = parseExtraction(out)
+    let result = parseExtraction(out)
+    // 有输出但解析失败：多半是 1500 预算被截断（#346）。放宽预算重试一次，仍失败才报错。
+    if (!result && out && /[{[]/.test(out)) {
+      // 只对「像 JSON 但被截断/格式坏了」的输出重试；完全没 JSON 的输出沿用原逻辑，交给下次整理。
+      const retry = await ask({ reasoningEffort: 'off', maxTokens: EXTRACT_RETRY_TOKENS })
+      if (retry) {
+        out = retry
+        result = parseExtraction(retry)
+      }
+    }
     if (version !== forgetVersion) throw new Error('聊天中有新的忘记请求，稍后重新提炼')
-    if (!result) throw new Error(`${NO_ARRAY}（模型返回：${out ? clipText(out, 60) : '空，' + lastEmptyInfo()}）`)
+    if (!result) {
+      const why = out ? '非空但截断或格式非法' : '空输出'
+      throw new Error(`${NO_ARRAY}（${why}；模型返回：${out ? clipText(out, 60) : lastEmptyInfo()}）`)
+    }
     const arr = result.facts
     let n = 0
     // 模型返回后才开始事务；期间没有异步操作，记忆和本批进度只写一次。

@@ -1603,7 +1603,12 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
       // 网关预热/短暂不可达：确定没发出去的消息放进补发队列，连上后按 TTL 补发。
       // 超时（uncertain）不入队，避免同一条消息发两次。
       if (!sensitive && outbox && isDefiniteFailure(error)) {
-        const q = outbox.add({ action, params, chatId, note, kind: queueKind, ttlMs: queueTtlMs, deliveryScope, incomingReply: outputScope.getStore()?.chatId === chatId && Boolean(outputScope.getStore()?.incomingReply) })
+        const q = outbox.add({
+          action, params, chatId, note, kind: queueKind, ttlMs: queueTtlMs, deliveryScope,
+          // #327：入队时记下「这条是主动发言」，补发成功后由宿主回调补流水，不能因为断线就当没说过。
+          proactive: opts.proactive ? String(opts.proactiveCause || 'proactive') : '',
+          incomingReply: outputScope.getStore()?.chatId === chatId && Boolean(outputScope.getStore()?.incomingReply),
+        })
         if (q.ok) {
           log.warn(`发到 ${chatId} 时网关还没就绪，已排队补发：${note || error.message}`)
           recordDeliveryTypes(chatId, message, true)
@@ -4413,6 +4418,8 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
     sendImage,
     checkSendableFile,
     sendSegments,
+    /** 补发队列成功后补记主动发言（#327）：宿主在 outbox.flush 的回执里调用。 */
+    noteProactive,
     pushToSession,
     runTurnInChat,
     receiveOwnerMessage,

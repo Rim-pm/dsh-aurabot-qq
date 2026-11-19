@@ -637,6 +637,22 @@ export function normalize(raw) {
   g.activeWindowSec = num(g.activeWindowSec, 300, 1, BIG)
   if (!Array.isArray(g.quietHours) || g.quietHours.length !== 2) g.quietHours = DEFAULT_GROUP_POLICY.quietHours
   g.quietHours = g.quietHours.map((h) => num(h, 0, 0, 23))
+  // 对外静默窗口：这段内只有主人叫得醒她。两个数字相同（或没写）一律当不启用
+  const hhmm = (v) => {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(String(v ?? '').trim())
+    if (!m) return null
+    const h = Number(m[1])
+    const mi = Number(m[2])
+    if (!(h >= 0 && h <= 23 && mi >= 0 && mi <= 59)) return null
+    return String(h).padStart(2, '0') + ':' + String(mi).padStart(2, '0')
+  }
+  g.guestQuietFrom = hhmm(g.guestQuietFrom)
+  g.guestQuietTo = hhmm(g.guestQuietTo)
+  if (!g.guestQuietFrom || !g.guestQuietTo || g.guestQuietFrom === g.guestQuietTo) {
+    g.guestQuietFrom = null
+    g.guestQuietTo = null
+  }
+  delete g.guestQuietHours
   if (!isObj(g.overrides)) g.overrides = {}
   for (const o of Object.values(g.overrides)) {
     if (!isObj(o)) continue

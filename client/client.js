@@ -966,7 +966,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       { id: 'video', label: '视频', flagFn: (cfg) => { const v = cfg.video || {}; const p = v.provider || 'local'; return p === 'local' ? Boolean(cfg.local && cfg.local.video) : p === 'minimax' ? Boolean(v.minimax && v.minimax.apiKeySet) : Boolean(v.custom && v.custom.createUrl && v.custom.queryUrl) } },
       { id: 'diary', label: '空间日记', flag: 'diary.enabled' },
       { id: 'speakup', label: '目的引擎', flag: 'ext.purpose.enabled' },
-      { id: 'autotelic', label: '自驱引擎', flag: 'ext.autotelic.enabled' },
+      { id: 'autotelic', label: '自驱引擎（实验）', flag: 'ext.autotelic.enabled' },
       { id: 'pet', label: '桌宠' },
       { id: 'mood', label: '心情', flag: 'mood.enabled' },
       { id: 'memory', label: '记忆', flag: 'memory.enabled' },
@@ -1315,7 +1315,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       { key: 'diary', label: '空间日记', desc: '自己写日记、发到空间说说。', tab: 'diary', flag: 'diary.enabled', cli: 'diary' },
       { key: 'platform', label: '内容平台', desc: '逛 B站 / 抖音 / 小黑盒，看内容也能互动。', tab: 'bili', cli: ['bili', 'douyin', 'heybox'] },
       { key: 'purpose', label: '目的引擎', desc: '像人一样主动找你说话：攒素材 → 立目标 → 到点来找你。', tab: 'speakup', flag: 'ext.purpose.enabled', cli: 'purpose' },
-      { key: 'autotelic', label: '自驱引擎', desc: '后台自己立项、做事、记账。', tab: 'autotelic', flag: 'ext.autotelic.enabled', cli: 'autotelic' },
+      { key: 'autotelic', label: '自驱引擎（实验）', desc: '观察→回味→决策→行动→沉淀，v5 重写，实验性功能。', tab: 'autotelic', flag: 'ext.autotelic.enabled', cli: 'autotelic' },
     ]
 
     function Manage({ st, boot, toast, go, reload, draft }) {
@@ -2571,6 +2571,15 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             h(Row, { label: '用哪些称呼叫它', hint: '一行一个；群里提到这些称呼时，按被叫到的规则回应。' }, f.list('group.wakeWords', { placeholder: '大肥鱼\n肥鱼' })),
             h(Row, { label: '@ 了别人不算叫ta', hint: '有人 @ 别人时顺口提到ta的名字，不算在叫ta；ta还是可以按平时的频率插话。默认关' }, f.sw('group.ignoreAtOthers')),
             h(Row, { label: '每小时必回上限', hint: '一个群里一小时内因被 @、引用、叫名字而必回的次数最多这么多，超过就不回（主人说话不受限，也不计入）；小时一过自动恢复。0 = 不限' }, f.range('group.mustMaxPerHour', 0, 100, 5, (v) => (v === 0 ? '不限' : v + ' 次'))),
+            h(Row, { label: '免打扰', hint: '这段时间内只有主人的消息能进；群里其他人 @、引用、唤醒词、追问都不起轮次。清空 = 不启用' },
+              h('div', { className: 'ab-flex', style: { alignItems: 'center', gap: 8 } },
+                h('input', { className: 'ab-input', type: 'time', style: { width: '118px' }, 'aria-label': '免打扰开始时间', value: String(draft.group.guestQuietFrom || ''), onChange: (e) => setDraft(setPath(draft, 'group.guestQuietFrom', e.target.value)) }),
+                h('span', { className: 'ab-muted ab-small' }, '到'),
+                h('input', { className: 'ab-input', type: 'time', style: { width: '118px' }, 'aria-label': '免打扰结束时间', value: String(draft.group.guestQuietTo || ''), onChange: (e) => setDraft(setPath(draft, 'group.guestQuietTo', e.target.value)) }),
+                h(Btn, { small: true, onClick: () => { setDraft(setPath(setPath(draft, 'group.guestQuietFrom', ''), 'group.guestQuietTo', '')) } }, '清空=关'),
+                draft.group.guestQuietFrom && draft.group.guestQuietTo
+                  ? h('span', { className: 'ab-muted ab-small' }, '这段时间只有主人叫得醒她')
+                  : h('span', { className: 'ab-muted ab-small' }, '未启用')))
           )),
 
         // 组行 ② 没人叫时怎么接话：核心 4 参数排一行（时段/话题/防刷屏进折叠）
@@ -3911,10 +3920,9 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       }
       return h('div', { className: 'ab-grid' },
         // ---------- 卡 1：总控 + 状态 + 动作 ----------
-        h(Card, { title: '自驱引擎（实验）', right: f.sw('ext.autotelic.enabled'), desc: '她自己的后台会话与一本别人代记的账：够好奇才立项，办完写复盘。账是框架机械记的，删了必断链。（实验性功能，行为可能随版本调整）' },
+        h(Card, { title: '自驱引擎（实验）', right: f.sw('ext.autotelic.enabled'), desc: 'v5：观察积累 → 定时回味/心念点火 → 三段决策环 → 行动单执行 → 技能沉淀 → 反馈回路。默认关闭；实验性功能，行为与配置面可能随版本调整。' },
           h('div', { className: 'ab-flex', style: { flexWrap: 'wrap', gap: 6, marginBottom: 10 } }, pills),
           h(Row, { label: '允许后台会话指定 preset', hint: '开着她做事才带工具（fs 只读；无 shell、无 QQ 工具）；关着只「想」不动' }, f.sw('ext.autotelic.presetIdOverride')),
-          h(Row, { label: '允许动手（L1）', hint: '立项后一步一步办；失败 2 次自动卡住，同观察 2 次熔断' }, f.sw('ext.autotelic.allowAct')),
           chain && !chain.ok ? h('div', { className: 'ab-note err', style: { marginTop: 8 } }, '⚠ 账本断链 @ ' + chain.brokenAt.file + ' 第 ' + chain.brokenAt.line + ' 条：' + chain.brokenAt.reason) : null,
           h('div', { style: { marginTop: 10, paddingTop: 10, borderTop: '1px dashed var(--ab-line, #dbe5ea)' } },
             h('div', { className: 'ab-small ab-muted', style: { marginBottom: 6 } }, '手动推一把（开着总开关才有反应）：'),

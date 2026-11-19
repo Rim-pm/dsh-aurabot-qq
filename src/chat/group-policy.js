@@ -8,6 +8,11 @@ export const DEFAULT_GROUP_POLICY = {
   cooldownSec: 90, // 两次插话至少间隔
   maxPerHour: 6, // 每群每小时插话上限
   quietHours: [1, 8], // [开始, 结束) 小时，静默时段不插话（必回不受影响）
+  // 对外静默窗口 [开始, 结束) 小时：这段内只有主人叫得醒她，群里的 @、引用、唤醒词、追问
+  // 都不起轮次。null = 不启用。注意它与 quietHours 正交：那个管她别插话（对主人），
+  // 这个管别人别叫醒她。
+  guestQuietFrom: null,
+  guestQuietTo: null,
   minRecentMessages: 3, // 最近 activeWindowSec 内至少有这么多条消息才算「群里在聊」
   activeWindowSec: 300,
   // 话题相关度：群里正在聊的东西和她有关（碰到她感兴趣的话题、或者她记得相关的事），才可能插话
@@ -37,6 +42,24 @@ export function policyFor(global, overrides, groupId) {
   const g = { ...DEFAULT_GROUP_POLICY, ...(global || {}) }
   const o = overrides && overrides[String(groupId)]
   return o ? { ...g, ...o } : g
+}
+
+// 免打扰窗口：HH:mm 字符串，按分钟比（跨夜时 start > end）。与 inQuietHours 的小时粒度
+// 不同——那边是「她别插话」，这里是「别人别叫醒她」，需要和面板上的时间控件对齐。
+function guestQuietActive(now, from, to) {
+  const parse = (v) => {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(String(v ?? '').trim())
+    if (!m) return null
+    const h = Number(m[1])
+    const mi = Number(m[2])
+    return h >= 0 && h <= 23 && mi >= 0 && mi <= 59 ? h * 60 + mi : null
+  }
+  const a = parse(from)
+  const b = parse(to)
+  if (a === null || b === null || a === b) return false
+  const d = new Date(now)
+  const cur = d.getHours() * 60 + d.getMinutes()
+  return a < b ? cur >= a && cur < b : cur >= a || cur < b
 }
 
 export function inQuietHours(hour, quiet) {
@@ -80,6 +103,11 @@ export function decideGroupReply(p) {
     /[？?]|不说话了|人呢|跑了|去哪|怎么了|在吗|说话/.test(text))
   // 明确被叫到（@、引用、叫名字、被追问）不算她主动接话，刹车不拦；刹车只拦她自己想插话
   const calling = Boolean(p.mentioned || p.repliedToBot || hit || shortAsk)
+  // 对外静默：落在窗口内时，非主人的消息一律不起轮次。要排在 must 分支之前，
+  // 否则被 @、被引用、叫了名字、被追问这四条会把窗口整个绕过去。
+  if (!p.fromOwner && guestQuietActive(p.now, pol.guestQuietFrom, pol.guestQuietTo)) {
+    return { reply: false, mode: 'none', reason: '对外静默窗口，只有主人叫得醒她' }
+  }
   if (burst >= (pol.burstMax ?? 8) && !calling) {
     return { reply: false, mode: 'none', reason: `刚说了太多（${burst} 次），歇一会儿` }
   }

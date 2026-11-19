@@ -371,6 +371,10 @@ export function apply(ctx) {
       const r = await outbox.flush((action, params, opts) => onebot.call(action, params, { ...opts, retries: 0 }),
         item => !item.incomingReply || item.action !== 'send_group_msg' || groupResponseMode(cfg, item.params?.group_id) === 'chat',
         (item, result) => {
+          // #327：主动发言入队时带了来路，补发成功后要补回聊天流水与「别处说过」，否则断线恢复后她不记得发过什么。
+          if (item.proactive) {
+            try { hub.noteProactive(item.chatId, item.params?.message || [], { proactiveCause: item.proactive }) } catch (error) { logger.child('outbox').warn('补发后补记主动发言失败：', error.message) }
+          }
           if (item.action !== 'send_private_msg' || item.chatId !== `private:${item.params?.user_id}` ||
               item.deliveryScope?.botQQ !== loginSnapshot.uin || result?.queued) return
           personaMemoryRuntime.confirmDelivery(item.chatId, result?.message_id, item.deliveryScope)
