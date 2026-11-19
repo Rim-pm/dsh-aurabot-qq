@@ -139,6 +139,7 @@ dsh plugin --profile <profile> add github:aureth-labs/dsh-aurabot-qq
 | [硅基流动免费服务](docs/SILICONFLOW.md) | 免费对话 / embedding / ASR / 生图 / Reranker 在本项目里怎么接 |
 | [更新记录](CHANGELOG.md) | 每个版本改了什么 |
 | [设计要点](docs/DESIGN.md) | 人格注入、群聊上下文、记忆、心情、B 站、翻唱等的实现取舍 |
+| [私聊社区模块方案](docs/PRIVATE-MODS-PLAN.md) | love-mode / real-life / little-notes / livin / meme-wiki 的源码核验、风险排序与分步验证 |
 
 ## ❓ FAQ
 
