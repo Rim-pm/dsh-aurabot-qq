@@ -117,6 +117,21 @@ test('解析：没给 keep 就看 level，level 越界会被夹回来', () => {
   assert.equal(v[2].level, 3, '99 夹到 3')
 })
 
+test('解析：输出被截断时，前面完整的对象要救回来，坏的那个丢掉', () => {
+  // 推理模型把预算花光，最后一个对象只写了一半——整段 JSON.parse 一定失败
+  const cut = '[{"i":1,"keep":true,"level":3,"title":"新活动","points":["送十连"]},{"i":2,"keep":true,"level":2,"title":"补偿'
+  const v = judge.parseVerdicts(cut, 2)
+  assert.equal(v.length, 1, '完整的那条要救回来')
+  assert.equal(v[0].i, 1)
+  assert.equal(v[0].title, '新活动')
+
+  // 字符串里的括号不能被当成对象边界
+  const withBrace = '[{"i":1,"keep":true,"title":"标题里有 } 和 { 也不怕"},{"i":2,"keep":tru'
+  const w = judge.parseVerdicts(withBrace, 2)
+  assert.equal(w.length, 1)
+  assert.match(w[0].title, /\} 和 \{/)
+})
+
 test('摘要：结论 + 要点 + 图号；链接默认不带，开了才带', () => {
   const it = item('1', '原始正文很长', { images: ['a.jpg', 'b.jpg', 'c.jpg'], url: 'https://www.bilibili.com/opus/1' })
   const text = judge.formatSummary(it, { name: '明日方舟' }, {
@@ -390,6 +405,51 @@ test('判定：模型报错 / 没给模型 → 全部 fail-open 照转', async (
   const b = await none.judge({ mid: '1', name: 'A' }, [item('1', '公告')])
   assert.equal(b[0].by, 'fail')
   assert.equal(b[0].keep, true)
+})
+
+test('判定：输出预算给推理模型留够（基础 1500 + 每条 600）', async () => {
+  const cfg = normalize({ bili: { enabled: true, aiFilter: true } })
+  const calls = []
+  const j = judge.createJudge({
+    getConfig: () => cfg,
+    log: silent,
+    ask: async (o) => { calls.push(o); return '[{"i":1,"keep":true,"level":2,"title":"T"}]' },
+  })
+  await j.judge({ mid: '1', name: 'A' }, [item('1', '公告'), item('2', '公告')])
+  assert.equal(calls[0].maxTokens, 1500 + 2 * 600, '两条一批要 2700，不能再被推理 token 吃光')
+})
+
+test('判定：超时真的把请求 abort 掉，不是只把外层 promise reject', async () => {
+  // 不走 normalize（它会把超时夹到 30 秒起），这里要 1 秒内跑完
+  const cfg = { bili: { enabled: true, aiFilter: true, aiFilterTimeoutSec: 0.05 } }
+  let seen = null
+  let aborted = false
+  const j = judge.createJudge({
+    getConfig: () => cfg,
+    log: silent,
+    ask: (o) => {
+      seen = o.signal
+      return new Promise((resolve, reject) => {
+        o.signal.addEventListener('abort', () => { aborted = true; reject(new Error('请求已取消')) })
+      })
+    },
+  })
+  const v = await j.judge({ mid: '1', name: 'A' }, [item('1', '公告')])
+  assert.ok(seen, '要把 signal 传给 ask')
+  assert.equal(aborted, true, '超时后底层请求要被掐掉，否则流还在后台烧 token')
+  assert.equal(v[0].by, 'fail', '超时仍然 fail-open 照转')
+})
+
+test('判定：abort 之后不再重试 / 不再降级', async () => {
+  const cfg = normalize({ bili: { enabled: true, aiFilter: true } })
+  let asked = 0
+  const j = judge.createJudge({
+    getConfig: () => cfg,
+    log: silent,
+    ask: async (o) => { asked++; throw new Error('模型挂了') },
+  })
+  await j.judge({ mid: '1', name: 'A' }, [item('1', '公告')])
+  assert.equal(asked, 1, '一次失败就够，别反复问')
 })
 
 test('判定：没有正文的纯图动态不问模型，直接照转', async () => {

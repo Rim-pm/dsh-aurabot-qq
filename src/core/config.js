@@ -284,6 +284,7 @@ export const DEFAULTS = {
     aiFilterMinLevel: 2, // 1 都推 / 2 值得说一声 / 3 很重要
     aiFilterVision: false, // 没有正文的纯图动态要不要看图判断（会多花 token）
     aiFilterMaxChars: 800, // 交给模型判断的正文最多多少字
+    aiFilterTimeoutSec: 120, // 判定一次最多等多久（推理模型判一批挺慢，别调太小）
     aiFilterLink: false, // 摘要末尾带不带原动态链接
     cardRenderer: 'none', // 预留：none | svg（把摘要渲染成卡片图，第一期不做）
   },
@@ -844,6 +845,7 @@ export function normalize(raw) {
   b.aiFilterMinLevel = Math.round(num(b.aiFilterMinLevel, 2, 1, 3))
   b.aiFilterVision = bool(b.aiFilterVision, false)
   b.aiFilterMaxChars = Math.round(num(b.aiFilterMaxChars, 800, 100, 3000))
+  b.aiFilterTimeoutSec = Math.round(num(b.aiFilterTimeoutSec, 120, 30, 600))
   b.aiFilterLink = bool(b.aiFilterLink, false)
   b.cardRenderer = ['none', 'svg'].includes(b.cardRenderer) ? b.cardRenderer : 'none'
   // 订阅列表：只收数字 UID，按 mid 去重（面板 / 工具都可能写进来）

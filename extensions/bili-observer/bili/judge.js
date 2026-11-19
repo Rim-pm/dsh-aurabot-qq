@@ -15,7 +15,11 @@ const POINTS_MAX = 2
 const IMAGES_MAX = 3
 const IMAGE_INDEX_MAX = 9
 const BODY_MAX_DEFAULT = 800
-const JUDGE_TIMEOUT_MS = 45_000
+// 判定模型多是推理模型：思考也会吃输出预算。给足余量，别让 JSON 被截断成半截。
+const JUDGE_MAX_TOKENS_BASE = 1500
+const JUDGE_MAX_TOKENS_PER_ITEM = 600
+const JUDGE_TIMEOUT_DEFAULT_SEC = 120
+const JUDGE_TIMEOUT_MAX_SEC = 600
 const IMG_MAX = 4 * 1024 * 1024
 
 export const LEVELS = { 1: '随便看看', 2: '值得说一声', 3: '很重要' }
@@ -136,6 +140,44 @@ const toInt = (v, def, lo, hi) => {
 }
 
 /**
+ * 从半截 JSON 里一条条捞对象：模型被输出预算截断时，最后一个对象往往是坏的，
+ * 但前面几条通常是完整的。扫描时跳过字符串里的括号，按括号配平切出候选对象，
+ * 坏的那个丢掉，不影响已经切出来的。
+ */
+function salvageObjects(body) {
+  const out = []
+  let depth = 0
+  let start = -1
+  let inStr = false
+  let esc = false
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i]
+    if (inStr) {
+      if (esc) esc = false
+      else if (ch === '\\') esc = true
+      else if (ch === '"') inStr = false
+      continue
+    }
+    if (ch === '"') { inStr = true; continue }
+    if (ch === '{') {
+      if (depth === 0) start = i
+      depth++
+      continue
+    }
+    if (ch === '}') {
+      if (depth === 0) continue
+      depth--
+      if (depth === 0 && start >= 0) {
+        const piece = body.slice(start, i + 1)
+        try { out.push(JSON.parse(piece)) } catch (error) { /* 这个对象坏了，跳过 */ }
+        start = -1
+      }
+    }
+  }
+  return out
+}
+
+/**
  * 把模型吐出来的东西解析成判定数组。模型很爱在 JSON 外面加话或代码块，所以容错优先：
  * 解析不出来就当没判（上层 fail-open），绝不抛。
  */
@@ -149,9 +191,11 @@ export function parseVerdicts(raw, count = 0) {
     if (!m) continue
     try { data = JSON.parse(m[0]); break } catch (error) { /* 换下一种切法 */ }
   }
-  const list = Array.isArray(data)
+  let list = Array.isArray(data)
     ? data
     : Array.isArray(data?.verdicts) ? data.verdicts : Array.isArray(data?.items) ? data.items : []
+  // 整段 JSON.parse 失败（多半是被截断了）：逐个对象捞，能救一条是一条
+  if (!list.length) list = salvageObjects(body)
   const out = new Map()
   for (const [idx, v] of list.entries()) {
     if (!v || typeof v !== 'object') continue
@@ -271,13 +315,41 @@ export function formatDigest(sub, entries, { images: withImages = true, link = f
   return { text: lines.join('\n'), images: ordered }
 }
 
-const withTimeout = (p, ms) => new Promise((resolve, reject) => {
-  const t = setTimeout(() => reject(new Error('判定超时')), ms)
-  Promise.resolve(p).then(
-    (v) => { clearTimeout(t); resolve(v) },
-    (e) => { clearTimeout(t); reject(e) },
-  )
-})
+/**
+ * 问一次模型，超时就真的把请求掐掉。
+ * 只 reject 不 abort 的话，底层流还在后台跑，token 照烧，下一个 tick 又发一轮，
+ * 越积越多——这就是之前「判定超时」还不停掉 token 的原因。
+ */
+function askWithTimeout(ask, opts, ms) {
+  const ctrl = new AbortController()
+  let timer = null
+  const timeout = new Promise((resolve, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error('判定超时')
+      error.code = 'JUDGE_TIMEOUT'
+      // 先掐请求再 reject：让底层适配器自己停下来
+      try { ctrl.abort(error) } catch (e) { /* 老 runtime 不认 reason 也无所谓 */ }
+      reject(error)
+    }, ms)
+  })
+  const call = Promise.resolve().then(() => ask({ ...opts, signal: ctrl.signal }))
+  // 超时之后 ask 那边还会 reject 一次（AbortError）：先挂个空 catch，免得变成 unhandledRejection
+  call.catch(() => {})
+  return Promise.race([call, timeout]).finally(() => { if (timer) clearTimeout(timer) })
+}
+
+/** 超时时间：面板能调，没配就用默认 120 秒（推理模型判一批确实慢）。 */
+function timeoutMs(cfg) {
+  const sec = Number(cfg && cfg.aiFilterTimeoutSec)
+  // 夹取交给 config.normalize；这里只挡「0 / NaN / 负数」，顺带留个上限
+  if (!Number.isFinite(sec) || sec <= 0) return JUDGE_TIMEOUT_DEFAULT_SEC * 1000
+  return Math.min(JUDGE_TIMEOUT_MAX_SEC, sec) * 1000
+}
+
+/** 输出预算：基础 + 每条，推理模型的思考也在这份预算里，所以给得比正文需要的大。 */
+function maxTokensFor(n) {
+  return JUDGE_MAX_TOKENS_BASE + Math.max(1, n) * JUDGE_MAX_TOKENS_PER_ITEM
+}
 
 /**
  * @param {object} o
@@ -363,7 +435,7 @@ export function createJudge({ getConfig, ask, canSee, log, fetchImpl = fetch } =
       `这条动态没有正文，只有图片（下面是 ${images.length} 张）。看图判断要不要推，并总结成一句话 + 最多 3 条要点。`,
       '只输出 JSON 数组，只有一个对象（i 填 1）。',
     ].filter(Boolean).join('\n')
-    const raw = await withTimeout(ask({ system, text, images, maxTokens: 500, temperature: 0.2, ...modelOpts() }), JUDGE_TIMEOUT_MS)
+    const raw = await askWithTimeout(ask, { system, text, images, maxTokens: maxTokensFor(1), temperature: 0.2, ...modelOpts() }, timeoutMs(c))
     const v = parseVerdicts(raw, 1)[0]
     if (!v) throw new Error('没解析出判定')
     return { ...v, id: item.id, by: 'ai' }
@@ -400,8 +472,10 @@ export function createJudge({ getConfig, ask, canSee, log, fetchImpl = fetch } =
         maxChars: Number(c.aiFilterMaxChars) || BODY_MAX_DEFAULT,
       })
       try {
-        const raw = await withTimeout(ask({ system, text, maxTokens: 200 + judged.length * 320, temperature: 0.2, ...modelOpts() }), JUDGE_TIMEOUT_MS)
+        const raw = await askWithTimeout(ask, { system, text, maxTokens: maxTokensFor(judged.length), temperature: 0.2, ...modelOpts() }, timeoutMs(c))
         const verdicts = parseVerdicts(raw, judged.length)
+        // 一条都没解析出来时把原始输出记一笔：不然只能看到「照转」，查不出是截断还是模型乱说
+        if (!verdicts.length) log?.debug?.('B 站动态判定没解析出结果，模型原始输出：', clip(raw, 200) || '（空）')
         const hit = new Map(verdicts.map((v) => [v.i, v]))
         judged.forEach((it, i) => {
           const v = hit.get(i + 1)

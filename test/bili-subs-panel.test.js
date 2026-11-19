@@ -159,6 +159,7 @@ test('面板要读的配置项都在（默认值）', () => {  const c = normali
   assert.equal(c.bili.aiFilterMinLevel, 2)
   assert.equal(c.bili.aiFilterVision, false)
   assert.equal(c.bili.aiFilterMaxChars, 800)
+  assert.equal(c.bili.aiFilterTimeoutSec, 120, '推理模型判一批慢，默认给 120 秒')
   assert.equal(c.bili.aiFilterLink, false, '摘要默认不带原链接')
   assert.equal(c.bili.cardRenderer, 'none', '卡片渲染是第二期，先留位子')
 })
