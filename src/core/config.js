@@ -1332,7 +1332,15 @@ function withVectorMode(c) {
 }
 
 export function saveConfig(cfg, previous = loadConfig()) {
-  const c = normalize(cfg)
+  // 非枚举的 vector.mode 经 spread/structuredClone 会丢；调用方没显式带 mode 时，
+  // 沿用上一份权威配置的 mode，避免一次无关保存把「本地」又推回 baseUrl 推断的 remote（#520 复审）。
+  const input = (() => {
+    const hasMode = cfg?.memory?.vector && Object.hasOwn(cfg.memory.vector, 'mode')
+    const prevMode = previous?.memory?.vector?.mode
+    if (hasMode || !prevMode) return cfg
+    return { ...(cfg || {}), memory: { ...(cfg?.memory || {}), vector: { ...(cfg?.memory?.vector || {}), mode: prevMode } } }
+  })()
+  const c = normalize(input)
   // Only the previous authoritative configuration can carry an authorization forward.
   if (c.ownerQQ) {
     const revision = c.ownerQQ === previous.ownerQQ ? ownerAuthorizationRevision(previous) : ''
@@ -1393,6 +1401,11 @@ export function mergeFromPanel(current, incoming) {
     next.voice.keyPools = { ...next.voice.keyPools }
     restorePoolKeys(next.voice.keyPools, current.voice?.keyPools, incoming.voice.keyPools)
   }
+  // 面板局部保存不带 vector 时用上一份 mode 补回，否则 baseUrl 会把用户选中的 local
+  // 在 normalize 里重新推成 remote（#520）。
+  const incomingMode = incoming?.memory?.vector?.mode
+  const keepMode = incomingMode === 'local' || incomingMode === 'remote' ? incomingMode : current?.memory?.vector?.mode
+  if (next.memory?.vector && keepMode) next.memory.vector.mode = keepMode
   // 面板明确带了非空 chatEfforts（面板上改过单个聊天的档位）就以面板为准；
   // 没带或带的是空对象（旧版面板 / 面板没动过）时保留当前值——QQ 里 /effort 设过的不被清掉。
   const incomingEfforts = incoming && incoming.chatEfforts
