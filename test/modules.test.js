@@ -166,6 +166,15 @@ test('面板里关掉内置模块：马上停，它的工具和接口都没了�
   assert.equal((await fake.call('/stickers')).json().ok, true)
 })
 
+test('面板里关掉自己写的模块再打开：能重新起来（不要求改文件）', async () => {
+  await fake.call('/save', { modules: { echo: { enabled: false } } })
+  assert.equal((await mod('echo')).running, null)
+  assert.equal((await fake.call('/ext/echo/hi')).json().moduleOff, true)
+  await fake.call('/save', { modules: { echo: { enabled: true } } })
+  assert.equal((await mod('echo')).running, 'user')
+  assert.equal((await fake.call('/ext/echo/hi')).json().ok, true)
+})
+
 test('改了模块文件：几秒内自动重新加载', async () => {
   await sleep(50)
   writeMod('echo', echoCode('pong2'))

@@ -144,7 +144,7 @@ export default {
 | `api.defineTool({ name, description, properties, required, execute })` | 做一个工具 |
 | `api.context(({ chat, sessionId }) => '文字')` | 每轮聊天前塞进她上下文的话（比如「现在北京 20 度」）；返回空串就不塞 |
 | `api.rule((kind, cfg) => '一条规则')` | 补一条她的规则（会放进系统提示词；kind 是 `private` 主人私聊 / `social` 群聊和别人）。告诉她「你会查天气，用 xxx 工具」就写在这里。可以直接给字符串、也可以返回多条（数组）；函数**每一轮都会重新调用**，所以里面可以拼当前设置 |
-| `api.command({ name, aliases, desc, delegatable, run(arg, msg) })` | 主人可在 QQ 私聊或白名单群里发送命令。默认仅主人可用。只有显式设置 `delegatable: true` 的命令，主人才能授权给私聊白名单中的 QQ 用户。此时 `run` 会收到实际发送者的消息，模块应自行限制命令的操作范围。返回的文字回到发命令的聊天。名字可以是中文，中文命令后面可以不加空格；`arg` 已去掉首尾空格。和内置命令同名时模块命令优先 |
+| `api.command({ name, aliases, desc, delegatable, run(arg, msg) })` | 主人可在 QQ 私聊或白名单群里发送命令。默认仅主人可用。只有显式设置 `delegatable: true` 的命令，主人才能授权给私聊白名单中的 QQ 用户。此时 `run` 会收到实际发送者的消息，模块应自行限制命令的操作范围。返回的文字回到发命令的聊天。名字可以是中文，中文命令后面可以不加空格；`arg` 已去掉首尾空格。和内置命令同名时模块命令优先；但中文命令「后面直接跟内容」这种写法按**最长匹配**判定，所以模块的单字命令（如 `/记`）不会吃掉更长的内置命令（如 `/记住 xxx`、`/翻唱 xxx`） |
 | `api.every(毫秒, fn, 名字?)` | 定时任务（名字用在出错日志里） |
 | `api.later(毫秒, fn)` | 过一会儿做一次 |
 | `api.route('/路径', async (req, res) => 返回值, options?)` | 加一个网页接口：地址是 `/aurabot/api/ext/<id>/路径`；返回对象就当 JSON 回；要自己回（比如图片）就用 `api.core.http.send(res, 200, buf, 'image/png')`。1.3.0 起管理接口可传 `{ access: 'panel' }`，复用宿主回环/可信代理、Host 与 CSRF 闸；不传时保持现有行为，由模块验证客户端凭据 |

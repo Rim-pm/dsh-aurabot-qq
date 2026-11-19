@@ -10,6 +10,10 @@ import { runPermissionsCommand } from './permissions-command.js'
 /**
  * 解析命令：「/silent 30」→ { name: 'silent', arg: '30' }。不是命令返回 null。支持全角斜杠和中文别名。
  * extra：扩展模块加的命令 [{ name, aliases, desc, run }]，命中时返回 { name, arg, ext }；和内置同名时扩展的优先。
+ *
+ * 优先级（从高到低）：保留命令 → 模块精确命中 → 内置精确命中 → 中文前缀命中（模块和内置一起比，取最长的那个）。
+ * 为什么前缀要一起比长度：「/记住我不吃香菜」既是模块「记」的前缀，也是内置「记住」的前缀；
+ * 按注册顺序比会让模块抢走内置命令，按长度比才符合直觉。
  */
 export function parseCommand(text, extra = []) {
   const m = String(text || '').trim().match(/^[/／]\s*([A-Za-z0-9一-龥_-]+)\s*([\s\S]*)$/)
@@ -18,18 +22,28 @@ export function parseCommand(text, extra = []) {
   // 权限管理是保留命令，扩展模块不能抢占。
   if (word === '权限' || word === 'permissions' || word === 'perms') return { name: 'permissions', arg: m[2].trim() }
   if (word === 'groupsettings' || word.startsWith('群设置')) return { name: 'groupsettings', arg: (word === 'groupsettings' ? m[2] : m[1].slice(3) + ' ' + m[2]).trim() }
+  const namesOf = (c) => [c.name, ...(c.aliases || [])].map((x) => String(x).toLowerCase())
+  // 精确命中：模块优先（同名覆盖是文档承诺的行为）
   for (const c of extra) {
-    const names = [c.name, ...(c.aliases || [])].map((x) => String(x).toLowerCase())
-    if (names.includes(word)) return { name: c.name, arg: m[2].trim(), ext: c }
-    // 中文命令后面直接跟内容：「/天气北京」
-    const pre = names.filter((k) => /[一-龥]/.test(k) && word.startsWith(k)).sort((a, b) => b.length - a.length)[0]
-    if (pre) return { name: c.name, arg: (m[1].slice(pre.length) + ' ' + m[2]).trim(), ext: c }
+    if (namesOf(c).includes(word)) return { name: c.name, arg: m[2].trim(), ext: c }
   }
   const name = ALIASES[word] || word
   if (COMMANDS[name]) return { name, arg: m[2].trim() }
-  // 中文命令后面不加空格直接跟内容：「/记住我不吃香菜」
-  const pre = Object.keys(ALIASES).filter((k) => /[一-龥]/.test(k) && word.startsWith(k)).sort((a, b) => b.length - a.length)[0]
-  return pre ? { name: ALIASES[pre], arg: (m[1].slice(pre.length) + ' ' + m[2]).trim() } : null
+  // 中文命令后面直接跟内容：「/记住我不吃香菜」「/天气北京」
+  let best = null
+  for (const c of extra) {
+    for (const k of namesOf(c)) {
+      if (!/[一-龥]/.test(k) || !word.startsWith(k)) continue
+      if (!best || k.length > best.len) best = { len: k.length, ext: c }
+    }
+  }
+  for (const k of Object.keys(ALIASES)) {
+    if (!/[一-龥]/.test(k) || !word.startsWith(k)) continue
+    if (!best || k.length > best.len) best = { len: k.length, name: ALIASES[k] }
+  }
+  if (!best) return null
+  const arg = (m[1].slice(best.len) + ' ' + m[2]).trim()
+  return best.ext ? { name: best.ext.name, arg, ext: best.ext } : { name: best.name, arg }
 }
 
 const ALIASES = {

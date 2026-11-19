@@ -57,3 +57,17 @@ ode --test "test/replay/**/*.test.js"。
   3. 判断某文件能否整拷，用 `git rev-parse <ref>:<file>` 比哈希，比 `git diff` 看内容更快也更准。
 - **涉及文件/命令**：`git merge-file -p <local> <base> <other>`、`git rev-parse origin/beta:<file>`；受害文件 `src/core/config.js`（多平台 import）、`src/purpose/module.js`（identity/parseChatId）。
 
+## 2026-11-19 单字模块命令吃掉了内置命令（`/记 买菜` 抢 `/记住我不吃香菜`）
+
+- **现象**：装了 `little-notes`（命令 `记`）之后，`/记住我不吃香菜` 被当成模块命令 `记` + 参数 `住我不吃香菜`，内置 `remember` 再也调不到。`/身体测试 经期1` 这类则相反——内置 `身体` 抢了模块的长命令。
+- **原因**：`parseCommand` 的中文前缀匹配按「先模块后内置、先到先得」的顺序取第一个命中，没有比较前缀长度。单字模块命令必然吃掉所有以该字开头的内置命令；反过来内置的短命令也会截断模块的长命令。
+- **解决**：前缀阶段把模块与内置**放在一起比**，按最长匹配取胜；等长时模块优先（模块是用户显式装的，更可能想用它）。精确命中仍走原来的优先级（保留命令 → 模块 → 内置），所以 `/记`（精确）和 `/记 买菜`（前缀）都对。改动在 `src/chat/commands.js` 的 `parseCommand`，回归用例在 `test/commands.test.js`。
+- **涉及文件/命令**：`src/chat/commands.js`、`test/commands.test.js`、`src/modules/API.md`（`api.command` 最长匹配说明）。
+
+## 2026-11-19 用户模块关掉再打开不会重启（`running` 一直是空）
+
+- **现象**：面板里把 `weather` 或 `livin` 的开关关掉再打开，`GET /aurabot/api/modules` 里 `enabled: true` 但 `running: ''`，模块的命令/工具/路由全部消失；改一下模块文件的 mtime 或调 `/modules/reload` 才会起来。
+- **原因**：`src/core/modules.js` 的 `syncPass()` 里「上次加载失败、文件也没改就别每 3 秒重试」的判断写成了 `if (!changed && (!rec || rec.fallback)) continue`。`stop()` 会把实例从 `live` 里摘掉但不清理 `userSeen`，于是模块被关掉后 `rec` 为 `null`、`changed` 为 `false`，这一条把「重新打开」和「上次加载失败」一起跳过了，永远起不来。
+- **解决**：判据只能用错误表，不能看 `rec` 在不在——改成 `if (!changed && errors.get(id)?.source === 'user') continue`。失败路径确实会 `errors.set({source:'user'})` + `userSeen.set`，语义不变。回归用例 `test/modules.test.js`「面板里关掉自己写的模块再打开：能重新起来（不要求改文件）」，临时回退该行可复现失败（`running` 期望 `user` 实际 `null`）。
+- **涉及文件/命令**：`src/core/modules.js`（`syncPass`）、`test/modules.test.js`；触发命令 `POST /aurabot/api/save {"modules":{"<id>":{"enabled":true}}}`。
+

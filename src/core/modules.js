@@ -933,7 +933,9 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
       const seen = userSeen.get(id)
       const changed = !seen || seen.file !== u.file || seen.stamp !== stampOf(u.dir)
       if (rec && rec.source === 'user' && !changed) continue
-      if (!changed && (!rec || rec.fallback)) continue // 上次加载失败、文件也没改：等改了再试
+      // 上次加载失败、文件也没改：等改了再试。判据只能用错误表，不能看 rec 在不在——
+      // 关掉再打开的模块同样没有 rec，用 !rec 会把「重新打开」一起吃掉（模块再也起不来）。
+      if (!changed && errors.get(id)?.source === 'user') continue
       if (rec) stop(id, { quiet: true })
       if (seen && changed) log.info(`模块「${id}」文件改了，重新加载`)
       const revision = revisions.get(id) || 0
