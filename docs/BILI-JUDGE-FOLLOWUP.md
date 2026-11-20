@@ -15,8 +15,9 @@ token 吃光**，不是模型能力问题。下面是当时列出的问题与处
 | 11:11 视频投稿（1 条） | 正常判出 | 摘要 |
 | 15:44 维护结束 + 兑换码（2 条） | `reasoning=844/840`，输出 0 → 两条都原文转发 | 合并 digest |
 
-单条判定实测推理消耗 1400~1900 token；`reasoningEffort=low` 能压到 1759 左右，但仍会
-偶发打满。加 `low` 后跑 3 次全成功，不加时 3 次里 1 次 `incomplete`。
+单条判定实测推理消耗 1400~1900 token（老样本，长图文），远超旧预算 1500。波动很大：
+同一批样本重放三次，推理 token 从 167 到 1332 都有。这也是为什么预算要给足、
+并且在 `max-tokens` 截断时还要能放宽重试。
 
 ## 清单
 
@@ -31,13 +32,28 @@ token 吃光**，不是模型能力问题。下面是当时列出的问题与处
 非空 → 不重试 → 直接 fail-open。现在 `runStream` 把 finish 的 `kind` 带出来，`max-tokens`
 也触发一次放宽重试（`maxTokens` 翻三倍，上限 8000）。
 
-### 3. 判定模型没有推理元数据（已改）
+### 3. 判定模型没有推理元数据（已查清，无需改配置）
 
 `~/.dsh/profiles/web/cordis.patch.yml` 里 `magpie-responses/10/spark-x2.6` 只声明了
-`input` 和 `compat`，没有 `reasoningEfforts`。于是 `pickReasoningEffort` 查不到就干脆
-不传，模型按默认高思考跑。补上 `low/medium/high/max` 之后，`askModel` 的默认 `low`
-才真正生效。**这是本机 profile 配置，不在仓库里，重启 `dsh web` 才生效。**
-（网关对 `minimal/low/medium/high/max` 都接受，已逐个验证。）
+`input` 和 `compat`，没有 `reasoningEfforts`；网关 `/v1/models` 也报
+`reasoning: false`、`reasoning_levels: []`。所以 `pickReasoningEffort` 查不到就干脆不传。
+
+一度以为是问题所在，实测**不是**：
+
+| 传入 reasoning | 推理 token / 输出 token | 耗时 |
+| --- | --- | --- |
+| 不传 | 758 / 878 | 16.5s |
+| `minimal` | 706 / 827 | 18.1s |
+| `low` | 749 / 874 | 14.9s |
+| `medium` | 612 / 737 | 26.0s |
+| `high` | 421 / 554 | 13.1s |
+
+网关接受所有档位（响应里会回显 `effort`），但**推理 token 消耗与档位无关**，都落在
+420~760。也就是说 effort 既省不下预算也压不住波动，`reasoningEfforts` 属于锦上添花。
+
+真正决定成败的是输出预算：不传 reasoning、只用 2500，把三条历史 `by=fail` 样本走一遍
+`askModel` 真实路径，全部判出（66s / 24s / 22s，1/1、1/1、1/1）。
+**结论：不改 profile，靠第 1、2 条的预算 + 放宽重试即可。**
 
 ### 4. salvage 只能算兜底（待做）
 
