@@ -89,15 +89,18 @@ token 吃光**，不是模型能力问题。下面是当时列出的问题与处
 `widened` / `widenSkipped` / `usage`，debug 日志用 `traceNote()` 压成一行，例如：
 
 ```
-B 站动态判定没解析出结果，模型原始输出： （空） 结束=max-tokens 预算=3300 推理=3299/3300
+B 站动态判定没解析出结果，模型原始输出： （空） 结束=max-tokens 预算=3300 输出=3300
 B 站动态判定没解析出结果，模型原始输出： 我觉得这条挺重要的… 结束=stop 预算=3300 输出=20
+B 站动态判定没解析出结果，模型原始输出： （空） 结束=max-tokens 预算=700 截断但没时间重试
 ```
 
 一眼能分出「预算不够」和「模型没照格式说」。只判出一部分（`n/m`）也会留痕。
+（`推理=` 那段只在适配器真的上报 `reasoningTokens` 时才有，走 pi-ai 的路线取不到，见文末缺口 3。）
 
 ### 5. 观测缺失（已并入第 4 条）
 
-`status` / `finish_reason` / `reasoning_tokens` 现在进 debug 日志，不再需要手工抓网关响应。
+`status` / `finish_reason` 现在进 debug 日志，不再需要手工抓网关响应。`reasoning_tokens`
+能取到就一起记，但走 pi-ai 的路线取不到（见文末缺口 3）。
 **没有**进 `usage.json`：那里的行只有 `in/out/cached/written`，加 reasoning 字段会波及面板
 汇总与历史数据迁移，收益不抵成本。
 
@@ -129,16 +132,60 @@ n=4 条、1 天、1 个号，不足以支撑统计结论。
 
 要继续扩样本，按 `replay.json` 的结构追加即可。
 
-## 验证缺口（还没补上的）
+## 验证缺口（两条已补，一条确认修不了）
 
-- **超时 abort 只有单测**：`llm.js` 把 `signal` 透传到底层 stream（:240），但真实 DSH 适配器
-  是否尊重 `params.signal` 没有端到端证据。已用假适配器验证「超时后 1 秒内返回、3 秒内没有
-  后台续跑」，但这只能证明我们这一层没泄漏。
-- **截断后放宽重试在真实重放里一次都没触发**：走 `askModel` 那次（99s）status 是 `completed`，
-  唯一一次截断（`3299/3300`）是重放脚本直接 `fetch` 打网关，根本没经过 `askModel`。
-  放宽重试目前只有单测覆盖，真实触发时能不能救回来仍然未知。
-- **`chunk.usage` 是否带 reasoning token 明细**：`src` 里没有 `reasoningTokens` /
-  `output_tokens_details` 的映射，`traceNote()` 只是「有就记」，取不到就只剩原始用量。
+### 1. 超时 abort 会不会真的掐掉底层请求（源码已确认）
+
+`llm.js` 把 `signal` 透传到底层 stream（`src/core/llm.js:240`），链路是：
+`dsh-llm` 的 `stream()` → `adapterStream()` → `adapter.prepareCall(provider, model, signal)`
+（`dsh-llm/lib/index.js:2318`）→ `dispatch()` → `PiAiAdapter.streamWithSnapshot()`。
+
+在适配器里 signal 没有丢：`dsh-llm-pi-ai/lib/index.js:1956` 把调用方的 signal 和内部的
+consumer 合流成 `AbortSignal.any([options.signal, consumer.signal])`，`:1958` 再套一层 idle
+watchdog，`:1988` 以 `signal: watchdog.signal` 交给 pi-ai。pi-ai 侧
+`@earendil-works/pi-ai/dist/api/openai-completions.js:194` / `:201` 把它塞进 `fetch` 的
+requestOptions，`:462` / `:486` 检查 `options?.signal?.aborted` 后置 `stopReason='aborted'`。
+抛出来之后 `dsh-llm-pi-ai:2010` 转成 `LlmError("...", "ABORTED")`，`dsh-llm` 的
+`adapterFailureChunk()` 再按 `signal?.aborted` 映射成 `{kind:'aborted'}`。
+
+所以「超时只 reject 不 abort、底层继续烧 token」这条路在现版本适配器上不成立；
+之前用假适配器做的观察只证明了我们这一层不泄漏，现在有了源码级证据。
+
+### 2. 截断后放宽重试能不能救回来（已实测：能）
+
+之前一次都没触发，是因为唯一那次截断发生在直连网关的重放脚本里，没经过 `askModel`。
+补测办法：走真实的 `judge → ask → askModel → PiAiAdapter → pi-ai openai-completions →
+网关` 链路（`magpie` 路由、`trae-cn/deepseek-v4.1-flash`、`reasoningEffort=low`），
+只在 `ask` 包装层把 `maxTokens` 压到 700 强制截断，其余全是生产代码。用最重的那条样本
+（`10:08 维护开始`，正常要 900+ 推理 token）：
+
+| 场景 | 第一次 | 放宽后 | 结果 |
+| --- | --- | --- | --- |
+| `maxTokens=700`，deadline 宽裕 | 截断 | `maxTokens=2100`、`finishKind=stop` | `attempts=2`、`widened=true`、`by=ai`，判定正常 |
+| `maxTokens=700`，deadline 只给 1 秒 | 截断 | 没重试（`widenSkipped='deadline'`） | `attempts=1`、`finishKind=max-tokens`，但这次正文恰好完整，仍 `by=ai` |
+
+结论：放宽重试在真实适配器上确实生效，×3 的倍数（700 → 2100）够把 919 推理 token 的样本救回来；
+`deadline` 保护也确实挡住了「重试必被外层掐断」的那种浪费。
+
+验证脚本没入库：它直接打本机网关（`127.0.0.1:3425`）并读 `~/.dsh/.env` 的 key，属于一次性实测，
+放仓库里既跑不起来也会带出本机配置。复现思路就是上面这段：真适配器 + 只在 `ask` 层压 `maxTokens`。
+
+### 3. `chunk.usage` 带不带 reasoning token 明细（上游丢弃，本仓库修不了）
+
+实测 `trace.usage` 的键只有 `inputTokens` / `outputTokens` / `totalTokens`，
+没有 `reasoningTokens`。原因不在我们这层：
+
+- 协议层是支持的：`dsh-llm/lib/typert.host.js:608` 的 `TokenUsage` 有 `reasoningTokens?: number`，
+  `dsh-token-meter` 也按它聚合（含 `reasoningTokens > outputTokens` 的合法性校验）。
+- pi-ai 也算出来了：`openai-completions.js:1179` 与 `openai-responses-shared.js:502` 都读
+  `completion_tokens_details.reasoning_tokens` / `output_tokens_details.reasoning_tokens`。
+- 但 `dsh-llm-pi-ai/lib/index.js:1439` 的 `mapUsage()` 只映射
+  `inputTokens/outputTokens/totalTokens/cacheReadTokens/cacheWriteTokens`，注释写着
+  「reasoning folded into output by pi-ai」——字段在这一步被丢了。
+
+所以 `traceNote()` 里 `推理=` 那条分支在 magpie 这类走 pi-ai 的路由上取不到值，只会退化成分支
+`输出=`；日志里的「推理=3299/3300」来自重放脚本自己读的网关原始响应，不是 `chunk.usage`。
+要补只能在 `mapUsage()` 里加一行 `reasoningTokens`，属于上游改动。
 
 ## 这类测试叫什么
 
