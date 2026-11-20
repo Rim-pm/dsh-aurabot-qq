@@ -676,6 +676,25 @@ test('订阅 + AI 过滤：判定失败原样转，并告诉主人是没判成',
   assert.equal(engine.judged()[0].by, 'fail')
 })
 
+test('订阅 + AI 过滤：判定失败只转标题 + 前两行，推广尾不跟着走', async () => {
+  reset()
+  let items = [item('100')]
+  const { engine, sent } = makeEngine({
+    cfg: { bili: { enabled: true, aiFilter: true, subs: [{ mid: '161775300', name: 'A' }], subGapSec: 0 } },
+    feed: async () => items,
+    ask: async () => { throw new Error('判定超时') },
+  })
+  await engine.poll({ force: true })
+  const body = '重要公告：今晚停服维护\n补偿 300 合成玉已发到邮箱\n立即下载首日可获取 130 抽'
+  items = [item('101', body), item('100')]
+  const r = await engine.poll({ force: true })
+  assert.equal(r.pushed, 1)
+  assert.match(sent[0].text, /重要公告：今晚停服维护\n补偿 300 合成玉已发到邮箱…/)
+  assert.doesNotMatch(sent[0].text, /130 抽/, '推广尾不该转给主人')
+  assert.match(sent[0].text, /opus\/101/, '链接留着，主人还能自己点进去')
+  assert.match(sent[0].text, /AI 没判成/)
+})
+
 test('订阅 + AI 过滤：阈值能卡掉「说不上重要」的', async () => {
   reset()
   let items = [item('100')]

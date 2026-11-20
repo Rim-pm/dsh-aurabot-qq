@@ -90,13 +90,26 @@ export function findMid(text) {
   return parseTarget(text).mid || ''
 }
 
+/**
+ * 正文取几行。`lines = 0` 表示全都要（正常转发的行为）。
+ * 判失败时只取前两行：原文里常带「立即下载首日可获取 130 抽」这类推广尾，
+ * 整段转给主人等于把广告也一起推了。
+ */
+function bodyOf(text, lines = 0) {
+  const body = String(text || '').trim()
+  if (!body || !lines) return body
+  const all = body.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
+  if (all.length <= lines) return all.join('\n')
+  return all.slice(0, lines).join('\n') + '…'
+}
+
 /** 一条动态变成推给主人的那段话。 */
-export function formatDynamic(item, sub) {
+export function formatDynamic(item, sub, { bodyLines = 0 } = {}) {
   const who = (sub && sub.name) || item.author || 'UP主'
   const lines = [`【B站动态】${who}`]
   if (item.kind === 'video' && item.title) lines.push(`投稿了视频《${item.title}》`)
   else if (item.kind === 'live') lines.push(item.live?.status === 1 ? `开播了${item.live.title ? '：' + item.live.title : ''}` : `下播了${item.live?.title ? '：' + item.live.title : ''}`)
-  const body = String(item.text || '').trim()
+  const body = bodyOf(item.text, bodyLines)
   if (body) lines.push(body)
   if (!body && item.kind !== 'video' && item.kind !== 'live') lines.push(item.title || '（这条没有正文）')
   if (item.images.length) lines.push(`（配图 ${item.images.length} 张）`)
@@ -153,11 +166,13 @@ export function createSubs({ getConfig, setConfig, hub, memory, log, api: inject
     const to = ownerChat()
     if (!to) return false
     const ai = Boolean(verdict && verdict.by === 'ai')
+    const failed = Boolean(verdict && verdict.by === 'fail')
     let text = ai
       ? formatSummary(item, sub, verdict, { images: g.bili.subForwardImages, link: g.bili.aiFilterLink })
-      : formatDynamic(item, sub)
+      // 判失败时只带前两行正文：整段转会把「立即下载领 130 抽」这类推广尾也一起推给主人
+      : formatDynamic(item, sub, { bodyLines: failed ? 2 : 0 })
     // 判失败了也照转，但要让主人知道这不是「AI 觉得不重要」而是没判成
-    if (verdict && verdict.by === 'fail') text += '\n（AI 没判成，原样转给你）'
+    if (failed) text += '\n（AI 没判成，原样转给你）'
     if (g.dryRun) {
       log.info(`试运行：本来要推送 B 站动态（${sub.name || item.author || sub.mid}）${clip(item.text || item.title, 40)}${ai ? `（AI 判 ${verdict.level} 级）` : ''}`)
       return false

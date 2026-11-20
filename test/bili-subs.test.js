@@ -130,6 +130,17 @@ test('formatDynamic：视频 / 直播 / 图文各有各的说法', () => {
   assert.match(dyn.formatDynamic(item('5', '带图', { images: ['a', 'b'] }), { name: 'A' }), /配图 2 张/)
 })
 
+test('formatDynamic：bodyLines 只留前几行，0 表示全要', () => {
+  const body = '维护公告\n今晚 23:00 停服\n立即下载首日可获取 130 抽'
+  assert.match(dyn.formatDynamic(item('6', body), { name: 'A' }), /立即下载首日可获取 130 抽/)
+  const cut = dyn.formatDynamic(item('6', body), { name: 'A' }, { bodyLines: 2 })
+  assert.match(cut, /维护公告\n今晚 23:00 停服…/)
+  assert.doesNotMatch(cut, /130 抽/, '判失败时不该把推广尾也转给主人')
+  assert.match(cut, /opus\/6/, '链接要留着，主人还能自己点进去')
+  // 行数不够就原样，别硬加省略号
+  assert.doesNotMatch(dyn.formatDynamic(item('7', '只有一行'), { name: 'A' }, { bodyLines: 2 }), /…/)
+})
+
 test('订阅：冷启动只记游标，之后只推新的', async () => {
   reset()
   let items = [item('100')]
