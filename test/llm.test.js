@@ -174,3 +174,53 @@ test('signal：流里报错时如果已取消，直接抛出去，不再降级�
   assert.equal(calls.length, 1, '取消了就别再发一次不带档位的请求')
 })
 
+test('预算被截断（max-tokens）：吐出半截内容也要放宽预算重试一次', async () => {
+  clearReasoningCache()
+  let n = 0
+  const { dsh, calls } = fakeDsh({
+    reasoning: null,
+    stream: async function * () {
+      n++
+      if (n === 1) {
+        // 推理把预算吃光：只有半截 JSON，finish 是 max-tokens
+        yield { type: 'text-delta', text: '[{"i":1,"keep":true,"level":3,"title":"维护' }
+        yield { type: 'finish', reason: { kind: 'max-tokens' } }
+        return
+      }
+      yield { type: 'text-delta', text: '[{"i":1,"keep":true,"level":3,"title":"维护结束"}]' }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    },
+  })
+  const text = await askModel(dsh, { cfg: CFG, text: '在吗', maxTokens: 2000 })
+  assert.match(text, /维护结束/)
+  assert.equal(calls.length, 2, '截断要重试，不能把半截 JSON 当成模型乱说')
+  assert.ok(calls[1].maxTokens > calls[0].maxTokens, '第二次要给更多预算')
+})
+
+test('截断重试只放宽一次：第二次还截断就把结果原样交回去', async () => {
+  clearReasoningCache()
+  const { dsh, calls } = fakeDsh({
+    reasoning: null,
+    stream: async function * () {
+      yield { type: 'text-delta', text: '[{"i":1,' }
+      yield { type: 'finish', reason: { kind: 'max-tokens' } }
+    },
+  })
+  const text = await askModel(dsh, { cfg: CFG, text: '在吗', maxTokens: 2000 })
+  assert.equal(text, '[{"i":1,')
+  assert.equal(calls.length, 2, '最多放宽一次，不能无限重试')
+})
+
+test('预算放宽有上限：不会把 maxTokens 涨到模型能力之外', async () => {
+  clearReasoningCache()
+  const { dsh, calls } = fakeDsh({
+    reasoning: null,
+    stream: async function * () {
+      yield { type: 'text-delta', text: '半截' }
+      yield { type: 'finish', reason: { kind: 'max-tokens' } }
+    },
+  })
+  await askModel(dsh, { cfg: CFG, text: '在吗', maxTokens: 6000 })
+  assert.ok(calls[1].maxTokens <= 8000, `放宽后 ${calls[1].maxTokens} 不该超过上限`)
+})
+

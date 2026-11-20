@@ -160,10 +160,17 @@ const abortError = (signal) => {
 let lastEmpty = ''
 export const lastEmptyInfo = () => lastEmpty
 
+/**
+ * 放宽预算的上限。推理模型的思考长度不好预估，遇到空输出 / 截断就多给一倍多；
+ * 但也不能无限涨——请求里 maxTokens 超过模型能力上限时整轮会被拒。
+ */
+const MAX_WIDEN_TOKENS = 8000
+
 async function runStream (llm, params, onUsage) {
   let out = ''
   const types = {}
   let finish = ''
+  let finishKind = ''
   let usage = null
   try {
     for await (const chunk of llm.stream(params)) {
@@ -171,7 +178,10 @@ async function runStream (llm, params, onUsage) {
       types[chunk.type] = (types[chunk.type] || 0) + 1
       // 有的适配器会分片上报用量：只留最后一次，保证「一次调用只记一行」，不会重复计费
       if (chunk.type === 'usage') usage = chunk.usage
-      if (chunk.type === 'finish') finish = JSON.stringify(chunk.reason || {}).slice(0, 120)
+      if (chunk.type === 'finish') {
+        finish = JSON.stringify(chunk.reason || {}).slice(0, 120)
+        finishKind = String((chunk.reason && chunk.reason.kind) || '')
+      }
       if (chunk.type === 'text-delta') out += chunk.text
       if (chunk.type === 'finish' && chunk.reason && chunk.reason.kind === 'error') {
         const f = chunk.reason.failure || {}
@@ -185,7 +195,8 @@ async function runStream (llm, params, onUsage) {
     if (usage && onUsage) { try { onUsage(usage) } catch (error) {} }
   }
   if (!out.trim()) lastEmpty = `结束原因 ${finish || '无'}，数据块 ${JSON.stringify(types)}`
-  return out.trim()
+  // finishKind 要带出去：max-tokens 说明是「预算不够」而不是「模型抽风」，上层要区别对待
+  return { text: out.trim(), finishKind }
 }
 
 /**
@@ -238,11 +249,16 @@ export async function askModel (dsh, o) {
     if (temperature !== undefined && !temperatureUnsupported(t.provider, t.model)) params.temperature = temperature
     if (effort) params.reasoningEffort = effort
     try {
-      const out = await runStream(llm, params, onUsage)
-      // 推理模型可能把输出预算全花在思考上，一个字没写：放宽预算再试一次
-      if (out || widened || aborted()) return out
-      widened = true
-      base.maxTokens = Math.max(base.maxTokens, Math.min(4000, base.maxTokens * 3))
+      const { text: out, finishKind } = await runStream(llm, params, onUsage)
+      // 推理模型可能把输出预算全花在思考上：一个字没写，或者被 max-tokens 截断。
+      // 后者的输出是半截 JSON，调用方必然解析失败 —— 也要放宽预算重试，
+      // 而不是把半截结果当成「模型乱说」直接 fail-open。
+      if (!widened && !aborted() && (!out || finishKind === 'max-tokens')) {
+        widened = true
+        base.maxTokens = Math.max(base.maxTokens, Math.min(MAX_WIDEN_TOKENS, base.maxTokens * 3))
+        continue
+      }
+      return out
     } catch (error) {
       // 被中断了就直接抛：不要再降级重试，那等于把已经取消的请求重新发一遍
       if (aborted()) throw error
