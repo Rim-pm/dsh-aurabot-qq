@@ -1,0 +1,204 @@
+{
+  "model": "magpie-responses/10/spark-x2.6",
+  "maxTokens": "2500 + 800n",
+  "batches": [
+    {
+      "label": "10:08 维护开始",
+      "items": [
+        {
+          "id": "1272234598763331584",
+          "kind": "draw",
+          "text": "亲爱的圣团长大人\n目前服务器已开始维护，暂时无法进入游戏\n\n预计维护时间：2026/11/19 10:00-16:00\n\n请圣团长大人耐心等待，维护完成后\n「水晶叶*600」将发到您的邮箱\n感谢您的理解和支持！\n\n*维护的时间有可能会发生变动\n您可以在官方社区了解最新相关信息",
+          "title": "",
+          "images": 1,
+          "url": "https://www.bilibili.com/opus/1272234598763331584"
+        }
+      ],
+      "runs": [
+        {
+          "ms": 95871,
+          "status": "incomplete",
+          "maxTokens": 3300,
+          "reasoningTokens": 3299,
+          "outputTokens": 3300,
+          "raw": "",
+          "verdicts": [
+            {
+              "by": "fail",
+              "keep": true,
+              "level": 2,
+              "title": "",
+              "points": [],
+              "images": []
+            }
+          ]
+        },
+        {
+          "ms": 34292,
+          "status": "completed",
+          "maxTokens": 3300,
+          "reasoningTokens": 919,
+          "outputTokens": 1002,
+          "raw": "[{\"i\":1,\"keep\":true,\"level\":3,\"title\":\"服务器已开始维护，完成后发600水晶叶\",\"points\":[\"维护时间为昨天（11月19日）10点至16点，补偿将发到邮箱\"],\"images\":[1],\"why\":\"属于维护公告，包含维护时间和补偿信息，符合推送标准\"}]",
+          "verdicts": [
+            {
+              "i": 1,
+              "by": "ai",
+              "keep": true,
+              "level": 3,
+              "title": "服务器已开始维护，完成后发600水晶叶",
+              "points": [
+                "维护时间为昨天（11月19日）10点至16点，补偿将发到邮箱"
+              ],
+              "images": [
+                1
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "label": "11:11 视频投稿",
+      "items": [
+        {
+          "id": "1272249925336301568",
+          "kind": "video",
+          "text": "",
+          "title": "【软软糯糯笑话集】秒速100光年！",
+          "images": 0,
+          "url": "https://www.bilibili.com/video/BV1Ras46aEUo"
+        }
+      ],
+      "runs": [
+        {
+          "ms": 15490,
+          "status": "completed",
+          "maxTokens": 3300,
+          "reasoningTokens": 446,
+          "outputTokens": 502,
+          "raw": "[{\"i\":1,\"keep\":true,\"level\":2,\"title\":\"嘟嘟脸恶作剧投稿软糯笑话集新视频\",\"points\":[],\"images\":[],\"why\":\"属于UP主投稿新视频，符合值得推送的判断标准\"}]",
+          "verdicts": [
+            {
+              "i": 1,
+              "by": "ai",
+              "keep": true,
+              "level": 2,
+              "title": "嘟嘟脸恶作剧投稿软糯笑话集新视频",
+              "points": [],
+              "images": []
+            }
+          ]
+        },
+        {
+          "ms": 10869,
+          "status": "completed",
+          "maxTokens": 3300,
+          "reasoningTokens": 262,
+          "outputTokens": 319,
+          "raw": "[{\"i\":1,\"keep\":true,\"level\":2,\"title\":\"嘟嘟脸恶作剧投稿软软糯糯笑话集新视频\",\"points\":[],\"images\":[],\"why\":\"UP主投稿了新视频，属于值得推送的类型\"}]",
+          "verdicts": [
+            {
+              "i": 1,
+              "by": "ai",
+              "keep": true,
+              "level": 2,
+              "title": "嘟嘟脸恶作剧投稿软软糯糯笑话集新视频",
+              "points": [],
+              "images": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "label": "15:44 维护结束 + 兑换码",
+      "items": [
+        {
+          "id": "1272320156682420226",
+          "kind": "forward",
+          "text": "维护结束通知\n11/19 10:00开始的停服维护已结束，感谢圣团长大人的耐心等待\n维护补偿【水晶叶*600】将发到您的邮箱中，感谢您的理解与支持",
+          "title": "",
+          "images": 0,
+          "url": "https://www.bilibili.com/opus/1272320156682420226"
+        },
+        {
+          "id": "1272321917606428713",
+          "kind": "draw",
+          "text": "为了纪念斯皮奇正式登场，特别准备了纪念礼物送给大家！\n「使徒招募券*10」\n「南瓜炖菜*3」\n\n奖励兑换码：【JOWAYOMAID】\n\n【领取时间】\n11/19 ~ 11/26 23:59（UTC+9）\n\n*使用方法：主菜单右上角「三 (菜单) 」→ 「设置」→「其他」→「输入礼包码」→输入兑奖码后点击应用→右上「邮箱」领取\n\n今后也请继续支持《嘟嘟脸恶作剧》！ \n\n------ 立即下载首日可获取130抽 ------\n>>>前往下载：https://www.biligame.com/detail/?id=111436\n>>>iOS商店下载已开启",
+          "title": "",
+          "images": 1,
+          "url": "https://www.bilibili.com/opus/1272321917606428713"
+        }
+      ],
+      "runs": [
+        {
+          "ms": 50281,
+          "status": "completed",
+          "maxTokens": 4100,
+          "reasoningTokens": 2061,
+          "outputTokens": 2336,
+          "raw": "```json\n[\n  {\n    \"i\": 1,\n    \"keep\": true,\n    \"level\": 2,\n    \"title\": \"维护已结束，600水晶叶补偿发到邮箱\",\n    \"points\": [],\n    \"images\": [],\n    \"why\": \"停服维护已结束，水晶叶补偿将发到邮箱，属维护与补偿类信息，值得告知\"\n  },\n  {\n    \"i\": 2,\n    \"keep\": true,\n    \"level\": 3,\n    \"title\": \"斯皮奇登场纪念礼，兑换码JOWAYOMAID可领\",\n    \"points\": [\n      \"奖励含使徒招募券*10、南瓜炖菜*3，领取截止到下周四（11月26日）23:59（UTC+9）\",\n      \"主菜单「三(菜单)」→「设置」→「其他」→「输入礼包码」，兑换后到邮箱领取\"\n    ],\n    \"images\": [1],\n    \"why\": \"斯皮奇登场纪念兑换码福利，含明确的截止时间和兑换方式，是主人在意的领取信息\"\n  }\n]\n```",
+          "verdicts": [
+            {
+              "i": 1,
+              "by": "ai",
+              "keep": true,
+              "level": 2,
+              "title": "维护已结束，600水晶叶补偿发到邮箱",
+              "points": [],
+              "images": []
+            },
+            {
+              "i": 2,
+              "by": "ai",
+              "keep": true,
+              "level": 3,
+              "title": "斯皮奇登场纪念礼，兑换码JOWAYOMAID可领",
+              "points": [
+                "奖励含使徒招募券*10、南瓜炖菜*3，领取截止到下周四（11月26日）23:59（UTC+9）",
+                "主菜单「三(菜单)」→「设置」→「其他」→「输入礼包码」，兑换后到邮箱领取"
+              ],
+              "images": [
+                1
+              ]
+            }
+          ]
+        },
+        {
+          "ms": 23127,
+          "status": "completed",
+          "maxTokens": 4100,
+          "reasoningTokens": 571,
+          "outputTokens": 789,
+          "raw": "```json\n[\n  {\n    \"i\": 1,\n    \"keep\": true,\n    \"level\": 2,\n    \"title\": \"维护已结束，水晶叶*600发到邮箱\",\n    \"points\": [],\n    \"images\": [],\n    \"why\": \"维护结束并发放补偿，属于值得推送的更新公告\"\n  },\n  {\n    \"i\": 2,\n    \"keep\": true,\n    \"level\": 2,\n    \"title\": \"斯皮奇登场纪念礼，兑换码JOWAYOMAID\",\n    \"points\": [\n      \"领取截止周六（11月26日）23:59，过期失效\",\n      \"游戏内设置→其他→输入礼包码，领奖在邮箱\"\n    ],\n    \"images\": [1],\n    \"why\": \"含兑换码和明确截止时间，是限时福利\"\n  }\n]\n```",
+          "verdicts": [
+            {
+              "i": 1,
+              "by": "ai",
+              "keep": true,
+              "level": 2,
+              "title": "维护已结束，水晶叶*600发到邮箱",
+              "points": [],
+              "images": []
+            },
+            {
+              "i": 2,
+              "by": "ai",
+              "keep": true,
+              "level": 2,
+              "title": "斯皮奇登场纪念礼，兑换码JOWAYOMAID",
+              "points": [
+                "领取截止周六（11月26日）23:59，过期失效",
+                "游戏内设置→其他→输入礼包码，领奖在邮箱"
+              ],
+              "images": [
+                1
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

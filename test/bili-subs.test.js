@@ -130,6 +130,17 @@ test('formatDynamic：视频 / 直播 / 图文各有各的说法', () => {
   assert.match(dyn.formatDynamic(item('5', '带图', { images: ['a', 'b'] }), { name: 'A' }), /配图 2 张/)
 })
 
+test('formatDynamic：bodyLines 只留前几行，0 表示全要', () => {
+  const body = '维护公告\n今晚 23:00 停服\n立即下载首日可获取 130 抽'
+  assert.match(dyn.formatDynamic(item('6', body), { name: 'A' }), /立即下载首日可获取 130 抽/)
+  const cut = dyn.formatDynamic(item('6', body), { name: 'A' }, { bodyLines: 2 })
+  assert.match(cut, /维护公告\n今晚 23:00 停服…/)
+  assert.doesNotMatch(cut, /130 抽/, '判失败时不该把推广尾也转给主人')
+  assert.match(cut, /opus\/6/, '链接要留着，主人还能自己点进去')
+  // 行数不够就原样，别硬加省略号
+  assert.doesNotMatch(dyn.formatDynamic(item('7', '只有一行'), { name: 'A' }, { bodyLines: 2 }), /…/)
+})
+
 test('订阅：冷启动只记游标，之后只推新的', async () => {
   reset()
   let items = [item('100')]
@@ -212,6 +223,43 @@ test('订阅：一次最多推 subMaxPerPoll 条（推最新的几条）', async
   assert.match(sent[0].text, /第四条/)
   assert.match(sent[1].text, /第五条/)
   assert.equal(engine.list()[0].cursor, '105')
+})
+
+test('订阅：推送发送失败时不推进游标，下一轮补发，不吞动态', async () => {
+  reset()
+  let items = [item('100')]
+  let broken = false
+  const state = { cfg: normalize({ enabled: true, dryRun: false, ownerQQ: '10000001', bili: { enabled: true, subs: [{ mid: '161775300', name: 'A' }], subGapSec: 0 } }) }
+  const sent = []
+  const engine = dyn.createSubs({
+    getConfig: () => state.cfg,
+    setConfig: (fn) => { state.cfg = normalize(typeof fn === 'function' ? fn(state.cfg) : fn) },
+    hub: {
+      sendText: async (to, text) => {
+        if (broken) throw new Error('网关挂了')
+        sent.push({ to, text })
+        return { message_id: '1' }
+      },
+      sendImage: async () => ({ message_id: '2' }),
+    },
+    log: { info() {}, warn() {}, debug() {} },
+    api: { dynamicFeed: async () => items, card: async (mid) => ({ mid, name: 'A' }), searchUser: async () => [], dynamicAuthor: async () => ({ mid: '161775300', name: 'A' }) },
+    sleep: async () => {},
+  })
+  await engine.poll({ force: true })
+  assert.equal(engine.list()[0].cursor, '100')
+
+  broken = true
+  items = [item('101', '重要公告'), item('100')]
+  const bad = await engine.poll({ force: true })
+  assert.equal(bad.pushed, 0)
+  assert.equal(engine.list()[0].cursor, '100', '没发出去就不能推进游标，否则这条动态永远丢了')
+
+  broken = false
+  const retry = await engine.poll({ force: true })
+  assert.equal(retry.pushed, 1, '下一轮要补发')
+  assert.match(sent.at(-1).text, /重要公告/)
+  assert.equal(engine.list()[0].cursor, '101')
 })
 
 test('订阅：试运行只记日志，不发消息', async () => {

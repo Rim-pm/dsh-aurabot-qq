@@ -240,6 +240,7 @@ function BiliSubs({ draft, setDraft, toast }) {
             ? h('span', { className: 'ab-small', style: { color: 'var(--ab-warn)' } }, ' 这个模型看不了图，纯图动态会跳过看图照转') : null) : null,
         aiOn ? h(ui.Row, { key: 'lvl', label: '判到多重要才推', hint: '号上还能单独设；调高就只收重要的，调低就都收' }, f.range('bili.aiFilterMinLevel', 1, 3, 1, (v) => ['', '都推', '值得说一声', '很重要'][v])) : null,
         aiOn ? h(ui.Row, { key: 'vis', label: '没有正文的纯图动态也看图', hint: '会多花 token（一张图按 token 算）；不开就照转' }, f.sw('bili.aiFilterVision')) : null,
+        aiOn ? h(ui.Row, { key: 'timeout', label: '判定最多等多久', hint: '推理模型判一批比较慢，等太久没用；等不到就原样转给你' }, f.num('bili.aiFilterTimeoutSec', { min: 30, max: 600 }), h('span', { className: 'ab-muted' }, '秒')) : null,
         aiOn ? h(ui.Row, { key: 'link', label: '摘要末尾带原动态链接', hint: '默认不带，看着清爽；想回溯点进去就打开' }, f.sw('bili.aiFilterLink')) : null,
         aiOn ? h(ui.Row, { key: 'digest', label: '一轮多条合成一条', hint: '同一个号一次查到多条值得推的，合成一条 digest，图最多 3 张（重要的先占名额）；关掉就一条一条发。合成失败会自动拆回逐条发' }, f.sw('bili.subDigest')) : null,
         aiOn ? h('div', { key: 'prompt', style: { marginTop: 8 } },

@@ -244,7 +244,7 @@ function fakeModel({ alwaysEmpty = false } = {}) {
   return { dsh, calls }
 }
 
-for (const [first, second] of [[700, 2100], [1500, 4000]]) {
+for (const [first, second] of [[700, 2100], [1500, 4500]]) {
   test(`模型空回复：${first} token 重试时扩大到 ${second}`, async () => {
     const { dsh, calls } = fakeModel()
     const text = await askModel(dsh, { cfg: modelConfig, text: '虚构的问题', maxTokens: first, reasoningEffort: '' })

@@ -90,13 +90,26 @@ export function findMid(text) {
   return parseTarget(text).mid || ''
 }
 
+/**
+ * 正文取几行。`lines = 0` 表示全都要（正常转发的行为）。
+ * 判失败时只取前两行：原文里常带「立即下载首日可获取 130 抽」这类推广尾，
+ * 整段转给主人等于把广告也一起推了。
+ */
+function bodyOf(text, lines = 0) {
+  const body = String(text || '').trim()
+  if (!body || !lines) return body
+  const all = body.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
+  if (all.length <= lines) return all.join('\n')
+  return all.slice(0, lines).join('\n') + '…'
+}
+
 /** 一条动态变成推给主人的那段话。 */
-export function formatDynamic(item, sub) {
+export function formatDynamic(item, sub, { bodyLines = 0 } = {}) {
   const who = (sub && sub.name) || item.author || 'UP主'
   const lines = [`【B站动态】${who}`]
   if (item.kind === 'video' && item.title) lines.push(`投稿了视频《${item.title}》`)
   else if (item.kind === 'live') lines.push(item.live?.status === 1 ? `开播了${item.live.title ? '：' + item.live.title : ''}` : `下播了${item.live?.title ? '：' + item.live.title : ''}`)
-  const body = String(item.text || '').trim()
+  const body = bodyOf(item.text, bodyLines)
   if (body) lines.push(body)
   if (!body && item.kind !== 'video' && item.kind !== 'live') lines.push(item.title || '（这条没有正文）')
   if (item.images.length) lines.push(`（配图 ${item.images.length} 张）`)
@@ -153,11 +166,13 @@ export function createSubs({ getConfig, setConfig, hub, memory, log, api: inject
     const to = ownerChat()
     if (!to) return false
     const ai = Boolean(verdict && verdict.by === 'ai')
+    const failed = Boolean(verdict && verdict.by === 'fail')
     let text = ai
       ? formatSummary(item, sub, verdict, { images: g.bili.subForwardImages, link: g.bili.aiFilterLink })
-      : formatDynamic(item, sub)
+      // 判失败时只带前两行正文：整段转会把「立即下载领 130 抽」这类推广尾也一起推给主人
+      : formatDynamic(item, sub, { bodyLines: failed ? 2 : 0 })
     // 判失败了也照转，但要让主人知道这不是「AI 觉得不重要」而是没判成
-    if (verdict && verdict.by === 'fail') text += '\n（AI 没判成，原样转给你）'
+    if (failed) text += '\n（AI 没判成，原样转给你）'
     if (g.dryRun) {
       log.info(`试运行：本来要推送 B 站动态（${sub.name || item.author || sub.mid}）${clip(item.text || item.title, 40)}${ai ? `（AI 判 ${verdict.level} 级）` : ''}`)
       return false
@@ -226,20 +241,21 @@ export function createSubs({ getConfig, setConfig, hub, memory, log, api: inject
   /**
    * 一轮里的几条合成一条 digest。合成只是为了少刷屏：发送失败就拆回 pushOne，
    * 一条一条发，绝不能因为排版 / 分段接口出问题把动态丢了。
+   * 返回真正发出去的条目 id：调用方要拿它决定游标推到哪。
    */
   async function pushDigest(sub, entries) {
     const g = getConfig()
     const to = ownerChat()
-    if (!to || !entries.length) return 0
+    if (!to || !entries.length) return []
     if (g.dryRun) {
       log.info(`试运行：本来要合并推送 B 站动态（${sub.name || sub.mid}）${entries.length} 条`)
-      return 0
+      return []
     }
     const split = async (why) => {
       log.warn(`合并推送没发出去（${why}），拆回一条一条发`)
-      let n = 0
-      for (const e of entries) if (await pushOne(sub, e.item, e.verdict)) n++
-      return n
+      const ok = []
+      for (const e of entries) if (await pushOne(sub, e.item, e.verdict)) ok.push(e.item.id)
+      return ok
     }
     let text = ''
     let images = []
@@ -263,7 +279,7 @@ export function createSubs({ getConfig, setConfig, hub, memory, log, api: inject
       try {
         await hub.sendSegments(to, segs, '[B站动态] ' + clip(text, 40))
         noteDigest(sub, entries)
-        return entries.length
+        return entries.map((e) => e.item.id)
       } catch (error) {
         return split(error.message)
       }
@@ -276,7 +292,7 @@ export function createSubs({ getConfig, setConfig, hub, memory, log, api: inject
     }
     for (const buf of bufs) await hub.sendImage(to, 'base64://' + buf.toString('base64')).catch(() => null)
     noteDigest(sub, entries)
-    return entries.length
+    return entries.map((e) => e.item.id)
   }
 
   /** 判定历史（面板「最近判定」）：只留最近 40 条，不然状态文件会越长越大。 */
@@ -349,11 +365,15 @@ export function createSubs({ getConfig, setConfig, hub, memory, log, api: inject
         const top = items.reduce((a, b) => (compareId(b.id, a) > 0 ? b.id : a), st.cursor || '0')
         if (!st.cursor) { st.cursor = top; continue } // 冷启动：只记游标，不补发历史
         const filters = resolveFilters(sub.filters)
-        const batch = items
+        const pending = items
           .filter((it) => it.id && keepDynamic(it, filters) && compareId(it.id, st.cursor) > 0)
           .sort((a, b) => compareId(a.id, b.id))
-          // 一次最多推几条，防止隔了几天没开就一次性刷屏
-          .slice(-limit)
+        // 一次最多推几条，防止隔了几天没开就一次性刷屏；超出的算看过，不然永远卡在游标后面
+        const batch = pending.slice(-limit)
+        const done = new Set()
+        for (const it of pending.slice(0, pending.length - batch.length)) done.add(it.id)
+        // 试运行 / 没有主人会话时根本发不出去：当作已处理，否则游标永远不动、每轮重推
+        const deliverable = !getConfig().dryRun && Boolean(ownerChat())
         if (batch.length) {
           // 先判再推：一批一次调用，省 token，也让模型能横向比较哪条更值得说
           const verdicts = await judge.judge(sub, batch).catch((error) => {
@@ -367,21 +387,38 @@ export function createSubs({ getConfig, setConfig, hub, memory, log, api: inject
             const v = byId.get(it.id) || { id: it.id, keep: true, level: 2, by: 'fail', why: '没拿到判定，照转' }
             // 只有真让模型判过的才受阈值管；raw / skip / fail 一律照转
             const keep = v.by === 'ai' ? v.keep !== false && v.level >= floor : v.keep !== false
-            recordJudged(s, sub, it, v, keep)
-            if (keep) kept.push({ item: it, verdict: v })
+            // 不推的（判成不重要 / 被阈值卡掉）算处理完；要推的等真发出去了才算
+            if (!keep) { recordJudged(s, sub, it, v, false); done.add(it.id); continue }
+            kept.push({ item: it, verdict: v })
           }
           // 先收集 keep 的条目再决定怎么发：AI 摘要的多条合成一条 digest；
           // 原样 / 判失败的仍然逐条发（要带原文和「AI 没判成」），一条都不能吞。
           const aiKept = kept.filter((e) => e.verdict.by === 'ai')
           const rawKept = kept.filter((e) => e.verdict.by !== 'ai')
+          const sentIds = new Set()
           if (c.subDigest && judge.modeOf(sub) === 'ai' && aiKept.length > 1) {
-            pushed += await pushDigest(sub, aiKept)
+            for (const id of await pushDigest(sub, aiKept)) sentIds.add(id)
           } else {
-            for (const e of aiKept) if (await pushOne(sub, e.item, e.verdict)) pushed++
+            for (const e of aiKept) if (await pushOne(sub, e.item, e.verdict)) sentIds.add(e.item.id)
           }
-          for (const e of rawKept) if (await pushOne(sub, e.item, e.verdict)) pushed++
+          for (const e of rawKept) if (await pushOne(sub, e.item, e.verdict)) sentIds.add(e.item.id)
+          for (const e of kept) {
+            if (sentIds.has(e.item.id) || !deliverable) { done.add(e.item.id); recordJudged(s, sub, e.item, e.verdict, true) }
+          }
+          pushed += sentIds.size
         }
-        st.cursor = top
+        // 游标只推过「真处理完」的那段：发送失败的留在游标后面，下一轮补发，不能吞动态
+        const allDone = pending.every((it) => done.has(it.id))
+        if (allDone) {
+          st.cursor = top
+        } else {
+          let next = st.cursor
+          for (const it of pending) {
+            if (!done.has(it.id)) break
+            next = it.id
+          }
+          st.cursor = next
+        }
       }
       s.lastPoll = Date.now()
       return {

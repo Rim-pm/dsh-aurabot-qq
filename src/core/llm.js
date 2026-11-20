@@ -147,14 +147,30 @@ const isUnsupportedTemperature = (error) => {
   return /unsupported parameter[^\n]*temperature|temperature[^\n]*(?:not supported|unsupported|does not support)/i.test(msg)
 }
 
+/** 中断时统一造一个错误：上层按 message 区分「被取消」和「模型报错」。 */
+const abortError = (signal) => {
+  const error = new Error('请求已取消')
+  error.name = 'AbortError'
+  error.code = 'ABORT_ERR'
+  if (signal && signal.reason) error.reason = signal.reason
+  return error
+}
+
 /** 最近一次模型一个字没写时流里有什么：排查「模型没返回内容」用。 */
 let lastEmpty = ''
 export const lastEmptyInfo = () => lastEmpty
+
+/**
+ * 放宽预算的上限。推理模型的思考长度不好预估，遇到空输出 / 截断就多给一倍多；
+ * 但也不能无限涨——请求里 maxTokens 超过模型能力上限时整轮会被拒。
+ */
+const MAX_WIDEN_TOKENS = 8000
 
 async function runStream (llm, params, onUsage) {
   let out = ''
   const types = {}
   let finish = ''
+  let finishKind = ''
   let usage = null
   try {
     for await (const chunk of llm.stream(params)) {
@@ -162,7 +178,10 @@ async function runStream (llm, params, onUsage) {
       types[chunk.type] = (types[chunk.type] || 0) + 1
       // 有的适配器会分片上报用量：只留最后一次，保证「一次调用只记一行」，不会重复计费
       if (chunk.type === 'usage') usage = chunk.usage
-      if (chunk.type === 'finish') finish = JSON.stringify(chunk.reason || {}).slice(0, 120)
+      if (chunk.type === 'finish') {
+        finish = JSON.stringify(chunk.reason || {}).slice(0, 120)
+        finishKind = String((chunk.reason && chunk.reason.kind) || '')
+      }
       if (chunk.type === 'text-delta') out += chunk.text
       if (chunk.type === 'finish' && chunk.reason && chunk.reason.kind === 'error') {
         const f = chunk.reason.failure || {}
@@ -176,12 +195,16 @@ async function runStream (llm, params, onUsage) {
     if (usage && onUsage) { try { onUsage(usage) } catch (error) {} }
   }
   if (!out.trim()) lastEmpty = `结束原因 ${finish || '无'}，数据块 ${JSON.stringify(types)}`
-  return out.trim()
+  // finishKind 要带出去：max-tokens 说明是「预算不够」而不是「模型抽风」，上层要区别对待
+  return { text: out.trim(), finishKind }
 }
 
 /**
  * @param {object} dsh 宿主 ctx
- * @param {{system:string, text:string, images?:Array<{data:string, mediaType:string}>, maxTokens?:number, temperature?:number, reasoningEffort?:string, cfg?:object, model?:{provider:string, model:string}}} o
+ * @param {{system:string, text:string, images?:Array<{data:string, mediaType:string}>, maxTokens?:number, temperature?:number, reasoningEffort?:string, cfg?:object, model?:{provider:string, model:string}, signal?:AbortSignal, deadline?:number, trace?:object}} o
+ *   deadline：调用方自己的超时时刻（Date.now() 毫秒）。快到期时不再放宽预算重试，
+ *   否则重试会被外层掐断，反而把「截断」变成「超时」。
+ *   trace：可选，回填这一轮怎么结束的（finishKind / maxTokens / attempts / widened / usage）。
  * @returns {Promise<string>}
  */
 export async function askModel (dsh, o) {
@@ -212,23 +235,56 @@ export async function askModel (dsh, o) {
     // 固定值即可：它只用来让上游把同一来源的请求归到一条路由上。
     sessionId: o.sessionId || 'aurabot-background',
   }
+  // 调用方给了中断信号就一路透传：超时 / 取消时真的把底层请求掐掉，
+  // 否则只是外层 reject，流还在后台继续烧 token
+  if (o.signal) base.signal = o.signal
   let temperature = o.temperature ?? 0.3
   let effort = await pickReasoningEffort(dsh, t.provider, t.model, o.reasoningEffort === undefined ? 'low' : o.reasoningEffort)
   let widened = false
   let temperatureTried = false
+  // 调用方想要「这一轮到底怎么结束的」时传个对象进来：只放元数据，不放正文
+  const trace = o.trace && typeof o.trace === 'object' ? o.trace : null
   // 记用量：模块名由调用方给（模块 API 会自动带上自己的 id），没给就算后台任务
-  const onUsage = (usage) => recordUsage({ module: moduleLabel(o.module || 'background'), provider: t.provider, model: t.model, usage })
+  const onUsage = (usage) => {
+    if (trace) trace.usage = usage
+    recordUsage({ module: moduleLabel(o.module || 'background'), provider: t.provider, model: t.model, usage })
+  }
+  const aborted = () => Boolean(o.signal && o.signal.aborted)
   for (let attempt = 0; ; attempt++) {
+    // 已经中断了就别再开下一轮：重试只会让被取消的请求又跑一遍
+    if (aborted()) throw abortError(o.signal)
     const params = { ...base }
     if (temperature !== undefined && !temperatureUnsupported(t.provider, t.model)) params.temperature = temperature
     if (effort) params.reasoningEffort = effort
+    const startedAt = Date.now()
     try {
-      const out = await runStream(llm, params, onUsage)
-      // 推理模型可能把输出预算全花在思考上，一个字没写：放宽预算再试一次
-      if (out || widened) return out
-      widened = true
-      base.maxTokens = Math.max(base.maxTokens, Math.min(4000, base.maxTokens * 3))
+      const { text: out, finishKind } = await runStream(llm, params, onUsage)
+      if (trace) {
+        trace.finishKind = finishKind
+        trace.maxTokens = base.maxTokens
+        trace.attempts = attempt + 1
+      }
+      // 推理模型可能把输出预算全花在思考上：一个字没写，或者被 max-tokens 截断。
+      // 后者的输出是半截 JSON，调用方必然解析失败 —— 也要放宽预算重试，
+      // 而不是把半截结果当成「模型乱说」直接 fail-open。
+      // 但重试也在调用方的总超时里：上一轮已经用掉大半时间时再重试，只会被掐在半路，
+      // 白白把「截断」拖成「超时」，连救回来的部分都丢了。宁可现在就交回半截结果。
+      const spent = Date.now() - startedAt
+      const left = o.deadline ? o.deadline - Date.now() : Infinity
+      const noTime = left < spent * 1.2
+      const shouldWiden = !out || finishKind === 'max-tokens'
+      if (shouldWiden && !widened && !aborted() && !noTime) {
+        widened = true
+        base.maxTokens = Math.max(base.maxTokens, Math.min(MAX_WIDEN_TOKENS, base.maxTokens * 3))
+        if (trace) trace.widened = true
+        continue
+      }
+      // 没放宽要留个原因：排查时「截断后为什么没重试」和「重试了还截断」是两回事
+      if (trace && shouldWiden && !widened) trace.widenSkipped = noTime ? 'deadline' : 'aborted'
+      return out
     } catch (error) {
+      // 被中断了就直接抛：不要再降级重试，那等于把已经取消的请求重新发一遍
+      if (aborted()) throw error
       // 能力探测没查到 / 模型临时不认：去掉思考强度再来一次
       if (!temperatureTried && temperature !== undefined && isUnsupportedTemperature(error)) {
         temperatureTried = true

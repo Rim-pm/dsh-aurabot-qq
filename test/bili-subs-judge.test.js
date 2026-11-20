@@ -117,6 +117,21 @@ test('解析：没给 keep 就看 level，level 越界会被夹回来', () => {
   assert.equal(v[2].level, 3, '99 夹到 3')
 })
 
+test('解析：输出被截断时，前面完整的对象要救回来，坏的那个丢掉', () => {
+  // 推理模型把预算花光，最后一个对象只写了一半——整段 JSON.parse 一定失败
+  const cut = '[{"i":1,"keep":true,"level":3,"title":"新活动","points":["送十连"]},{"i":2,"keep":true,"level":2,"title":"补偿'
+  const v = judge.parseVerdicts(cut, 2)
+  assert.equal(v.length, 1, '完整的那条要救回来')
+  assert.equal(v[0].i, 1)
+  assert.equal(v[0].title, '新活动')
+
+  // 字符串里的括号不能被当成对象边界
+  const withBrace = '[{"i":1,"keep":true,"title":"标题里有 } 和 { 也不怕"},{"i":2,"keep":tru'
+  const w = judge.parseVerdicts(withBrace, 2)
+  assert.equal(w.length, 1)
+  assert.match(w[0].title, /\} 和 \{/)
+})
+
 test('摘要：结论 + 要点 + 图号；链接默认不带，开了才带', () => {
   const it = item('1', '原始正文很长', { images: ['a.jpg', 'b.jpg', 'c.jpg'], url: 'https://www.bilibili.com/opus/1' })
   const text = judge.formatSummary(it, { name: '明日方舟' }, {
@@ -392,6 +407,100 @@ test('判定：模型报错 / 没给模型 → 全部 fail-open 照转', async (
   assert.equal(b[0].keep, true)
 })
 
+test('判定：输出预算给推理模型留够（基础 2500 + 每条 800）', async () => {
+  const cfg = normalize({ bili: { enabled: true, aiFilter: true } })
+  const calls = []
+  const j = judge.createJudge({
+    getConfig: () => cfg,
+    log: silent,
+    ask: async (o) => { calls.push(o); return '[{"i":1,"keep":true,"level":2,"title":"T"}]' },
+  })
+  await j.judge({ mid: '1', name: 'A' }, [item('1', '公告'), item('2', '公告')])
+  assert.equal(calls[0].maxTokens, 2500 + 2 * 800, '两条一批要 4100：实测单条推理就要 1400~1900 token')
+})
+
+test('判定：超时真的把请求 abort 掉，不是只把外层 promise reject', async () => {
+  // 不走 normalize（它会把超时夹到 30 秒起），这里要 1 秒内跑完
+  const cfg = { bili: { enabled: true, aiFilter: true, aiFilterTimeoutSec: 0.05 } }
+  let seen = null
+  let aborted = false
+  const j = judge.createJudge({
+    getConfig: () => cfg,
+    log: silent,
+    ask: (o) => {
+      seen = o.signal
+      return new Promise((resolve, reject) => {
+        o.signal.addEventListener('abort', () => { aborted = true; reject(new Error('请求已取消')) })
+      })
+    },
+  })
+  const v = await j.judge({ mid: '1', name: 'A' }, [item('1', '公告')])
+  assert.ok(seen, '要把 signal 传给 ask')
+  assert.equal(aborted, true, '超时后底层请求要被掐掉，否则流还在后台烧 token')
+  assert.equal(v[0].by, 'fail', '超时仍然 fail-open 照转')
+})
+
+test('判定：abort 之后不再重试 / 不再降级', async () => {
+  const cfg = normalize({ bili: { enabled: true, aiFilter: true } })
+  let asked = 0
+  const j = judge.createJudge({
+    getConfig: () => cfg,
+    log: silent,
+    ask: async (o) => { asked++; throw new Error('模型挂了') },
+  })
+  await j.judge({ mid: '1', name: 'A' }, [item('1', '公告')])
+  assert.equal(asked, 1, '一次失败就够，别反复问')
+})
+
+test('判定：把 deadline 一起传下去，让底层别在快超时时还放宽重试', async () => {
+  const cfg = normalize({ bili: { enabled: true, aiFilter: true } })
+  let seen = null
+  const j = judge.createJudge({
+    getConfig: () => cfg,
+    log: silent,
+    ask: async (o) => { seen = o; return '[{"i":1,"keep":true,"level":2,"title":"T"}]' },
+  })
+  await j.judge({ mid: '1', name: 'A' }, [item('1', '公告')])
+  assert.ok(Number.isFinite(seen.deadline), '要带 deadline，llm.js 靠它决定还值不值得重试')
+  assert.ok(seen.deadline > Date.now(), 'deadline 是未来时刻')
+})
+
+test('判定：日志要能分清「被截断」和「模型乱说」', async () => {
+  const cfg = normalize({ bili: { enabled: true, aiFilter: true } })
+  const logs = []
+  const mk = (raw, trace) => judge.createJudge({
+    getConfig: () => cfg,
+    log: { info() {}, warn() {}, debug: (...a) => logs.push(a.join(' ')) },
+    ask: async (o) => { Object.assign(o.trace, trace); return raw },
+  })
+
+  // 截断：模型被预算掐掉，一个字没写
+  await mk('', { finishKind: 'max-tokens', maxTokens: 3300, usage: { outputTokens: 3300, reasoningTokens: 3299 } })
+    .judge({ mid: '1', name: 'A' }, [item('1', '维护公告')])
+  const cut = logs.pop()
+  assert.match(cut, /结束=max-tokens/)
+  assert.match(cut, /预算=3300/)
+  assert.match(cut, /推理=3299\/3300/, '推理 token 要记，这是判断「预算够不够」的唯一依据')
+
+  // 模型乱说：正常结束，但给的不是 JSON
+  await mk('我觉得这条挺重要的，你看着办', { finishKind: 'stop', maxTokens: 3300, usage: { outputTokens: 20 } })
+    .judge({ mid: '1', name: 'A' }, [item('1', '维护公告')])
+  const chatty = logs.pop()
+  assert.match(chatty, /结束=stop/)
+  assert.match(chatty, /输出=20/)
+  assert.doesNotMatch(chatty, /max-tokens/, '正常结束就不该让人以为是被截断')
+
+  // 放宽过要标出来
+  await mk('', { finishKind: 'max-tokens', maxTokens: 8000, widened: true, usage: { outputTokens: 8000 } })
+    .judge({ mid: '1', name: 'A' }, [item('1', '维护公告')])
+  assert.match(logs.pop(), /预算=8000（已放宽）/)
+
+  // 只判出一部分：剩下的照转，也要留痕
+  await mk('[{"i":1,"keep":true,"level":2,"title":"T"}]', { finishKind: 'stop', maxTokens: 4100, usage: { outputTokens: 90 } })
+    .judge({ mid: '1', name: 'A' }, [item('1', '公告'), item('2', '公告')])
+  assert.match(logs.pop(), /只解析出 1\/2 条/)
+})
+
 test('判定：没有正文的纯图动态不问模型，直接照转', async () => {
   const cfg = normalize({ bili: { enabled: true, aiFilter: true } })
   let asked = 0
@@ -565,6 +674,25 @@ test('订阅 + AI 过滤：判定失败原样转，并告诉主人是没判成',
   assert.match(sent[0].text, /重要公告：今晚停服维护/)
   assert.match(sent[0].text, /AI 没判成/)
   assert.equal(engine.judged()[0].by, 'fail')
+})
+
+test('订阅 + AI 过滤：判定失败只转标题 + 前两行，推广尾不跟着走', async () => {
+  reset()
+  let items = [item('100')]
+  const { engine, sent } = makeEngine({
+    cfg: { bili: { enabled: true, aiFilter: true, subs: [{ mid: '161775300', name: 'A' }], subGapSec: 0 } },
+    feed: async () => items,
+    ask: async () => { throw new Error('判定超时') },
+  })
+  await engine.poll({ force: true })
+  const body = '重要公告：今晚停服维护\n补偿 300 合成玉已发到邮箱\n立即下载首日可获取 130 抽'
+  items = [item('101', body), item('100')]
+  const r = await engine.poll({ force: true })
+  assert.equal(r.pushed, 1)
+  assert.match(sent[0].text, /重要公告：今晚停服维护\n补偿 300 合成玉已发到邮箱…/)
+  assert.doesNotMatch(sent[0].text, /130 抽/, '推广尾不该转给主人')
+  assert.match(sent[0].text, /opus\/101/, '链接留着，主人还能自己点进去')
+  assert.match(sent[0].text, /AI 没判成/)
 })
 
 test('订阅 + AI 过滤：阈值能卡掉「说不上重要」的', async () => {
