@@ -16,8 +16,9 @@ const IMAGES_MAX = 3
 const IMAGE_INDEX_MAX = 9
 const BODY_MAX_DEFAULT = 800
 // 判定模型多是推理模型：思考也会吃输出预算。给足余量，别让 JSON 被截断成半截。
-const JUDGE_MAX_TOKENS_BASE = 1500
-const JUDGE_MAX_TOKENS_PER_ITEM = 600
+// 实测 spark-x2.6 判一条要 1400~1900 推理 token，2100 预算会用掉 88%，单条仍有概率打满。
+const JUDGE_MAX_TOKENS_BASE = 2500
+const JUDGE_MAX_TOKENS_PER_ITEM = 800
 const JUDGE_TIMEOUT_DEFAULT_SEC = 120
 const JUDGE_TIMEOUT_MAX_SEC = 600
 const IMG_MAX = 4 * 1024 * 1024

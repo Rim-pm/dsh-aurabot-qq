@@ -407,7 +407,7 @@ test('判定：模型报错 / 没给模型 → 全部 fail-open 照转', async (
   assert.equal(b[0].keep, true)
 })
 
-test('判定：输出预算给推理模型留够（基础 1500 + 每条 600）', async () => {
+test('判定：输出预算给推理模型留够（基础 2500 + 每条 800）', async () => {
   const cfg = normalize({ bili: { enabled: true, aiFilter: true } })
   const calls = []
   const j = judge.createJudge({
@@ -416,7 +416,7 @@ test('判定：输出预算给推理模型留够（基础 1500 + 每条 600）',
     ask: async (o) => { calls.push(o); return '[{"i":1,"keep":true,"level":2,"title":"T"}]' },
   })
   await j.judge({ mid: '1', name: 'A' }, [item('1', '公告'), item('2', '公告')])
-  assert.equal(calls[0].maxTokens, 1500 + 2 * 600, '两条一批要 2700，不能再被推理 token 吃光')
+  assert.equal(calls[0].maxTokens, 2500 + 2 * 800, '两条一批要 4100：实测单条推理就要 1400~1900 token')
 })
 
 test('判定：超时真的把请求 abort 掉，不是只把外层 promise reject', async () => {
