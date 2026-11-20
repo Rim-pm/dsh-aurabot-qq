@@ -452,6 +452,55 @@ test('判定：abort 之后不再重试 / 不再降级', async () => {
   assert.equal(asked, 1, '一次失败就够，别反复问')
 })
 
+test('判定：把 deadline 一起传下去，让底层别在快超时时还放宽重试', async () => {
+  const cfg = normalize({ bili: { enabled: true, aiFilter: true } })
+  let seen = null
+  const j = judge.createJudge({
+    getConfig: () => cfg,
+    log: silent,
+    ask: async (o) => { seen = o; return '[{"i":1,"keep":true,"level":2,"title":"T"}]' },
+  })
+  await j.judge({ mid: '1', name: 'A' }, [item('1', '公告')])
+  assert.ok(Number.isFinite(seen.deadline), '要带 deadline，llm.js 靠它决定还值不值得重试')
+  assert.ok(seen.deadline > Date.now(), 'deadline 是未来时刻')
+})
+
+test('判定：日志要能分清「被截断」和「模型乱说」', async () => {
+  const cfg = normalize({ bili: { enabled: true, aiFilter: true } })
+  const logs = []
+  const mk = (raw, trace) => judge.createJudge({
+    getConfig: () => cfg,
+    log: { info() {}, warn() {}, debug: (...a) => logs.push(a.join(' ')) },
+    ask: async (o) => { Object.assign(o.trace, trace); return raw },
+  })
+
+  // 截断：模型被预算掐掉，一个字没写
+  await mk('', { finishKind: 'max-tokens', maxTokens: 3300, usage: { outputTokens: 3300, reasoningTokens: 3299 } })
+    .judge({ mid: '1', name: 'A' }, [item('1', '维护公告')])
+  const cut = logs.pop()
+  assert.match(cut, /结束=max-tokens/)
+  assert.match(cut, /预算=3300/)
+  assert.match(cut, /推理=3299\/3300/, '推理 token 要记，这是判断「预算够不够」的唯一依据')
+
+  // 模型乱说：正常结束，但给的不是 JSON
+  await mk('我觉得这条挺重要的，你看着办', { finishKind: 'stop', maxTokens: 3300, usage: { outputTokens: 20 } })
+    .judge({ mid: '1', name: 'A' }, [item('1', '维护公告')])
+  const chatty = logs.pop()
+  assert.match(chatty, /结束=stop/)
+  assert.match(chatty, /输出=20/)
+  assert.doesNotMatch(chatty, /max-tokens/, '正常结束就不该让人以为是被截断')
+
+  // 放宽过要标出来
+  await mk('', { finishKind: 'max-tokens', maxTokens: 8000, widened: true, usage: { outputTokens: 8000 } })
+    .judge({ mid: '1', name: 'A' }, [item('1', '维护公告')])
+  assert.match(logs.pop(), /预算=8000（已放宽）/)
+
+  // 只判出一部分：剩下的照转，也要留痕
+  await mk('[{"i":1,"keep":true,"level":2,"title":"T"}]', { finishKind: 'stop', maxTokens: 4100, usage: { outputTokens: 90 } })
+    .judge({ mid: '1', name: 'A' }, [item('1', '公告'), item('2', '公告')])
+  assert.match(logs.pop(), /只解析出 1\/2 条/)
+})
+
 test('判定：没有正文的纯图动态不问模型，直接照转', async () => {
   const cfg = normalize({ bili: { enabled: true, aiFilter: true } })
   let asked = 0

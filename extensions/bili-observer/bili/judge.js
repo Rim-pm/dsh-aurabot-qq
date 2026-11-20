@@ -320,6 +320,8 @@ export function formatDigest(sub, entries, { images: withImages = true, link = f
  * 问一次模型，超时就真的把请求掐掉。
  * 只 reject 不 abort 的话，底层流还在后台跑，token 照烧，下一个 tick 又发一轮，
  * 越积越多——这就是之前「判定超时」还不停掉 token 的原因。
+ * deadline 一起传下去：askModel 在快到期时就不会再放宽预算重试，
+ * 否则第一次截断后重试必然被这里掐断，反而变成整条「判定超时」。
  */
 function askWithTimeout(ask, opts, ms) {
   const ctrl = new AbortController()
@@ -333,7 +335,8 @@ function askWithTimeout(ask, opts, ms) {
       reject(error)
     }, ms)
   })
-  const call = Promise.resolve().then(() => ask({ ...opts, signal: ctrl.signal }))
+  const deadline = Date.now() + ms
+  const call = Promise.resolve().then(() => ask({ ...opts, signal: ctrl.signal, deadline }))
   // 超时之后 ask 那边还会 reject 一次（AbortError）：先挂个空 catch，免得变成 unhandledRejection
   call.catch(() => {})
   return Promise.race([call, timeout]).finally(() => { if (timer) clearTimeout(timer) })
@@ -350,6 +353,25 @@ function timeoutMs(cfg) {
 /** 输出预算：基础 + 每条，推理模型的思考也在这份预算里，所以给得比正文需要的大。 */
 function maxTokensFor(n) {
   return JUDGE_MAX_TOKENS_BASE + Math.max(1, n) * JUDGE_MAX_TOKENS_PER_ITEM
+}
+
+/**
+ * 把一次调用的元数据压成一行给 debug 日志用。
+ * 「被截断」和「模型乱说」必须能分开：前者是预算问题，后者才是提示词问题。
+ */
+function traceNote(trace) {
+  if (!trace || typeof trace !== 'object') return ''
+  const bits = []
+  if (trace.finishKind) bits.push(`结束=${trace.finishKind}`)
+  if (Number.isFinite(trace.maxTokens)) bits.push(`预算=${trace.maxTokens}${trace.widened ? '（已放宽）' : ''}`)
+  if (trace.widenSkipped === 'deadline') bits.push('截断但没时间重试')
+  const u = trace.usage || {}
+  // 各家适配器字段名不统一：能取到就记，取不到就只留原始用量
+  const reasoning = u.reasoningTokens ?? u.reasoning_tokens ?? u.outputTokenDetails?.reasoningTokens ?? u.output_tokens_details?.reasoning_tokens
+  const out = u.outputTokens ?? u.output_tokens
+  if (Number.isFinite(reasoning)) bits.push(`推理=${reasoning}${Number.isFinite(out) ? `/${out}` : ''}`)
+  else if (Number.isFinite(out)) bits.push(`输出=${out}`)
+  return bits.join(' ')
 }
 
 /**
@@ -436,9 +458,13 @@ export function createJudge({ getConfig, ask, canSee, log, fetchImpl = fetch } =
       `这条动态没有正文，只有图片（下面是 ${images.length} 张）。看图判断要不要推，并总结成一句话 + 最多 3 条要点。`,
       '只输出 JSON 数组，只有一个对象（i 填 1）。',
     ].filter(Boolean).join('\n')
-    const raw = await askWithTimeout(ask, { system, text, images, maxTokens: maxTokensFor(1), temperature: 0.2, ...modelOpts() }, timeoutMs(c))
+    const trace = {}
+    const raw = await askWithTimeout(ask, { system, text, images, maxTokens: maxTokensFor(1), temperature: 0.2, trace, ...modelOpts() }, timeoutMs(c))
     const v = parseVerdicts(raw, 1)[0]
-    if (!v) throw new Error('没解析出判定')
+    if (!v) {
+      log?.debug?.('B 站纯图动态没解析出判定，模型原始输出：', clip(raw, 200) || '（空）', traceNote(trace))
+      throw new Error('没解析出判定')
+    }
     return { ...v, id: item.id, by: 'ai' }
   }
 
@@ -472,11 +498,16 @@ export function createJudge({ getConfig, ask, canSee, log, fetchImpl = fetch } =
         ownerName: getConfig().ownerName,
         maxChars: Number(c.aiFilterMaxChars) || BODY_MAX_DEFAULT,
       })
+      const trace = {}
       try {
-        const raw = await askWithTimeout(ask, { system, text, maxTokens: maxTokensFor(judged.length), temperature: 0.2, ...modelOpts() }, timeoutMs(c))
+        const raw = await askWithTimeout(ask, { system, text, maxTokens: maxTokensFor(judged.length), temperature: 0.2, trace, ...modelOpts() }, timeoutMs(c))
         const verdicts = parseVerdicts(raw, judged.length)
         // 一条都没解析出来时把原始输出记一笔：不然只能看到「照转」，查不出是截断还是模型乱说
-        if (!verdicts.length) log?.debug?.('B 站动态判定没解析出结果，模型原始输出：', clip(raw, 200) || '（空）')
+        if (!verdicts.length) {
+          log?.debug?.('B 站动态判定没解析出结果，模型原始输出：', clip(raw, 200) || '（空）', traceNote(trace))
+        } else if (verdicts.length < judged.length) {
+          log?.debug?.(`B 站动态判定只解析出 ${verdicts.length}/${judged.length} 条，其余照转`, traceNote(trace))
+        }
         const hit = new Map(verdicts.map((v) => [v.i, v]))
         judged.forEach((it, i) => {
           const v = hit.get(i + 1)
@@ -485,7 +516,7 @@ export function createJudge({ getConfig, ask, canSee, log, fetchImpl = fetch } =
           else byId.set(it.id, blank(it, 'fail', '模型没给这条判定，照转'))
         })
       } catch (error) {
-        log?.debug?.('B 站动态判定失败（原样转）：', error.message)
+        log?.debug?.('B 站动态判定失败（原样转）：', error.message, traceNote(trace))
         for (const it of judged) byId.set(it.id, blank(it, 'fail', '判定失败，照转'))
       }
     }

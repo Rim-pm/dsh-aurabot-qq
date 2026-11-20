@@ -224,3 +224,67 @@ test('预算放宽有上限：不会把 maxTokens 涨到模型能力之外', asy
   assert.ok(calls[1].maxTokens <= 8000, `放宽后 ${calls[1].maxTokens} 不该超过上限`)
 })
 
+test('trace：把结束原因 / 预算 / 放宽 / 用量回填给调用方', async () => {
+  clearReasoningCache()
+  let n = 0
+  const { dsh } = fakeDsh({
+    reasoning: null,
+    stream: async function * () {
+      n++
+      if (n === 1) {
+        yield { type: 'text-delta', text: '[{"i":1,' }
+        yield { type: 'finish', reason: { kind: 'max-tokens' } }
+        yield { type: 'usage', usage: { inputTokens: 100, outputTokens: 2000, reasoningTokens: 1900 } }
+        return
+      }
+      yield { type: 'text-delta', text: '[{"i":1,"keep":true}]' }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      yield { type: 'usage', usage: { inputTokens: 100, outputTokens: 40, reasoningTokens: 10 } }
+    },
+  })
+  const trace = {}
+  await askModel(dsh, { cfg: CFG, text: '在吗', maxTokens: 2000, trace })
+  assert.equal(trace.finishKind, 'stop', '记最后一次的结束原因')
+  assert.equal(trace.widened, true, '放宽过要能看出来')
+  assert.equal(trace.attempts, 2)
+  assert.ok(trace.maxTokens > 2000, '记的是真正发出去的预算')
+  assert.equal(trace.usage.reasoningTokens, 10, '用量取最后一次结算')
+})
+
+test('deadline 快到了就不再放宽重试：宁可交回半截，也不让重试被超时掐断', async () => {
+  clearReasoningCache()
+  const { dsh, calls } = fakeDsh({
+    reasoning: null,
+    stream: async function * () {
+      await new Promise((r) => setTimeout(r, 40))
+      yield { type: 'text-delta', text: '[{"i":1,' }
+      yield { type: 'finish', reason: { kind: 'max-tokens' } }
+    },
+  })
+  const trace = {}
+  const text = await askModel(dsh, { cfg: CFG, text: '在吗', maxTokens: 2000, trace, deadline: Date.now() + 60 })
+  assert.equal(text, '[{"i":1,', '半截也要交回去，好过整条超时')
+  assert.equal(calls.length, 1, '剩下的时间不够再来一轮，就别重试')
+  assert.equal(trace.widenSkipped, 'deadline', '要留下「截断但没重试」的原因')
+})
+
+test('deadline 还宽裕时照常放宽重试', async () => {
+  clearReasoningCache()
+  let n = 0
+  const { dsh, calls } = fakeDsh({
+    reasoning: null,
+    stream: async function * () {
+      n++
+      if (n === 1) {
+        yield { type: 'text-delta', text: '[{"i":1,' }
+        yield { type: 'finish', reason: { kind: 'max-tokens' } }
+        return
+      }
+      yield { type: 'text-delta', text: '[{"i":1,"keep":true}]' }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    },
+  })
+  await askModel(dsh, { cfg: CFG, text: '在吗', maxTokens: 2000, deadline: Date.now() + 60000 })
+  assert.equal(calls.length, 2, '时间还够就照旧重试')
+})
+
