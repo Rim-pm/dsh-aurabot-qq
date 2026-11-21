@@ -2802,6 +2802,148 @@ export function apply(ctx) {
   open('/call', async (req) => bridge.ops.call(await readBody(req)))
   open('/events', async (req) => bridge.ops.events(query(req)))
 
+  // ---------- 手机端 App：七个只读聚合接口 ----------
+  // 全部走 open()：自动带 Bearer 鉴权与 skipHostCheck，鉴权失败是 HTTP 200 + {ok:false, code:401}。
+  // 只读，不写配置、不发消息；写操作仍只有 /open/send。
+  //
+  // overview() 很贵（内部 await snowluma.running()，已连接时还会 get_login_info 5s 超时），
+  // 六个接口都要用它——App 首屏并发拉六个接口不能把 get_login_info 打六遍，所以加 2s TTL 缓存。
+  // 2 秒窗口对首屏够用，下拉刷新间隔必然 > 2s，不会读到明显陈旧的数据。
+  let ovCache = { at: 0, p: null }
+  const overviewOnce = () => {
+    if (ovCache.p && Date.now() - ovCache.at < 2000) return ovCache.p
+    ovCache = { at: Date.now(), p: overview().catch((e) => { ovCache = { at: 0, p: null }; throw e }) }
+    return ovCache.p
+  }
+  // 权限位只认三档，没设过的按默认「仅主人」——与 profilePermDefault 同口径。
+  const permLevel = (v) => (v === 'off' || v === 'owner' || v === 'all' ? v : 'owner')
+  const DOUYIN_APP_PERMS = [['douyinBrowse', 'browse'], ['douyinLike', 'like'], ['douyinComment', 'comment'], ['douyinShareOwner', 'shareOwner'], ['douyinDm', 'dm']]
+  const HEYBOX_APP_PERMS = [['heyboxBrowse', 'browse'], ['heyboxLike', 'like'], ['heyboxComment', 'comment'], ['heyboxPost', 'post']]
+  const appPerms = (perms, pairs) => Object.fromEntries(pairs.map(([k, out]) => [out, permLevel(perms[k])]))
+
+  open('/app/overview', async () => {
+    const o = await overviewOnce()
+    const m = o.mood || {}
+    const s = o.stats || {}
+    const b = o.outbox || {}
+    return {
+      ok: true,
+      mood: { value: m.value ?? 0, label: m.label ?? '', reason: m.reason ?? '', emotionTop: m.emotionTop ?? null },
+      outbox: { count: b.count ?? 0, oldestAt: b.oldestAt ?? 0 },
+      stats: { received: s.received ?? 0, sent: s.sent ?? 0, voice: s.voice ?? 0, stickers: s.stickers ?? 0, errors: s.errors ?? 0, day: s.day ?? '' },
+    }
+  })
+
+  open('/app/self', async () => {
+    const o = await overviewOnce()
+    const p = readPersona(o.persona?.current)
+    // 人格文件不存在时回空态错误，别抛——answer() 会把抛错转成 {ok:false,message}
+    if (!p) return { ok: false, message: '当前人格不存在' }
+    const body = String(p.body || '')
+    const mem = use('memory')?.stats?.()
+    return {
+      ok: true,
+      // 只回 App 用得上的字段；raw 是整份 md 原文（含 frontmatter），体积翻倍且用不上
+      persona: { id: p.id, name: p.name, tags: p.tags || [], chars: body.length, body },
+      prefs: { voiceEngine: o.config?.voice?.engine || 'auto' },
+      memory: { count: mem?.count ?? 0, lastConsolidate: o.memory?.lastConsolidate ?? 0 },
+    }
+  })
+
+  open('/app/memory', async () => {
+    const o = await overviewOnce()
+    const s = use('memory')?.stats?.() || {}
+    // archived 用 stats.outdated（= items.length - live.length）；不要调 memory.archived()，那个会 map 全部过期全文
+    return {
+      ok: true,
+      count: s.count ?? 0,
+      archived: s.outdated ?? 0,
+      auto: s.auto ?? 0,
+      events: s.events ?? 0,
+      lastConsolidate: o.memory?.lastConsolidate ?? 0,
+      vectorReady: Boolean(s.vectorReady),
+      vectorMode: s.vectorMode || '',
+      assoc: s.assoc ?? 0,
+    }
+  })
+
+  open('/app/expression', async () => {
+    const o = await overviewOnce()
+    const sg = o.song
+    // 「模块没装/没启用」与「装了但 song.enabled=false」归一成同一个空态
+    return {
+      ok: true,
+      stickers: { count: o.stickers?.count ?? 0 },
+      song: {
+        enabled: Boolean(sg?.enabled),
+        ready: Boolean(sg?.ready),
+        current: sg?.current ?? null,
+        queue: Array.isArray(sg?.queue) ? sg.queue : [],
+      },
+      voice: { edgeInstalled: Boolean(o.voice?.edgeInstalled) },
+    }
+  })
+
+  open('/app/platforms', async () => {
+    const o = await overviewOnce()
+    const perms = o.config?.profilePerms || {}
+    const hb = o.config?.heybox || {}
+    const q = o.qzoneSocial
+    return {
+      ok: true,
+      qzone: { count: q?.count ?? 0, lastRun: q?.lastRun ?? 0, history: Array.isArray(q?.history) ? q.history : [] },
+      douyin: { perms: appPerms(perms, DOUYIN_APP_PERMS) },
+      // 白名单取键：heybox 配置里有 cookie/cookieSet，展开会泄「cookie」字样
+      heybox: {
+        perms: appPerms(perms, HEYBOX_APP_PERMS),
+        enabled: Boolean(hb.enabled),
+        intervalHours: hb.intervalHours ?? 4,
+        maxRunsPerDay: hb.maxRunsPerDay ?? 6,
+        perRun: hb.perRun ?? 3,
+        likeDaily: hb.likeDaily ?? 10,
+        commentDaily: hb.commentDaily ?? 3,
+        maxPostsPerDay: hb.maxPostsPerDay ?? 3,
+      },
+    }
+  })
+
+  open('/app/system', async () => {
+    const o = await overviewOnce()
+    const c = o.config || {}
+    const list = o.modules || []
+    const g = c.group || {}
+    // 群列表照面板取法（client/client.js:2466）：白名单 ∪ 仅模块 ∪ 有覆盖设置 ∪ 被动记忆去重。
+    // 完全没留痕迹的群无法枚举，这是仓库本身的信息上限，不造。
+    const groupIds = [...new Set([
+      ...(c.allow?.groups || []),
+      ...(g.moduleOnlyGroups || []),
+      ...Object.keys(g.overrides || {}),
+      ...(c.memory?.passiveGroups || []),
+    ].map(String))]
+    const backups = listBackups()
+    const ep = o.onebot?.endpoint || {}
+    return {
+      ok: true,
+      // 只用 overview 里已剥掉 httpToken/wsToken 的两个键，再按面板口径脱敏
+      endpoint: redactTokens({ httpUrl: ep.httpUrl || '', wsUrl: ep.wsUrl || '' }),
+      modules: { total: list.length, running: list.filter((m) => m.running !== null).length },
+      backup: { last: backups[0] ?? null, count: backups.length },
+      settings: {
+        privateWhitelist: (c.allow?.private || []).map(String),
+        groups: groupIds.map((id) => ({ id, mode: groupResponseMode(c, id) })),
+        memberFilter: { enabled: c.memberFilter?.enabled !== false, rules: Array.isArray(c.memberFilter?.rules) ? c.memberFilter.rules : [] },
+        dangerConfirm: c.security?.dangerConfirm !== false,
+      },
+    }
+  })
+
+  open('/app/logs', async (req) => {
+    const q = query(req)
+    // 上限钳到环形缓冲大小（logger RING=500），别让 limit=999999 把整个缓冲倒出来
+    const limit = Math.min(500, Math.max(1, Number(q.limit) || 300))
+    return { ok: true, entries: logger.recent(limit, { level: q.level || '', area: q.area || '' }) }
+  })
+
   // 模型：列出 DSH 里可用的模型，测一下哪个回得快
   route('/models', async (req) => {
     try {
