@@ -372,6 +372,17 @@ test('memory page: limit/offset 不重不漏，total/hasMore 正确', () => {
   assert.equal(last.hasMore, false)
 })
 
+test('memory page: 每条都带 region，供 App 记忆页分区筛选', () => {
+  // App 的「知识 / 人物 / 事件 / 核心」chip 直接读 region；不在这里补，App 只能自己重写一套判定规则。
+  const regions = new Set(['person', 'event', 'core', 'knowledge', 'outdated', 'archived'])
+  const all = mem.list('')
+  assert.ok(all.length > 0, '前面用例应已造出记忆')
+  for (const m of all) assert.ok(regions.has(m.region), `region 非法：${m.region}（${m.text}）`)
+  const person = all.find((m) => m.about)
+  if (person) assert.equal(person.region, 'person', '带 about 的算人物区')
+  assert.deepEqual(mem.page('', { limit: 1, offset: 0 }).items.map((m) => m.region), [all[0].region], 'page 与 list 的 region 口径一致')
+})
+
 test('persona notes 分页：首屏最多 20，offset 能接着取', () => {
   const person = mem.personaOverview().find((p) => mem.personaNotes(p.qq, { limit: 1, offset: 0 })?.total > 1)
   if (!person) return

@@ -24,6 +24,7 @@ import { inheritBlocks, inheritBatches, inheritPrompt, inheritInput, parseInheri
 import { shouldDeferBackground } from '../core/offpeak.js'
 import { selfName, selfNames, isSelfName } from '../persona/personas.js'
 import { FACT_TIERS, isFactTier, isPermanentTier, followUpTier, tierDays, factTiers, strongerTier, memoryPlatforms } from './memory-rules.js'
+import { regionOf } from './memory-graph.js'
 
 export const NATIVE_MEMORY_VIEW = Symbol('nativeMemoryView')
 
@@ -3577,6 +3578,8 @@ export function createMemoryStore({ dsh, getConfig, hub, log, fetchImpl, setConf
     const assoc = load().assoc && typeof load().assoc === 'object' ? load().assoc : {}
     const withBy = (m) => ({
       ...m,
+      // App 记忆页的分区 chip 要按 region 筛；星图用的是同一份判定，别在 App 侧重写一遍规则。
+      region: regionOf(m),
       validFrom: validFromOf(m),
       ...(validUntilOf(m) ? { validUntil: validUntilOf(m) } : {}),
       validityText: validityText(m),
