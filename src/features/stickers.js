@@ -97,20 +97,23 @@ export function pickEvict(items) {
 export function createStickerStore({ dsh, getConfig, onebot, log }) {
   const recent = [] // 每小时限额
 
-  /** 有些 OneBot 网关把 add_custom_face 的 file 当本地路径，不认 base64://；先试 base64，再退回刚写下的本地路径。 */
-  async function addToQQ(buf, localPath, label = '') {
-    let last = null
-    for (const file of ['base64://' + buf.toString('base64'), localPath].filter(Boolean)) {
+  /** NapCat 的 add_custom_face 接收文件路径；网关读不到本地文件时再尝试 base64。 */
+  async function addToQQ(buf, localPath, label) {
+    try {
+      let r
       try {
-        const r = await onebot.call('add_custom_face', { file })
-        return String(r?.emoji_id || '')
+        r = await onebot.call('add_custom_face', { file: localPath })
       } catch (error) {
-        last = error
-        if (!/ENAMETOOLONG|base64|stat|EINVAL/i.test(String(error?.message || ''))) break
+        // 超时或断线时收藏结果未知，重试可能重复收藏。
+        if (error?.uncertain || !/\b(?:ENOENT|EACCES|EPERM)\b|no such file|file not found|文件不存在/i.test(`${error?.code || ''} ${error?.message || ''}`)) throw error
+        r = await onebot.call('add_custom_face', { file: 'base64://' + buf.toString('base64') })
       }
+      return String(r?.emoji_id || '')
+    } catch {
+      // 网关错误可能回显整段 base64，避免写入日志。
+      log.debug(`收藏到 QQ 失败（本地已留档：${label}）`)
+      return ''
     }
-    log.debug('收藏到 QQ 失败（本地已留档' + (label ? '：' + label : '') + '）：', last?.message || '未知错误')
-    return ''
   }
 
   /** 面板里给起名单独挑的模型；没挑（或者只填了一半）就返回 null = 跟随聊天用的模型。 */
