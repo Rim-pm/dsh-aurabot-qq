@@ -358,7 +358,7 @@ test('解析：合并转发记下 id，回复里的 <poke> 变成戳一戳', asy
   const { parseMessageEvent } = await import('../src/chat/inbound.js')
   const { parseReply } = await import('../src/chat/reply.js')
   const m = parseMessageEvent({ message_type: 'group', group_id: 1, user_id: 2, message: [{ type: 'forward', data: { id: 'abc' } }] }, '9')
-  assert.deepEqual(m.forwards, ['abc'])
+  assert.deepEqual(m.forwards, [{ id: 'abc', outerId: '', content: null }])
   assert.match(m.text, /合并转发/)
   assert.deepEqual(parseReply('干嘛<poke>').items.map((i) => i.kind), ['text', 'poke'])
   assert.equal(parseReply('<poke><poke>').items.filter((i) => i.kind === 'poke').length, 1, '一轮最多戳一次')
