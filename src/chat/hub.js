@@ -1,4 +1,4 @@
-import { identityNote, flatHistory, requestIdentity } from './identity.js'
+﻿import { identityNote, flatHistory, requestIdentity } from './identity.js'
 import { ignoredGroupMember } from './member-filter.js'
 import { preserveReplyStickers } from './sticker-policy.js'
 // 消息中枢：QQ 会话 ↔ DSH 会话。
@@ -37,7 +37,7 @@ import { createRecentMedia } from './recent-media.js'
 import { createTitleFilter } from './title-filter.js'
 import { takeInterim, reasoningOf, rescueFromThinking } from './steps.js'
 import { guardOutgoing, codeFenceInstruction } from './guard.js'
-import { markerInstruction, extractMarkedReply, stripMarkers } from './reply-marker.js'
+import { markerInstruction, extractMarkedReply, stripMarkers, markerApplies } from './reply-marker.js'
 import { grantOwner } from '../core/workspace-move.js'
 import { withPromptCapture, currentPromptSources, memoryPromptRanges } from '../security/leak-guard.js'
 import { noticeText } from './notices.js'
@@ -1483,7 +1483,7 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
           const parts = []
           // 正文标记：代码注入，不改人格文件。模型必须用 ⟦REPLY⟧ 包住要发的话。
           try {
-            if (getConfig().chat?.replyMarker?.enabled === true) parts.push(markerInstruction())
+            if (markerApplies(getConfig(), chat && chat.chatId)) parts.push(markerInstruction())
             // 贴代码要加围栏：guard 对 ``` 整段豁免，模型得知道包起来才不会被当成超长思考。
             if (getConfig().chat?.thinkingGuard?.enabled !== false) parts.push(codeFenceInstruction())
           } catch (error) {}
@@ -2444,7 +2444,7 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
       }
       // 正文标记：代码注入的格式要求。模型必须用 ⟦REPLY⟧ 包住要发的话。
       // 没有标记就要求重写一次；重写后仍然没有，这轮不发（宁可沉默也不发思考）。
-      if (text && completed && getConfig().chat?.replyMarker?.enabled === true) {
+      if (text && completed && markerApplies(getConfig(), chatId)) {
         const marked = extractMarkedReply(text)
         if (marked.found) {
           text = stripMarkers(marked.text)

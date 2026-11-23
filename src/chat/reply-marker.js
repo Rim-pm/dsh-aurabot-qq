@@ -51,3 +51,15 @@ export function extractMarkedReply (text) {
 export function stripMarkers (text) {
   return String(text || '').replace(OPEN_RE, '').replace(CLOSE_RE, '').trim()
 }
+
+/**
+ * 这条会话该不该按正文标记处理。
+ *
+ * 只有真人的聊天会话要：system: 开头的后台会话（目的引擎的代发决断、自动搭话裁决等）
+ * 输出的是「原样 / 改写 / [沉默]」这种决断，本来就不带标记；照标记去校验会把决断
+ * 反复打回重写，重写完还是干净的，最后判成「不发」，模块代发就永远发不出去。
+ */
+export function markerApplies (cfg, chatId) {
+  if (cfg?.chat?.replyMarker?.enabled !== true) return false
+  return !String(chatId || '').startsWith('system:')
+}

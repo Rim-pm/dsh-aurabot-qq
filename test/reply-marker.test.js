@@ -1,7 +1,7 @@
 // 正文标记：模型用 ⟦REPLY⟧ 包住要发的话，插件只取标记内。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { extractMarkedReply, stripMarkers, markerInstruction, REPLY_OPEN, REPLY_CLOSE } from '../src/chat/reply-marker.js'
+import { extractMarkedReply, stripMarkers, markerInstruction, markerApplies, REPLY_OPEN, REPLY_CLOSE } from '../src/chat/reply-marker.js'
 
 test('正常：标记内的话取出来', () => {
   const r = extractMarkedReply(`${REPLY_OPEN}今天好累啊${REPLY_CLOSE}`)
@@ -77,4 +77,21 @@ test('注入的格式要求里带标记', () => {
   assert.ok(text.includes(REPLY_OPEN))
   assert.ok(text.includes(REPLY_CLOSE))
   assert.ok(text.includes('重写'))
+})
+
+// 后台会话（目的引擎的代发决断、自动搭话裁决）输出的是「原样 / 改写 / [沉默]」，
+// 本来就不带标记；照标记去校验会把决断反复打回，最后判成不发，模块消息永远发不出去。
+test('markerApplies：真人会话要标记，system: 会话不要', () => {
+  const on = { chat: { replyMarker: { enabled: true } } }
+  assert.equal(markerApplies(on, 'private:3479382784'), true)
+  assert.equal(markerApplies(on, 'group:941644689'), true)
+  assert.equal(markerApplies(on, 'system:purpose-broker'), false)
+  assert.equal(markerApplies(on, 'system:bili'), false)
+})
+
+test('markerApplies：开关关掉谁都不校验', () => {
+  const off = { chat: { replyMarker: { enabled: false } } }
+  assert.equal(markerApplies(off, 'private:3479382784'), false)
+  assert.equal(markerApplies({}, 'private:3479382784'), false)
+  assert.equal(markerApplies(null, 'private:3479382784'), false)
 })
