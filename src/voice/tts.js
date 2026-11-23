@@ -162,6 +162,23 @@ async function windowsSynth(text) {
   return file
 }
 
+/** 系统自带语音兜底用哪个：#255 —— Windows 用 System.Speech，macOS 用 say，其它平台没有。 */
+export function systemVoiceEngine (platform = process.platform) {
+  if (platform === 'win32') return 'windows'
+  if (platform === 'darwin') return 'say'
+  return ''
+}
+
+/** macOS 自带 `say`：直接输出 16k 单声道 WAV，识别链路不用再转码。 */
+async function saySynth (text) {
+  const file = join(outDir(), `say-${randomUUID()}.wav`)
+  const voice = String(process.env.AURABOT_SAY_VOICE || '').trim()
+  const args = ['-o', file, '--data-format=LEI16@16000', ...(voice ? ['-v', voice] : []), text]
+  const r = await run('say', args, { timeoutMs: 60000 })
+  if (!existsSync(file) || statSync(file).size < 1000) throw new Error('系统语音（say）失败：' + (r.err || '').slice(-200))
+  return file
+}
+
 // ---------- 本地 / 自建 TTS 服务（地址是主人自己填的，所以允许 127.0.0.1） ----------
 
 async function fetchAudio(url, init, timeoutMs = 120000) {
@@ -586,7 +603,7 @@ export async function textToSpeech(text, opt = {}, log) {
       } else if (opt.engine === 'http' && opt.http?.fallback === 'text') {
         throw error
       } else {
-        log?.warn(`${opt.engine} 失败：${error.message} → 改用 Windows 语音`)
+        log?.warn(`${opt.engine} 失败：${error.message} → 改用系统语音`)
       }
     }
   } else if (opt.engine !== 'windows' && edgeInstalled()) {
@@ -594,13 +611,21 @@ export async function textToSpeech(text, opt = {}, log) {
       file = await edgeSynth(clean, opt.voice || 'zh-CN-XiaoyiNeural', opt.rate, opt.pitch)
       engine = 'edge'
     } catch (error) {
-      log?.warn(error.message, '→ 改用 Windows 语音')
+      log?.warn(error.message, '→ 改用系统语音')
     }
   }
   if (!file) {
-    if (!WIN) throw new Error('语音没合成出来：Linux / macOS 上没有 Windows 自带语音可以兜底，先在「语音」页装好 edge-tts，或者用本地 TTS 服务')
-    file = await windowsSynth(clean)
-    engine = 'windows'
+    // 系统自带语音兜底按平台选（#255）：Windows 用 System.Speech，macOS 用 say，其它平台没有可用系统语音。
+    const system = systemVoiceEngine()
+    if (system === 'windows') {
+      file = await windowsSynth(clean)
+      engine = 'windows'
+    } else if (system === 'say') {
+      file = await saySynth(clean)
+      engine = 'say'
+    } else {
+      throw new Error('语音没合成出来：这台机器没有系统自带语音可以兜底（Windows 用系统语音、macOS 用 say），先在「语音」页装好 edge-tts，或者用本地 TTS 服务')
+    }
   }
   for (const conv of voiceConverters) {
     try {
