@@ -3165,7 +3165,8 @@ export function createMemoryStore({ dsh, getConfig, hub, log, fetchImpl, setConf
 
   /**
    * 整理临时记忆。
-   * @param {{includeToday?:boolean}} o includeToday：连今天的也提炼（手动整理时），但今天的流水不删（写日记还要用）
+   * @param {{includeToday?:boolean, background?:boolean}} o includeToday：连今天的也提炼（手动整理时），但今天的流水不删（写日记还要用）；
+   *   background：这是后台定时整理，有回合在跑时让路。手动整理（面板/命令）传 false，人已经点了就得跑完。
    */
   async function consolidate(o = {}) {
     if (busy) return { ok: false, message: '正在整理中' }
@@ -3215,7 +3216,7 @@ export function createMemoryStore({ dsh, getConfig, hub, log, fetchImpl, setConf
               if (n >= lines.length) break
               if (batches >= EXTRACT_LIMIT) { stopped = true; break }
               // issue #376：她正在回话/跑工具时先让路，别抢同一个模型端点把她的一轮挤死。
-              if (turnInProgress()) { noteTurnYield(); stopped = true; break }
+              if (o.background && turnInProgress()) { noteTurnYield(); stopped = true; break }
               if (!takeBatch()) { stopped = true; budgetExhausted = true; break }
               const part = []
               let end = n
@@ -3588,7 +3589,7 @@ export function createMemoryStore({ dsh, getConfig, hub, log, fetchImpl, setConf
       return mins >= hh * 60 + mm && runs[t] !== today
     })
     if (Date.now() < retryAt || busy) return
-    const r = due.length ? await consolidate({ includeToday: true }) : cfg.extractIdleMinutes > 0 ? await extractIdle() : { ok: true }
+    const r = due.length ? await consolidate({ includeToday: true, background: true }) : cfg.extractIdleMinutes > 0 ? await extractIdle() : { ok: true }
     if (r.busy) return
     // 失败后退避：10 分钟起步翻倍，最多 2 小时，不每分钟打一次模型
     failures = r.ok ? 0 : failures + 1
