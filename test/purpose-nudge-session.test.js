@@ -70,19 +70,27 @@ test('runTurnInChat：noTools 收走全局工具，轮次结束后还回来', as
 })
 
 test('runTurnInChat：主人正在说话（busy）时让位，并且绝不收工具', async (t) => {
-  const s = setup(t, { brain: async () => { await new Promise((r) => setTimeout(r, 30)); return '她的回答' } })
+  // 主人那一轮用一道闸门卡住：不靠固定 sleep 抢时序（以前 brain 睡 30ms + settle 固定圈数，
+  // 机器慢一点那一轮就先结束了，r.ok 变 true，这条用例会随机挂）。
+  let release
+  const gate = new Promise((r) => { release = r })
+  const s = setup(t, { brain: async () => { await gate; return '她的回答' } })
   // 先让主人说一句，把这一轮占住
   const busyPromise = s.hub.pushToSession(
     { kind: 'private', chatId: CHAT, userId: OWNER, groupId: '', nickname: '主人' },
     [{ type: 'text', text: '在吗' }], OWNER, { queryText: '在吗' },
   )
-  await settle()
+  // 等到 hub 真的认为这一轮在跑，再断言让位；最多等 1 秒，超时就是真有问题。
+  const deadline = Date.now() + 1000
+  while (!s.hub.busy() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 5))
+  assert.equal(s.hub.busy(), true, '主人那一轮应当已经被占住')
   const agent = [...s.fake.agents.values()].pop()
   const lockedBefore = agent.guestLocked
   const r = await s.hub.runTurnInChat(CHAT, '【系统提醒】追一句', { noTools: true })
   assert.equal(r.ok, false)
   assert.equal(r.reason, 'busy', '主人那一轮还没结束，追问必须让位')
   assert.equal(agent.guestLocked, lockedBefore, '让位时不能动主人的工具（这是不能带进线上的事故）')
+  release()
   await busyPromise
   await settle()
 })
