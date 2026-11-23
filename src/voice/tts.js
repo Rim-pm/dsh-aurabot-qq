@@ -2,7 +2,7 @@ import { createKeyRouter, rateMeta } from './key-pool.mjs'
 export const runCloud = createKeyRouter()
 // 文字 → 语音文件。
 //   首选：edge-tts（微软在线朗读，音色好），装在插件自己的 Python 虚拟环境 C:\Aurabot\pyenv 里，不污染系统。
-//   兜底：Windows 自带的中文语音（System.Speech / Huihui），什么都不装也能用（只有 Windows 有）。
+//   兜底：系统自带语音——Windows 用 System.Speech（Huihui 等中文音色）、macOS 用 say，什么都不装也能用。
 // 管线：文字 → TTS → 文件路径。任何一步失败由调用方退回发文字。（RVC 音色目前用在翻唱上，见 src/song/）
 
 import { fishSpeech } from './fish.js'
@@ -160,6 +160,14 @@ async function windowsSynth(text) {
   const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `[Console]::InputEncoding=[Text.Encoding]::UTF8;${script}`], { timeoutMs: 60000, input: text })
   if (!existsSync(file) || statSync(file).size < 1000) throw new Error('Windows 语音失败：' + r.err.slice(-200))
   return file
+}
+
+/**
+ * 这个引擎该不该先试 edge-tts：#255 —— 明确要系统语音（windows / say）时必须直接走系统，
+ * 否则 macOS 上明明有 say 也会先被 edge 截走，自检拿到 mp3。
+ */
+export function edgeAllowed (engine) {
+  return !['windows', 'say'].includes(String(engine || ''))
 }
 
 /** 系统自带语音兜底用哪个：#255 —— Windows 用 System.Speech，macOS 用 say，其它平台没有。 */
@@ -607,7 +615,7 @@ export async function textToSpeech(text, opt = {}, log) {
         log?.warn(`${opt.engine} 失败：${error.message} → 改用系统语音`)
       }
     }
-  } else if (opt.engine !== 'windows' && edgeInstalled()) {
+  } else if (edgeAllowed(opt.engine) && edgeInstalled()) {
     try {
       file = await edgeSynth(clean, opt.voice || 'zh-CN-XiaoyiNeural', opt.rate, opt.pitch)
       engine = 'edge'

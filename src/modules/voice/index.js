@@ -2,7 +2,7 @@
 // 面板里的试听、语音识别自检也在这里。
 // 导出 speak(text) → { file, engine }：聊天中枢发语音时找它。替换这个模块就能换成任何你想要的念法。
 
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, unlinkSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { textToSpeech, edgeInstalled, installEdge, voiceConverters, volcanoResourceFor, volcanoSynth, systemVoiceEngine } from '../../voice/tts.js'
 import { fishBalances, fishPrimary } from '../../voice/fish.js'
@@ -17,13 +17,21 @@ import { toMono16k } from '../../voice/wav.js'
 import { fileOf } from '../../local/local.js'
 
 /** 识别链路只吃 PCM16 WAV：自检拿到 mp3 时先用 ffmpeg 转一道（#255）。 */
-function asPcmWav (file, buf, ffmpegPath = '') {
-  if (buf.length > 4 && buf.toString('ascii', 0, 4) === 'RIFF') return buf
+export function asPcmWav (file, buf, ffmpegPath = '', { platform = process.platform } = {}) {
+  // RIFF 还要是 PCM16 才能直接进识别（WAVE_FORMAT_EXTENSIBLE / float 会被 toMono16k 拒掉）。
+  if (buf.length > 44 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.readUInt16LE(20) === 1 && buf.readUInt16LE(34) === 16) return buf
   const ff = findFfmpeg(ffmpegPath)
-  if (!ff) throw new Error('自检拿到的是 MP3，这台机器没找到 ffmpeg，转不成 WAV；装好 ffmpeg 或在「语音」页改用系统语音')
+  if (!ff) {
+    const hint = platform === 'linux'
+      ? '这台机器没有系统语音兜底，装好 ffmpeg 再试，或在「语音」页改用本地 TTS 服务'
+      : '装好 ffmpeg 再试，或在「语音」页改用系统语音 / 本地 TTS 服务'
+    throw new Error('自检拿到的音频不是 PCM16 WAV，这台机器也没找到 ffmpeg，转不了：' + hint)
+  }
   const out = file.replace(/\.[a-z0-9]+$/i, '') + '.16k.wav'
-  const r = spawnSync(ff, ['-y', '-i', file, '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', out], { timeoutMs: 60000, windowsHide: true })
-  if (r.status !== 0 || !existsSync(out)) throw new Error('MP3 转 WAV 失败：' + String(r.stderr || '').slice(-200))
+  const r = spawnSync(ff, ['-y', '-i', file, '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', out], { timeout: 60000, windowsHide: true })
+  const failed = r.error || r.status !== 0 || !existsSync(out)
+  try { if (existsSync(out)) unlinkSync(out) } catch {}
+  if (failed) throw new Error('音频转 WAV 失败：' + String(r.error?.message || r.stderr || '').slice(-200))
   return readFileSync(out)
 }
 
