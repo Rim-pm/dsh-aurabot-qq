@@ -1,3 +1,4 @@
+import { normalizePools, maskPools, restorePoolKeys } from '../voice/key-pool.mjs'
 import { normalizeMemberFilter } from '../chat/member-filter.js'
 // 插件配置：默认值 + 归一化 + 读写。配置文件 ~/.dsh/plugins-data/aurabot/config.json
 
@@ -126,6 +127,8 @@ export const DEFAULTS = {
     enabled: true,
     // auto = 先 edge-tts，不行用 Windows 语音；edge / windows / cosyvoice / gptsovits / volcano / breeze / minimax / http = 指定引擎（失败都会退回 Windows 语音）
     engine: 'auto',
+    fishApiKey: '',
+    fishReferenceId: '',
     cosyvoice: { url: 'http://127.0.0.1:50000', mode: 'sft', spkId: '中文女', instruct: '', sampleRate: 22050 },
     gptsovits: { url: 'http://127.0.0.1:9880', refAudio: '', promptText: '', promptLang: 'zh', textLang: 'zh' },
     // RimTTS：用 RimTTS 项目（GPT-SoVITS api_v2 + 微调权重）念。模型很大（约 4.3 GB 内存 + 2.2 GB 显存），
@@ -382,7 +385,11 @@ export const DEFAULTS = {
   //   或者思考塌缩成「做。做。做。…」。开着就切掉思考前缀、拦住退化内容；拦下就当她这轮没说话（默认开）。
   // replyMarker：代码注入格式要求，模型必须用 ⟦REPLY⟧ 包住要发的话；没有标记就要求重写一次，
   //   重写后仍然没有就不发。默认关：打开会改变所有会话的输出格式，先在面板/配置里手动开。
-  chat: { seedHistory: false, seedHistoryCount: 20, everyStep: false, rescueFromThinking: false, turnTimeoutMinutes: 30, thinkingGuard: { enabled: true }, replyMarker: { enabled: false } },
+  // acpSanitize：DSH 上下文代理的 ACP 包装标记（<acp tokens="…" …>mNNNNN</acp>）被模型复述时漏进正文。
+  //   enabled：正则剥离，默认开——纯字符串处理，零延迟零成本，必须默认生效；
+  //   modelFallback：正则剥完仍像有标签残渣时，再问一次模型兜底改写（要花 token 与延迟，默认关）；
+  //   modelMaxChars / modelTimeoutMs：兜底的文本长度上限与单次超时；超时或失败一律退回正则结果。
+  chat: { seedHistory: false, seedHistoryCount: 20, everyStep: false, rescueFromThinking: false, turnTimeoutMinutes: 30, thinkingGuard: { enabled: true }, replyMarker: { enabled: false }, acpSanitize: { enabled: true, modelFallback: false, modelMaxChars: 800, modelTimeoutMs: 4000 } },
   // 原话档案独立于摘要记忆；默认关闭，由使用者明确开启并管理保留期限。
   conversationContext: { enabled: false },
   // 收尾 / 等待（私聊 MVP）：她在回复末尾写 <wait> / <close>，插件按「标记 + 定时器 + 会话状态」处理，
@@ -481,8 +488,7 @@ export const DEFAULTS = {
   modules: {},
   safeMode: false, // 安全模式：自己写的模块一个都不加载（排查问题用）
   ext: {}, // 自己写的模块的设置：{ 模块id: {...} }
-  // token 用量与花费：面板「概览」里看。pricing 留空就用内置价目表（DeepSeek 官方价 + 其它厂商按 LiteLLM 价 ×7.2）；
-  // 要覆盖就写 { models: { "我的模型": { match: "^my-llm-", in: 2, out: 8, cached: 0.5 } } }（元/百万 tokens）
+  // 自定义渠道费率按渠道和完整模型名匹配，与内置的官方美元参考价分开。
   usage: { pricing: {} },
   // 联动：让别的程序、DSH 里别的会话和插件也能用她
   bridge: {
@@ -935,6 +941,13 @@ export function normalize(raw) {
   c.chat.rescueFromThinking = bool(c.chat.rescueFromThinking, false)
   c.chat.thinkingGuard = { enabled: bool(c.chat.thinkingGuard?.enabled, true) }
   c.chat.replyMarker = { enabled: bool(c.chat.replyMarker?.enabled, false) }
+  // ACP 标记净化：enabled 默认开（零成本正则）；modelFallback 默认关（要花 token 与延迟）。
+  c.chat.acpSanitize = {
+    enabled: bool(c.chat.acpSanitize?.enabled, true),
+    modelFallback: bool(c.chat.acpSanitize?.modelFallback, false),
+    modelMaxChars: Math.round(num(c.chat.acpSanitize?.modelMaxChars, 800, 100, 4000)),
+    modelTimeoutMs: Math.round(num(c.chat.acpSanitize?.modelTimeoutMs, 4000, 500, 15000)),
+  }
   c.chat.turnTimeoutMinutes = num(c.chat.turnTimeoutMinutes, 30, 0, 180)
   // 收尾 / 等待：默认开；数值都夹回合理范围（手改配置文件写歪了也不会等一小时或永远在等）
   if (!isObj(c.wrapUp)) c.wrapUp = { ...DEFAULTS.wrapUp }
@@ -1060,7 +1073,10 @@ export function normalize(raw) {
   g.burstMax = num(g.burstMax, 8, 1, BIG)
   g.engagedMax = num(g.engagedMax, 6, 0, BIG)
   g.burstWindowSec = num(g.burstWindowSec, 120, 1, BIG)
-  if (!['auto', 'edge', 'windows', 'cosyvoice', 'gptsovits', 'http', 'volcano', 'breeze', 'minimax', 'rimtts'].includes(c.voice.engine)) c.voice.engine = 'auto'
+  if (c.voice.keyPools) c.voice.keyPools = normalizePools(c.voice.keyPools)
+  c.voice.fishApiKey = String(c.voice.fishApiKey || '').trim()
+  c.voice.fishReferenceId = String(c.voice.fishReferenceId || '').trim()
+  if (!['auto', 'edge', 'windows', 'cosyvoice', 'gptsovits', 'http', 'volcano', 'breeze', 'minimax', 'fish-free', 'rimtts'].includes(c.voice.engine)) c.voice.engine = 'auto'
   c.voice.rimtts.root = String(c.voice.rimtts.root || '').trim().slice(0, 400)
   c.voice.rimtts.configYaml = String(c.voice.rimtts.configYaml || '').trim().slice(0, 200) || 'GPT_SoVITS/configs/tts_infer_rim_turbo.yaml'
   c.voice.rimtts.port = Math.round(num(c.voice.rimtts.port, 9880, 1024, 65535))
@@ -1198,7 +1214,7 @@ export function normalize(raw) {
   if (!isObj(c.ext)) c.ext = {}
   for (const k of Object.keys(c.ext)) if (!isObj(c.ext[k])) delete c.ext[k] // 传 null = 删掉这个模块的设置
   c.safeMode = bool(c.safeMode, false)
-  // 花费估算的价格表：手动填了就用手填的（手填的部分覆盖内置价），没填就用内置 DeepSeek 价
+  // 花费估算的价格表：仅用于渠道估算；留空不影响官方参考费用
   if (!isObj(c.usage)) c.usage = { pricing: {} }
   if (!isObj(c.usage.pricing)) c.usage.pricing = {}
   c.bridge.dshTools = bool(c.bridge.dshTools, false)
@@ -1209,7 +1225,7 @@ export function normalize(raw) {
 }
 
 // 面板里不回传原文的字段：路径（几层都行）
-const SECRETS = [['snowluma', 'webuiPassword'], ['snowluma', 'httpToken'], ['snowluma', 'wsToken'], ['imageGen', 'apiKey'], ['imageGen', 'minimax', 'apiKey'], ['voice', 'asrApi', 'apiKey'], ['memory', 'vector', 'apiKey'], ['memory', 'rerank', 'apiKey'], ['song', 'neteaseCookie'], ['bili', 'cookie'], ['bili', 'sessdata'], ['bili', 'biliJct'], ['heybox', 'cookie'], ['bridge', 'token'], ['video', 'minimax', 'apiKey'], ['video', 'custom', 'headers'], ['voice', 'volcano', 'apiKey'], ['voice', 'breeze', 'key'], ['voice', 'breeze', 'password'], ['voice', 'minimax', 'apiKey'], ['backup', 'remote', 'token'], ['backup', 'remote', 'webdav', 'password']]
+const SECRETS = [['voice', 'fishApiKey'], ['snowluma', 'webuiPassword'], ['snowluma', 'httpToken'], ['snowluma', 'wsToken'], ['imageGen', 'apiKey'], ['imageGen', 'minimax', 'apiKey'], ['voice', 'asrApi', 'apiKey'], ['memory', 'vector', 'apiKey'], ['memory', 'rerank', 'apiKey'], ['song', 'neteaseCookie'], ['bili', 'cookie'], ['bili', 'sessdata'], ['bili', 'biliJct'], ['heybox', 'cookie'], ['bridge', 'token'], ['video', 'minimax', 'apiKey'], ['video', 'custom', 'headers'], ['voice', 'volcano', 'apiKey'], ['voice', 'breeze', 'key'], ['voice', 'breeze', 'password'], ['voice', 'minimax', 'apiKey'], ['backup', 'remote', 'token'], ['backup', 'remote', 'webdav', 'password']]
 // 扩展模块设置里的密码类字段（模块加载时登记）：['ext', 模块id, 字段]
 const extraSecrets = new Map()
 export function registerSecretField(path) { extraSecrets.set(path.join('\u0000'), path) }
@@ -1337,6 +1353,7 @@ export function commitConfig(cfg, previous = loadConfig()) {
 /** 给面板看的版本：密码 / token 不回传原文，只告诉有没有填。 */
 export function publicConfig(cfg) {
   const c = structuredClone(cfg)
+  maskPools(c.voice?.keyPools)
   delete c.ownerAuthorization
   // 面板上的「试运行」只表示「试运行但不调试」：调试开着时它显示为关
   c.dryRun = Boolean(c.dryRun && !c.debug)
@@ -1357,6 +1374,10 @@ export function publicConfig(cfg) {
 /** 面板保存时：没改的密码字段（空串）保留原值。 */
 export function mergeFromPanel(current, incoming) {
   const next = deepMerge(current, incoming || {})
+  if (incoming?.voice?.keyPools) {
+    next.voice.keyPools = { ...next.voice.keyPools }
+    restorePoolKeys(next.voice.keyPools, current.voice?.keyPools, incoming.voice.keyPools)
+  }
   // 面板明确带了非空 chatEfforts（面板上改过单个聊天的档位）就以面板为准；
   // 没带或带的是空对象（旧版面板 / 面板没动过）时保留当前值——QQ 里 /effort 设过的不被清掉。
   const incomingEfforts = incoming && incoming.chatEfforts

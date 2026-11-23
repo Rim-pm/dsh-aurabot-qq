@@ -39,3 +39,9 @@ test('她可以不搭理人：写进规则，整段 [沉默] 不发任何东西�
   assert.match(rulesText('private', normalize({ ownerName: '哥哥' })), /哥哥对你说的话不能这样/)
   assert.equal(parseReply('[沉默]').silent, true)
 })
+
+test('模型写成 [表情: 描述] 时按表情标签处理，不把描述当正文', () => {
+  const r = parseReply('她说[表情: 无语死鱼脸]')
+  assert.deepEqual(texts(r), ['她说'])
+  assert.equal(r.items.some((i) => i.kind === 'sticker' && i.value === '无语死鱼脸'), true)
+})

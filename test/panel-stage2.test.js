@@ -3,7 +3,7 @@
 // 被测：client/client.js 未提交改动（阶段二）：
 //   1. TABS 新增 manage 删 asr；TAB_MODS / NAV_GROUPS / NAV_ALIAS 同步。
 //   2. 旧页签迁移：aurabot.tab==='asr' → 'voice' + voice-view='listen'；navlast 里 asr 同映射；哨兵只跑一次。
-//   3. VoiceTab 双视图：send=Voice、listen=Asr；send 视图不挂载 AsrStatus（ASR 请求与 5 秒轮询为 0）。
+//   3. VoiceTab 子视图：send=Voice、listen=Asr；send 视图不挂载 AsrStatus（ASR 请求与 5 秒轮询为 0）。
 //   4. Manage 管理功能页：四类状态分组（ok/blocked/off/absent），启用走 /save，失败就地提示。
 //   5. 语音页「更多设置」折叠 Card：defaultOpen=false，折叠不渲染 children。
 //
@@ -45,7 +45,7 @@ function loadPanel() {
   const marker = '    exports.apply = apply'
   assert.ok(source.includes(marker), 'client.js 的导出锚点变了，测试要跟着改')
   const script = new Script(
-    source.replace(marker, '    exports.panelTest = { TABS, TAB_MODS, NAV_GROUPS, NAV_ALIAS, MANAGE_FEATURES, Manage, VoiceTab, Voice, Asr, AsrStatus, Card }\n' + marker),
+    source.replace(marker, '    exports.panelTest = { TABS, TAB_MODS, NAV_GROUPS, NAV_ALIAS, MANAGE_FEATURES, Manage, VoiceTab, Voice, VoiceServiceFields, Asr, AsrStatus, Card }\n' + marker),
     { filename: 'client/client.js' },
   )
   const store = new Map()
@@ -143,7 +143,7 @@ test('TABS：有 manage 无 asr；manage 在 home 组、express 组没有 asr；
 
 test('语音页注册：curTab.voice 映射到 VoiceTab（不再是裸 Voice），TAB_KEYS 也没有 asr', () => {
   const src = CLIENT()
-  assert.match(src, /voice: VoiceTab,/, '页面表里 voice 要映射到 VoiceTab 双视图外壳')
+  assert.match(src, /voice: VoiceTab,/, '页面表里 voice 要映射到 VoiceTab 子视图外壳')
   // 页面表里有 manage 即可（本线 manage 前后夹着 platforms/tools 等特有页，不与 overview 相邻；契约声明取本机）
   assert.match(src, /manage: Manage,/, '页面表里要注册 manage')
   assert.ok(!/\basr: Asr\b/.test(src), '页面表里不能再有 asr: Asr')
@@ -203,7 +203,7 @@ test('全新用户没有 asr 记忆：迁移不产生 voice-view、只落哨兵'
   assert.equal(store.get('aurabot.voice-tab-v1'), '1')
 })
 
-// ================= 3. VoiceTab 双视图 =================
+// ================= 3. VoiceTab 子视图 =================
 
 const voiceSt = { config: { voice: { engine: 'windows' } }, voice: { edgeInstalled: false } }
 const voiceDraft = { voice: { engine: 'windows' }, song: {}, modules: {} }
@@ -220,6 +220,57 @@ test('VoiceTab：send 视图渲染语音合成页，树里没有 Asr/AsrStatus�
   assert.equal(p.intervals.filter((i) => i.ms === 5000).length, 0, 'send 视图不能起 5 秒轮询')
 })
 
+test('未选 Fish、没有外接模块也可配置 Fish；只看服务不合成、不改来源、不启动识别', () => {
+  const p = loadPanel()
+  const { tree } = p.render('VoiceTab', { voiceView: 'services', st: voiceSt, draft: voiceDraft,
+    setDraft() { assert.fail('查看服务不该改设置') }, setVoiceView() {}, toast() {}, reload() {} })
+  const key = find(tree, n => n.props['aria-label'] === 'Fish API Key')
+  assert.equal(key?.props.type, 'password')
+  assert.ok(text(tree).includes('音色 ID'))
+  assert.equal(p.calls.length, 0)
+  assert.equal(p.intervals.length, 0)
+})
+
+test('Breeze 服务的音色在前，签到单独展开；本地模式不出现账户选项', () => {
+  for (const mode of ['cloud', 'local']) {
+    const p = loadPanel()
+    const draft = { ...voiceDraft, voice: { engine: 'breeze', breeze: { mode } } }
+    const { raw } = p.render('VoiceServiceFields', { id: 'breeze', st: voiceSt, draft, setDraft() {}, toast() {}, reload() {} })
+    const fold = title => find(raw, n => n.type === 'details' && text(n.children[0]) === title)
+    assert.ok(fold('Breeze 声音微调'))
+    const quota = fold('每日额度与签到')
+    if (mode === 'cloud') {
+      assert.ok(find(raw, n => n.props?.label === '音色 id'))
+      assert.ok(quota && !quota.props.open)
+      assert.ok(find(quota, n => n.props?.label === '自动领每日额度'))
+      assert.ok(!find(quota, n => n.props?.label === '音色 id'))
+    } else {
+      assert.equal(quota, null)
+      assert.equal(find(raw, n => n.props?.label === '账号密码'), null)
+    }
+  }
+})
+
+test('VoiceTab：RimTTS 仍可在发语音里选中，且扩展服务能配置它的目录与按需起参数', () => {
+  // fork 专属引擎：面板重构为「扩展服务」子视图时曾把 rimtts 从可选引擎里丢掉，
+  // 导致配置块还在、却根本选不到。这里锁住三处接线。
+  const p = loadPanel()
+  const rimSt = { config: { voice: { engine: 'rimtts' } }, voice: { edgeInstalled: false } }
+  const rimDraft = { voice: { engine: 'rimtts', rimtts: { root: 'D:\\RimTTS', port: 9880, idleSeconds: 180 } }, song: {}, modules: {} }
+  const { tree } = p.render('VoiceTab', { voiceView: 'send', setVoiceView() {}, st: rimSt, draft: rimDraft, setDraft() {}, toast() {}, reload() {} })
+  const choice = find(tree, n => n.props?.role === 'radio' && text(n).includes('RimTTS（Rim 的声音）'))
+  assert.ok(choice, '发语音视图必须提供 rimtts 引擎选项')
+  assert.equal(choice.props['aria-checked'], true, '当前引擎是 rimtts 时它应处于选中态')
+  assert.ok(find(tree, n => text(n) === '配置 RimTTS'), '选到 rimtts 时要有「配置 RimTTS」直达扩展服务')
+
+  const { raw } = p.render('VoiceServiceFields', { id: 'rimtts', st: voiceSt, draft: rimDraft, setDraft() {}, toast() {}, reload() {} })
+  for (const label of ['RimTTS 目录', '配置文件', '端口', '说完多久关掉', '预热', '预启动', '起不来时']) {
+    assert.ok(find(raw, n => n.props?.label === label), `RimTTS 配置缺「${label}」`)
+  }
+  // 按需起的状态条（含手动「立刻关掉」）也要跟着配置块出来
+  assert.ok(p.calls.some((c) => c.url.endsWith('/voice/rimtts')), 'RimTtsStatus 要查一次运行状态')
+})
+
 test('VoiceTab：listen 视图渲染 Asr（含 AsrStatus，首查 /voice/asr-status，起 5 秒轮询）', () => {
   const p = loadPanel()
   const { tree } = p.render('VoiceTab', { voiceView: 'listen', setVoiceView() {}, st: voiceSt, draft: voiceDraft, setDraft() {}, toast() {}, reload() {} })
@@ -230,19 +281,24 @@ test('VoiceTab：listen 视图渲染 Asr（含 AsrStatus，首查 /voice/asr-sta
   assert.ok(p.intervals.some((i) => i.ms === 5000), 'AsrStatus 的 5 秒轮询要在挂载时起')
 })
 
-test('VoiceTab：一对子视图页签；点「听语音」切 listen；子视图选择持久化（App 侧源码契约）', () => {
+test('VoiceTab：语音子视图页签；点「听语音」切 listen；子视图选择持久化（App 侧源码契约）', () => {
   const p = loadPanel()
   const seen = []
   const { tree } = p.render('VoiceTab', { voiceView: 'send', setVoiceView: (v) => seen.push(v), st: voiceSt, draft: voiceDraft, setDraft() {}, toast() {}, reload() {} })
   const tabs = findAll(tree, (n) => n.props && n.props.role === 'tab')
-  assert.deepEqual(tabs.map((t) => text(t)), ['发语音', '听语音'], '语音页要有一对子视图页签')
+  assert.deepEqual(tabs.map((t) => text(t)), ['发语音', '听语音', '扩展服务'])
   assert.equal(tabs[0].props['aria-selected'], true, 'send 是当前选中')
   assert.equal(tabs[1].props['aria-selected'], false)
   tabs[1].props.onClick()
-  assert.deepEqual(seen, ['listen'], '点「听语音」要切视图')
+  tabs[2].props.onClick()
+  assert.deepEqual(seen, ['listen', 'services'])
   // App 侧接线（源码契约）：pickVoiceView 把选择写进 localStorage；初始值从 localStorage 恢复
   assert.match(CLIENT(), /const pickVoiceView = \(v\) => \{ setVoiceView\(v\); try \{ localStorage\.setItem\('aurabot\.voice-view', v\) \} catch \(e\) \{\} \}/, '子视图切换必须持久化到 aurabot.voice-view')
-  assert.match(CLIENT(), /localStorage\.getItem\('aurabot\.voice-view'\) === 'listen' \? 'listen' : 'send'/, '初始子视图要从 localStorage 恢复')
+  const readView = /const \[voiceView, setVoiceView\] = useState\(\(\) => (.+)\)/.exec(CLIENT())[1]
+  for (const value of ['send', 'listen', 'services', 'invalid']) {
+    p.store.set('aurabot.voice-view', value)
+    assert.equal(new Script('(() => ' + readView + ')()').runInNewContext(p.env), value === 'invalid' ? 'send' : value)
+  }
 })
 
 // ================= 4. Manage 管理功能页 =================
@@ -350,7 +406,7 @@ test('Manage：清单固定 9 项且 key 不重复（MANAGE_FEATURES 契约）',
 
 test('折叠契约：语音页低频参数收进 collapsible Card（defaultOpen=false，源码级）', () => {
   const src = CLIENT()
-  const start = src.indexOf("title: '更多设置（3 项）'")
+  const start = src.indexOf("title: '什么时候发语音'")
   assert.ok(start > 0, '语音页要有「更多设置」折叠卡')
   const end = src.indexOf('VoiceSongModel', start)
   const block = src.slice(Math.max(0, start - 120), end)
@@ -368,7 +424,7 @@ test('折叠契约：语音页低频参数收进 collapsible Card（defaultOpen=
 
 test('Card 折叠行为：defaultOpen=false 时 children 不渲染；点标题展开后出现', () => {
   const p = loadPanel()
-  const props = { title: '更多设置（3 项）', desc: '折叠描述', collapsible: true, defaultOpen: false }
+  const props = { title: '什么时候发语音', desc: '折叠描述', collapsible: true, defaultOpen: false }
   let { tree } = p.render('Card', props, '低频参数内容')
   assert.ok(!text(tree).includes('低频参数内容'), '折叠时 children 不能进树（不渲染、不注册控件）')
   assert.match(text(tree), /▸ 展开/, '折叠态要有展开提示')

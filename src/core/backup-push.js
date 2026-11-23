@@ -5,8 +5,10 @@
 // 安全约定（首审 5 项 P1，2026-11-03）：
 //   ① 推送前用 Gitee API 校验目标仓库确实私有（private===true），公开仓库一律拒绝——
 //      这是「备份不上公网」的唯一硬闸，面板红字提醒只算引导不算兜底；
-//   ② 令牌不写进 .git/config：remote 只记不带凭证的 gitee.com URL，令牌经
-//      GIT_CONFIG_* 环境变量以 http.extraheader（Basic，base64）喂给 git，进程参数里也不出现；
+//   ② 令牌不写进 .git/config：remote 只记不带凭证的 gitee.com URL，令牌经环境变量
+//      AURABOT_GITEE_TOKEN 喂给内联凭据助手（#556：Gitee 的 git 服务只认 401 challenge
+//      后补发的 Basic 凭据，预发 http.extraheader 头会被直接拒掉，改走 credential.helper），
+//      助手脚本文本里不含令牌、进程参数里也不出现；
 //   ③ 所有报错（git 子进程与 Gitee API）统一过 redact 再给人看，backup 令牌同时在
 //      host.js 全局 secrets() 登记；
 //   ④ owner/repo/branch 白名单校验（字母数字._- 等），防 URL 注入与 git 参数注入；
@@ -48,11 +50,18 @@ export function redact(text, token) {
 const cleanUrl = (r) => `https://gitee.com/${r.owner}/${r.repo}.git`
 
 /**
- * 给 git 子进程的环境变量：令牌以 http.extraheader（Basic base64）注入，只进环境不进
- * 命令行、不进 .git/config；顺带关掉凭据管理器与终端交互提示，防止 token 被存到别处。
+ * 给 git 子进程的环境变量（#556）：令牌经环境变量 AURABOT_GITEE_TOKEN 喂给内联凭据助手
+ * （credential.helper，`!` 前缀表示 shell 一行式，由 git 自带的 sh 执行），git 收到远端
+ * 401 challenge 后才调用助手补发凭据——Gitee 拒收预发的 http.extraheader，这是它唯一认
+ * 的方式。令牌只进环境变量，不进助手脚本文本、命令行参数或 .git/config；顺带关掉凭据
+ * 管理器与终端交互提示，防止 token 被存到别处。
  */
-function gitEnv(token, username = '') {
-  const env = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_COUNT: '2' }
+/** 用户名白名单：拼进助手脚本前先过一道（脚本里是 sh 字符串），非法字符回落 oauth2。 */
+const HELPER_USER_RE = /^[\w.-]{1,64}$/
+
+/** 导出仅供测试：直接验证助手环境变量的构造与用户名回落。 */
+export function gitEnv(token, username = '') {
+  const env = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_COUNT: '1' }
   // Windows 的 NUL 路径不能交给 git 的 GIT_CONFIG_GLOBAL；非 Windows 才屏蔽系统/全局配置。
   if (process.platform !== 'win32') env.GIT_CONFIG_GLOBAL = devNull
   // 新仓库没有本地身份；不依赖用户全局 git 配置，否则 Windows 上 commit 会报 Author identity unknown。
@@ -60,11 +69,12 @@ function gitEnv(token, username = '') {
   env.GIT_AUTHOR_EMAIL = 'aurabot@localhost'
   env.GIT_COMMITTER_NAME = 'Aurabot'
   env.GIT_COMMITTER_EMAIL = 'aurabot@localhost'
+  env.AURABOT_GITEE_TOKEN = token
+  // Gitee 的 HTTPS 认证需要「用户名:私人令牌」的 Basic；用户名不合法时用 oauth2 占位。
+  const user = HELPER_USER_RE.test(String(username)) ? String(username) : 'oauth2'
   env.GIT_CONFIG_KEY_0 = 'credential.helper'
-  env.GIT_CONFIG_VALUE_0 = '' // 清空凭据助手链，别让 git 把令牌写进系统凭据库
-  env.GIT_CONFIG_KEY_1 = 'http.extraheader'
-  // Gitee 的 HTTPS 认证需要「用户名:私人令牌」的 Basic，不能用 oauth2 占位用户名。
-  env.GIT_CONFIG_VALUE_1 = 'AUTHORIZATION: basic ' + Buffer.from(`${username || 'oauth2'}:${token}`).toString('base64')
+  // 助手脚本只 echo 用户名与从环境变量读的密码，令牌原文不出现在这段脚本里。
+  env.GIT_CONFIG_VALUE_0 = `!echo "username=${user}"; echo "password=$AURABOT_GITEE_TOKEN"`
   return env
 }
 

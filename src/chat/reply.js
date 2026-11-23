@@ -210,6 +210,24 @@ export function isSilence(text) {
   return t.replace(SILENCE_MARK, '').replace(/[\s\p{P}]/gu, '') === ''
 }
 
+/**
+ * 收尾标点后面又跟了逗号（「。，」「！，」）：人格卡要求每句有收尾标点，模型想停顿时会再补一个逗号。
+ * 只在紧邻的位置收掉逗号，正常的中文逗号不受影响；语音条和文字气泡共用这一份（#546）。
+ */
+export function tidyPunctuation(text) {
+  const raw = String(text || '')
+  const tidy = (chunk) => chunk.replace(/([。！？…]+)[ \t]*[，,]+/g, '$1')
+  const code = codeRanges(raw)
+  if (!code.length) return tidy(raw)
+  let out = ''
+  let last = 0
+  for (const range of code) {
+    out += tidy(raw.slice(last, range.start)) + raw.slice(range.start, range.end)
+    last = range.end
+  }
+  return out + tidy(raw.slice(last))
+}
+
 /** 剥掉正文里残留的沉默标记；整条只有标记时会变成空串，由 isSilence 判沉默。 */
 export function stripSilenceMarks(text) {
   return String(text || '').replace(SILENCE_MARK_WITH_SPACE, '')
@@ -253,6 +271,106 @@ function pokeCloseTagRanges(text) {
   return ranges
 }
 
+// ---------- ACP 协议标记（DSH 上下文代理的传输层包装） ----------
+//
+// DSH 的上下文代理会给每条消息套一层 ACP 包装：`<acp tokens="86" type="text" time="…">mNNNNN</acp>`。
+// 模型状态差时会把这层标记当正文**模仿复述**出来，于是带属性串原样漏进 QQ（2026-11-22 实况三形态：
+// 完整空标签 `<acp …></acp>`、属性尾巴 `="text" time="…">>`、截断残片 `6-11-22 17:26:55">`）。
+//
+// 为什么必须单独写一套规则：
+//   · html-fragments 的 TAG_RE 要求 `<` 开头，**删不掉没有 `<` 的半截尾巴**；
+//   · toolTag 的 PROTO_NAMES 是工具协议名白名单，语义是「删标签连中间内容」，与这里不同；
+//   · 整条只剩标记时必须能变成空串，交给 isSilence 判沉默（不能发一条空气泡）。
+//
+// 这里只认 acp 这一个名字，且要求名字后紧跟空白 / `/` / `>`（`(?=[\s/>])`），
+// 所以正文里正常写 `acp`、`acpxxx`、`<acpx>` 都不受影响。
+const ACP_NAME = /acp(?=[\s/>])/i
+
+/**
+ * ACP 开标签 + 紧随其后的消息编号 `mNNNNN`（闭合参数可选）。
+ * 编号是代理侧的流水号，对读消息的人没有任何意义，所以连编号一起删；
+ * 模型常常只复述了开标签、没写闭合标签，闭合段必须是可选的。
+ *
+ * 末尾的 `[ \t]*\r?\n?` 是为了吃掉「标签独占一行」时留下的空行：
+ * 否则 `前\n<acp…>m1</acp>\n后` 剥完会变成 `前\n\n后`（多一个空气泡行）。
+ * 只有在序列后紧跟着换行时才吃，行中间的行内标记不受影响。
+ */
+const ACP_PAIRED = /<\s*acp\b[^<>]*>\s*m\d{1,8}\s*(?:<\s*\/\s*acp\s*>)?[ \t]*\r?\n?/gi
+/** 落单的 ACP 开/闭标签（含自闭合），只删标签本身。 */
+const ACP_TAG = /<\s*\/?\s*acp(?=[\s/>])[^<>]*>/gi
+/**
+ * 属性尾巴残片：真标签的头被截掉了，只剩属性串和收尾尖括号。
+ * 两种形态都要覆盖：
+ *   · `="text" time="2026-11-22 17:26:47">>` —— 属性名 `type` 被截掉，只剩它的值；
+ *   · `tokens="86" type="text" time="…">` —— 头被截掉但属性名还在。
+ * 只锚 tokens / type / time 这三个 ACP 属性名，且必须以 `">` 或 `">>` 收尾。
+ * **不做通用的「任意 xxx="…"」匹配**——那样会误伤正文里正常引用的一段配置/JSON 片段。
+ */
+const ACP_ATTR_TAIL = /(?:^|[\s(【\[])(?:=\s*"[^"]*"\s*)?(?:(?:tokens|type|time)\s*=\s*"[^"]*"\s*)+>>?/gi
+/**
+ * 只剩日期时间 + 收尾尖括号的极短残片（实况 `6-11-22 17:26:55">`，是 `2026-…` 被截掉的尾巴）。
+ * 必须带 `">` 尾锚定：正常聊天里写「我们约 2026-11-22 17:26:55 见」不会被误删（实测通过）。
+ */
+const ACP_TIME_TAIL = /(?:^|[\s(【\[])\d{1,4}-\d{1,2}-\d{1,2}\s+\d{1,2}:\d{2}:\d{2}\s*">/g
+
+/**
+ * 文本里是否还有「标签 / 属性串」形状的东西（给模型兜底的触发条件用，不做删除）。
+ * 判据故意宽于 acpLeakRanges：它的用途是「正则剥完还像有残渣吗」，宁可多问一次模型。
+ */
+export function hasSuspectTagShape(text) {
+  const s = String(text || '')
+  return /<\s*\/?\s*[A-Za-z][\w:-]*\s+[\w:-]+\s*=/i.test(s) || /=\s*"[^"]*"\s+[\w:-]+\s*=\s*"/i.test(s)
+}
+
+/**
+ * 收集 ACP 协议标记的删除区间（原文坐标）。
+ * 代码块 / 行内代码内一律不碰——模型可能在教人写标签，那是正当输出。
+ */
+function acpLeakRanges(raw) {
+  const text = String(raw || '')
+  if (!text) return []
+  const code = codeRanges(text)
+  // 完整标签的区间：属性尾巴/时间残片**只处理 `<` 已经被截掉的残片**，
+  // 绝不进到完好的 `<...>` 里面去切属性——否则 `<future-mark tokens="9" …>` 会被切成
+  // `<future-mark </future-mark>` 这种更脏的半截标签（自测踩过）。
+  const tagSpans = [...text.matchAll(/<[^<>]*>/g)].map((m) => ({ start: m.index, end: m.index + m[0].length }))
+  const inTag = (start, end) => tagSpans.some((t) => start >= t.start && end <= t.end)
+  const out = []
+  const push = (start, end) => {
+    if (end <= start) return
+    if (insideCode(code, start, end)) return
+    out.push({ start, end })
+  }
+  // 顺序有讲究：先整段配对的（含编号），再落单标签，最后才是属性尾巴。
+  for (const m of text.matchAll(ACP_PAIRED)) push(m.index, m.index + m[0].length)
+  for (const m of text.matchAll(ACP_TAG)) push(m.index, m.index + m[0].length)
+  // 属性尾巴与时间残片都带了前导空白/括号：只删残片本身，前导字符留着（它是正文里的正常分隔）。
+  for (const re of [ACP_ATTR_TAIL, ACP_TIME_TAIL]) {
+    for (const m of text.matchAll(re)) {
+      const lead = /^[\s(【\[]/.exec(m[0])
+      const start = m.index + (lead ? lead[0].length : 0)
+      const end = m.index + m[0].length
+      if (inTag(start, end)) continue // 完好标签内部：交给上面的 acp 标签规则，别切一半
+      push(start, end)
+    }
+  }
+  return out
+}
+
+/** 这段文本里还有没有 ACP 标记可剥（出口断言与日志用，不做删除）。 */
+export function hasAcpResidue(text) {
+  return acpLeakRanges(text).length > 0
+}
+
+/** 剥掉 ACP 标记（幂等）：出口层用，返回剥干净的文本。 */
+export function stripAcpLeak(text) {
+  const raw = String(text || '')
+  if (!raw) return raw
+  const ranges = acpLeakRanges(raw)
+  if (!ranges.length) return raw
+  return withoutToolRanges(raw, mergeRanges(ranges)).trim()
+}
+
 const ZERO_WIDTH_CHARS = new Set(['\u200B', '\u200C', '\u200D', '\uFEFF', '\u2060'])
 const stripZeroWidth = (s) => { let out = ''; for (const ch of String(s || '')) if (!ZERO_WIDTH_CHARS.has(ch)) out += ch; return out }
 const FULLWIDTH = (s) => String(s || '').replace(/[！-～]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0))
@@ -265,12 +383,35 @@ const PROTO_NAMES = ['functioncalls', 'functioncall', 'toolcalls', 'toolcall', '
 /** 代码围栏 / 行内代码范围：解释语境下里面的工具示例保留。 */
 function codeRanges (raw) {
   const ranges = []
-  for (const m of raw.matchAll(/```[\s\S]*?```/g)) ranges.push({ start: m.index, end: m.index + m[0].length, fence: true })
-  for (const m of raw.matchAll(/`[^`\n]+`/g)) {
-    if (ranges.some((r) => m.index >= r.start && m.index < r.end)) continue
+  const chars = String(raw).split('')
+  // 代码围栏既可能从行首开始（~~~ / 未闭合 ```，由 fenceRanges 认），
+  // 也可能夹在行内（```js…```）；两路合并后再挖掉，避免收尾 ``` 与后面的行内反引号误配。
+  const fences = []
+  for (const m of raw.matchAll(/```[\s\S]*?```/g)) fences.push({ start: m.index, end: m.index + m[0].length })
+  for (const f of fenceRanges(raw)) fences.push({ start: f.start, end: f.end })
+  const mergedFences = []
+  for (const f of fences.sort((a, b) => a.start - b.start || a.end - b.end)) {
+    const prev = mergedFences[mergedFences.length - 1]
+    if (prev && f.start <= prev.end) prev.end = Math.max(prev.end, f.end)
+    else mergedFences.push({ ...f })
+  }
+  for (const f of mergedFences) {
+    ranges.push({ ...f, fence: true })
+    for (let i = f.start; i < f.end; i++) chars[i] = ' '
+  }
+  const masked = chars.join('')
+  for (const m of masked.matchAll(/`[^`\n]+`/g)) {
     ranges.push({ start: m.index, end: m.index + m[0].length, fence: false })
   }
-  return ranges
+  // 行内代码可能出现在围栏前面；后续按区间切分必须按起点排序并合并重叠。
+  const sorted = ranges.sort((a, b) => a.start - b.start || a.end - b.end)
+  const merged = []
+  for (const r of sorted) {
+    const prev = merged[merged.length - 1]
+    if (prev && r.start <= prev.end) prev.end = Math.max(prev.end, r.end)
+    else merged.push({ ...r })
+  }
+  return merged
 }
 const insideCode = (code, start, end) => code.some((r) => start >= r.start && end <= r.end)
 
@@ -563,8 +704,12 @@ export function cleanOutboundText(text, { warn, promptSources, fingerprint, user
   const recordRanges = [...chatRecordRanges(raw), ...memoryTranscriptRanges(raw)]
   const pokeRanges = pokeCloseTagRanges(raw)
   const memoRanges = memoLeakRanges(raw)
-  const noiseCount = toolRanges.length + contextRanges.length + htmlCuts.length
-  const tools = [...toolRanges, ...contextRanges, ...silence, ...stateRanges, ...recordRanges, ...pokeRanges, ...memoRanges]
+  // ACP 协议标记（DSH 上下文代理的传输层包装）被模型复述时漏进正文：
+  // 这是所有出站口的**公共必经点**，放这里一次就覆盖 deliver / sendText / sendSegments / 语音 /
+  // 模块快捷 API 全部出口，不必在每个出口各写一遍。
+  const acpRanges = acpLeakRanges(raw)
+  const noiseCount = toolRanges.length + contextRanges.length + htmlCuts.length + acpRanges.length
+  const tools = [...toolRanges, ...contextRanges, ...silence, ...stateRanges, ...recordRanges, ...pokeRanges, ...memoRanges, ...acpRanges]
     .sort((a, b) => a.start - b.start || b.end - a.end)
   const baseRanges = mergeRanges([...tools, ...htmlCuts, ...mediaCuts])
   const toolClean = withoutToolRanges(raw, baseRanges)
@@ -679,7 +824,7 @@ export function parseReply(text, options) {
   if (isSilence(raw)) return { silent: true, items: [] }
   // 工具显式指定语音：仍经过同一份清洗，但正文不再当作媒体/气泡指令解析。
   if (options?.voice === true) {
-    const value = stripSilenceMarks(stripMarkdown(raw))
+    const value = stripSilenceMarks(stripMarkdown(tidyPunctuation(raw)))
     return { silent: !value, items: value ? [{ kind: 'voice', value }] : [] }
   }
   const items = []
@@ -695,7 +840,7 @@ export function parseReply(text, options) {
     const part = bubble.trim()
     if (!part) continue
     // 依次切出 poke / reply / voice / sticker / markdown 图片，其余是文字
-    const re = /<poke\s*\/?>|<\/poke\s*>|<reply:\s*(\d+)\s*>|<voice>([\s\S]*?)<\/voice>|<sticker:([^>]+?)>(?:\s*<\/sticker>)?|!\[[^\]]*\]\(\s*([^)\s]+)\s*\)/g
+    const re = /<poke\s*\/?>|<\/poke\s*>|<reply:\s*(\d+)\s*>|<voice>([\s\S]*?)<\/voice>|<sticker:([^>]+?)>(?:\s*<\/sticker>)?|!\[[^\]]*\]\(\s*([^)\s]+)\s*\)|\[表情[:：]\s*([^\]\n]+?)\s*\]/g
     let last = 0
     let m
     while ((m = re.exec(part)) !== null) {
@@ -708,13 +853,17 @@ export function parseReply(text, options) {
       } else if (m[1] !== undefined) {
         replyTo = m[1]
       } else if (m[2] !== undefined) {
-        const v = stripSilenceMarks(stripMarkdown(m[2]))
+        const v = stripSilenceMarks(stripMarkdown(tidyPunctuation(m[2])))
         if (v) items.push({ kind: 'voice', value: v })
       } else if (m[3] !== undefined) {
         const v = m[3].trim()
         if (v) items.push({ kind: 'sticker', value: v })
       } else if (m[4] !== undefined) {
         items.push({ kind: 'image', value: m[4] })
+      } else if (m[5] !== undefined) {
+        // 模型常写成「[表情: 无语死鱼脸]」而不是 <sticker:…>：按表情名尝试匹配，匹配不到宁可不发，也不能把描述当文字发出去。
+        const v = m[5].trim()
+        if (v) items.push({ kind: 'sticker', value: v })
       }
       attach(from)
       last = re.lastIndex
@@ -791,9 +940,12 @@ export function itemsToLine(items, resolveSticker = () => null) {
 
 function pushText(items, s) {
   // 写坏的引用标签直接去掉；混在正文里的沉默标记也全部剥掉，整行只剩标记时按沉默跳过。
-  const t = stripSilenceMarks(stripMarkdown(String(s || '').replace(/<\/?reply[^>]*>/g, '')))
+  const raw = String(s || '').replace(/<\/?reply[^>]*>/g, '')
+  const t = stripSilenceMarks(stripMarkdown(tidyPunctuation(raw)))
   if (!t || isSilence(t)) return
-  for (const line of splitLines(t)) if (!isSilence(line)) items.push({ kind: 'text', value: line })
+  // 代码块在 stripMarkdown 之后围栏就没了，必须在原文里先判断，整段保留不拆行。
+  const lines = /```|~~~/.test(raw) ? [t] : splitLines(t)
+  for (const line of lines) if (!isSilence(line)) items.push({ kind: 'text', value: line })
 }
 
 /** 对方是不是明确要她发语音（「用语音说」「发个语音」「语音回我」……）。 */

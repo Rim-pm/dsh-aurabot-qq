@@ -433,6 +433,8 @@ export function createImageGen({ getConfig, log, local, dsh, fetchImpl, codexAut
     if (!base || !c.model) throw new Error('还没填生图服务地址或模型')
     const headers = image ? {} : { 'content-type': 'application/json' }
     if (c.apiKey) headers.authorization = `Bearer ${c.apiKey}`
+    // 配了备用服务时，5xx 交给上层切备用（比原地重试快，也不会两边都烧钱）；没配备用才原地重试。
+    const hasFallback = Boolean(c.fallbackEnabled && Array.isArray(c.fallbacks) && c.fallbacks.length)
     // response_format、image_size 不是每家都认（官方 OpenAI 就不认）：被拒了去掉再发。被拒的请求没出图，重发不会多画
     const body = { model: c.model, prompt, size: c.size, n: 1, ...(c.gif ? GIF_FIELDS : { response_format: 'b64_json', image_size: c.size }) }
     let requestBody
@@ -442,14 +444,25 @@ export function createImageGen({ getConfig, log, local, dsh, fetchImpl, codexAut
       for (const [key, value] of Object.entries({ prompt, model: c.model, size: c.size, ...(c.gif ? GIF_FIELDS : {}) })) requestBody.append(key, value)
     }
     let r, j
+    let retries = 0
     for (;;) {
       try { r = await fetch(`${base}/images/${image ? 'edits' : 'generations'}`, { method: 'POST', headers, body: requestBody || JSON.stringify(body), signal: AbortSignal.timeout(180000) }) } catch (error) { error.imageRequestFailed = true; error.imageNetworkFailure = true; throw error }
       j = await r.json().catch(() => ({}))
       if (r.ok) break
       const message = j?.error?.message || j?.message || `HTTP ${r.status}`
       const bad = !image && r.status === 400 && ['response_format', 'image_size'].find((k) => k in body && message.includes(k))
-      if (!bad) throw serviceError(r.status, message, image)
-      delete body[bad]
+      if (bad) { delete body[bad]; continue }
+      // 网关类瞬时失败（502/503/504）自动重试：中转站抖一下不该让整张图报废。
+      // 只重试 5xx —— 超时故意不重试：请求可能已被上游受理并在出图，重发会出两张、算两次钱。
+      // GIF 不重试（一帧 8 张图，成本高）；配了 fallback 时也不重试，交给上层切备用。
+      if (!c.gif && !hasFallback && r.status >= 500 && r.status <= 504 && retries < 2) {
+        retries += 1
+        const wait = retries === 1 ? 1000 : 3000
+        log.warn?.(`生图接口 HTTP ${r.status}，${wait / 1000}s 后重试（第 ${retries}/2 次）`)
+        await new Promise((resolve) => setTimeout(resolve, wait))
+        continue
+      }
+      throw serviceError(r.status, message, image)
     }
     const item = (j.data || j.images || [])[0] || {}
     let buf

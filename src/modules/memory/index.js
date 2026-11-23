@@ -526,6 +526,15 @@ export default {
       return memory.setNoMemory(b.qq, b.enabled, { deleteExisting: b.deleteExisting === true })
     })
     api.route('/memory/relations/delete', async (req) => memory.deleteRelation((await http.body(req)).id))
+    api.route('/memory/relations/save', async (req) => {
+      const b = await http.body(req)
+      if (!b || !String(b.id || '').trim() || !String(b.subj || '').trim() || !String(b.pred || '').trim() || !String(b.obj || '').trim()) return { ok: false, message: '关系要写全主语、关系、宾语' }
+      memory.saveRelation({
+        id: String(b.id), subj: String(b.subj).trim().slice(0, 20), subjQq: String(b.subjQq || ''), pred: String(b.pred).trim().slice(0, 20), obj: String(b.obj).trim().slice(0, 20), objQq: String(b.objQq || ''),
+        chatId: String(b.chatId || ''), speaker: String(b.speaker || ''), at: Number(b.at) || Date.now(),
+      })
+      return { ok: true, message: '关系已修改' }
+    })
     api.route('/memory/chats', async () => ({ ok: true, list: memory.chats() }))
     api.route('/memory/chats/save', async (req) => {
       const b = await http.body(req)

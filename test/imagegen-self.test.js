@@ -223,15 +223,17 @@ test('仅明确不支持参考图才文字重试；其他错误不重试', async
     })
     const s = setup(cfgOf())
     const out = await s.tool.execute({ prompt: '散步', image: 'self' })
-    assert.equal(out.ok, status === 404)
-    assert.equal(seen.length, status === 404 ? 2 : 1)
+    // 2026-11-22：没有配置 fallback 时，5xx 改为原地重试 2 次（见 imagegen.js viaOpenAI）。
+    // mock 第二次就返回成功，所以 500 与 404 一样是 2 次请求；401/429 仍一次即止。
+    assert.equal(out.ok, status === 404 || status === 500)
+    assert.equal(seen.length, (status === 404 || status === 500) ? 2 : 1)
     if (status === 404) {
       assert.match(seen[1].url, /generations$/)
       assert.match(JSON.parse(seen[1].init.body).prompt, /蓝色短发/)
       assert.match(out.message, /形象一致性有限/)
       assert.equal(s.sent.length, 1)
       assert.match(s.events[0].text, /按提示词画/)
-    } else assert.equal(s.sent.length, 0)
+    } else assert.equal(s.sent.length, status === 500 ? 1 : 0)
     mock.mock.restore()
   }
   assert.equal(isUnsupportedReference(new Error('network error')), false)

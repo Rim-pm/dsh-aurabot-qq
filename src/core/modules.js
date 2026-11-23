@@ -263,6 +263,16 @@ function settleModuleCall(core, verdict, outcome, log) {
  * 未注入服务（旧环境 / 纯测试）时**不设** outboundDone：让 hub 的第二道保险（若宿主挂了）
  * 仍然生效；两道都没有时就是原样直发，与改造前逐字节等价。
  */
+// 模块显式声明「这条是我说的话」（调用时带 `{ proactive: true }`）时，把留痕标记透给 hub：
+// hub.sendText / hub.sendSegments 只有看到 opts.proactive 才走 noteProactive() → chatlog 记一条 bot 发言，
+// 而模块捷径以前只转 (chatId, text)，标记根本传不进去 —— 于是模块发的消息在 chatlog 里零命中
+// （qq-peek 的 qq_say_in_group 就这么丢档，2026-11-22 修）。不声明就不加键：
+// 日报、画前提示这类本来不该进记忆的发送保持改造前的行为。
+function logAsModuleSpeech(extra, opts, id) {
+  if (!opts || opts.proactive !== true) return extra
+  return { ...extra, proactive: true, proactiveCause: String(opts.proactiveCause || `module:${id}`) }
+}
+
 function governedSend(core, id, ask, run, log) {
   const svc = outboundOf(core)
   if (!svc) return run({ sourceModule: id })
@@ -677,12 +687,15 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
       // 注意 reply 不参与：那是「回某一条消息」的回合内响应，由 hub 自己的回复链路负责，
       // 不是模块自发的主对话（治理对象只有主动私聊主人）。
       send: writable('send', (chatId, text) => governedSend(core, id, { chatId: String(chatId), text: String(text ?? '') }, (extra) => core.hub.deliver(String(chatId), String(text ?? ''), extra), obLog)),
-      sendText: writable('sendText', (chatId, text) => governedSend(core, id, { chatId: String(chatId), text: String(text ?? '') }, (extra) => core.hub.sendText(String(chatId), String(text ?? ''), undefined, undefined, undefined, extra), obLog)),
+      // 第三个参数可选：`{ proactive: true, proactiveCause: 'qq_say_in_group' }` —— 声明「这条是我说的话」，
+      // hub 会在目标聊天 chatlog 里补一条 bot 记录（否则模块发的消息不落档）。
+      sendText: writable('sendText', (chatId, text, opts) => governedSend(core, id, { chatId: String(chatId), text: String(text ?? '') }, (extra) => core.hub.sendText(String(chatId), String(text ?? ''), undefined, undefined, undefined, logAsModuleSpeech(extra, opts, id)), obLog)),
       // 回某一条消息：群里以「引用回复」发出，私聊直接发
       reply: writable('reply', (msg, text) => core.hub.sendText(String(msg.chatId), String(text ?? ''), msg.kind === 'group' ? msg.messageId : undefined)),
       isOwner: (userId) => String(userId) === String(getConfig().ownerQQ),
       sendImage: writable('sendImage', (chatId, src) => governedSend(core, id, { chatId: String(chatId) }, (extra) => core.hub.sendImage(String(chatId), src, undefined, undefined, extra), obLog)),
-      sendSegments: writable('sendSegments', (chatId, segs, note) => governedSend(core, id, { chatId: String(chatId) }, (extra) => core.hub.sendSegments(String(chatId), segs, note || `[${id}]`, extra), obLog)),
+      // sendSegments(chatId, segs, note, opts)：opts 同上，供带 @ / 引用 / 图片段的发送声明留痕。
+      sendSegments: writable('sendSegments', (chatId, segs, note, opts) => governedSend(core, id, { chatId: String(chatId) }, (extra) => core.hub.sendSegments(String(chatId), segs, note || `[${id}]`, logAsModuleSpeech(extra, opts, id)), obLog)),
       // 发任意文件（文档 / 压缩包 / 音频 / 视频……）：本机绝对路径，或网关能取到的网址 / base64://
       sendFile: writable('sendFile', (chatId, file, name) => governedSend(core, id, { chatId: String(chatId) }, () => core.hub.sendFile(String(chatId), file, name), obLog)),
       // 把一个音频文件当语音条发出去（不走念文字）

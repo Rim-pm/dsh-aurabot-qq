@@ -107,6 +107,7 @@ window.__ModuleLoader__.load({
      */
     const fmtCost = (n, currency = '元') => {
       const v = Number(n) || 0
+      if (v > 0 && v < 0.0001) return '< ' + fmtCost(0.0001, currency)
       const text = v === 0 ? '0' : v < 0.01 ? v.toFixed(4).replace(/0+$/, '').replace(/\.$/, '') : v.toFixed(2)
       return /[\u3400-\u9fff]/.test(String(currency)) ? text + ' ' + currency : String(currency) + text
     }
@@ -256,6 +257,9 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-deep:#9cc4f5;--ab-sea:#6
 .ab-finder-empty{padding:12px 10px;color:var(--ab-dim);font-size:12px}
 @media (max-width:640px){.ab-grp{padding:0 10px;gap:5px}.ab-find-btn .t,.ab-find-btn .ab-kbd{display:none}.ab-finder{left:6px;right:6px;width:auto;max-width:none}}
 .ab-grid{display:grid;gap:12px}
+.ab-pool>summary{cursor:pointer;font-weight:600}.ab-pool[open]>summary{margin-bottom:10px}
+@media (max-width:640px){.ab-voice-services .ab-row .ab-ctl{width:100%}}
+.ab-voice-options>summary{padding:8px 0;cursor:pointer;font-weight:560}
 .ab-market-grid{grid-template-columns:repeat(auto-fill,minmax(min(100%,280px),1fr))}
 .ab-market-grid>.ab-card{content-visibility:auto;contain-intrinsic-block-size:auto 180px}
 .ab-permission-grid{display:grid;grid-template-columns:minmax(220px,1fr) minmax(0,2fr);gap:12px;align-items:start}
@@ -1180,20 +1184,36 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           h(Btn, { small: true, kind: 'primary', onClick: claim }, '认领')))
     }
 
+    const usageCurrencies = { CNY: '人民币', USD: '美元', EUR: '欧元', HKD: '港元', JPY: '日元', GBP: '英镑', SGD: '新加坡元', CAD: '加元', AUD: '澳元', CHF: '瑞士法郎' }
+    const usageCodes = Object.fromEntries(Object.entries(usageCurrencies).map(([code, label]) => [label, code]))
+    // Preserve custom tariff units when their ISO currency is unknown (e.g. credits or an ambiguous $).
+    const usageMoney = (amount, from, to, fx) => {
+      const unit = String(from).trim().toUpperCase()
+      const code = unit === '元' || unit === 'RMB' ? 'CNY' : usageCodes[unit] || unit
+      if (!Object.hasOwn(usageCurrencies, code)) return fmtCost(amount, from) + '（原单位）'
+      const origin = fx?.rates?.[code], target = fx?.rates?.[to]
+      if (code === to || !(origin > 0 && target > 0)) return fmtCost(amount, code === 'CNY' ? '元' : usageCurrencies[code])
+      return fmtCost(amount * (target / origin), to === 'CNY' ? '元' : usageCurrencies[to])
+    }
+
     function UsageSummary({ sessions = {} }) {
       const [report, setReport] = useState(null)
       const [open, setOpen] = useState(false)
       const [precise, setPrecise] = useState(false)
+      const [currency, setCurrency] = useState(() => {
+        try { const c = localStorage.getItem('aurabot.usage.currency'); if (Object.hasOwn(usageCurrencies, c)) return c } catch {}
+        return 'CNY'
+      })
       const [range, setRange] = useState('all')
       const [busy, setBusy] = useState(false)
       const [failed, setFailed] = useState(false)
       const request = useRef(null)
-      const load = useCallback((selected) => {
+      const load = useCallback((selected, refreshFx = false) => {
         request.current?.abort()
         const controller = new AbortController()
         request.current = controller
         setBusy(true); setFailed(false)
-        fetch(API + '/usage?range=' + selected, { signal: controller.signal, cache: 'no-store' })
+        fetch(API + '/usage?range=' + selected + (refreshFx ? '&fx=refresh' : ''), { signal: controller.signal, cache: 'no-store' })
           .then(r => { if (!r.ok) throw new Error(); return r.json() })
           .then(r => { if (!r || r.ok === false || !r.current || !r.ranges) throw new Error(); if (!controller.signal.aborted) setReport(r) })
           .catch(() => { if (!controller.signal.aborted) setFailed(true) })
@@ -1204,7 +1224,13 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const tokens = n => precise ? exact(n) : fmtTokens(n)
       const tokenTitle = n => exact(n) + ' Tokens'
       const hit = r => r?.promptTokens ? (r.cacheHitRate * 100).toFixed(2) + '%' : '—'
-      const money = r => typeof r?.cost === 'number' ? ' · 约 ' + fmtCost(r.cost, report.currency) : ''
+      const price = r => {
+        if (typeof r?.cost === 'number') return usageMoney(r.cost, report.currency, currency, report.fx)
+        if (typeof r?.pricedCost === 'number') return usageMoney(r.pricedCost, report.currency, currency, report.fx) + '（另有 ' + exact(r.unpricedCalls) + ' 次未定价）'
+        return '未定价'
+      }
+      const official = r => typeof r?.officialUSD === 'number' ? usageMoney(r.officialUSD, 'USD', currency, report.fx) + (r.officialMissing ? '（另有 ' + exact(r.officialMissing) + ' 次无报价）' : '') : '暂无报价'
+      const money = r => r?.runs ? ' · 官方参考费用：' + official(r) + (typeof r.pricedCost === 'number' ? ' · 渠道估算：' + price(r) : '') : ''
       const total = report?.ranges.all
       const label = k => {
         const title = sessions[k]?.title
@@ -1212,43 +1238,50 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       }
       const table = (rows, nameOf) => {
         if (!rows?.length) return h('p', { className: 'ab-muted' }, '这段时间没有已记录的用量。')
-        const priced = rows.some(r => typeof r.cost === 'number')
+        const priced = rows.some(r => typeof (r.pricedCost ?? r.cost) === 'number')
         return h('div', { className: 'ab-usage-table', tabIndex: 0, 'aria-label': '用量明细，可横向滚动' },
           h('table', { className: 'ab-table num' },
-            h('thead', null, h('tr', null, ['对话 / 来源', '已上报调用', '输入 Tokens', '输出 Tokens', '合计 Tokens', '缓存命中率', ...(priced ? ['估算费用'] : [])].map(x => h('th', { key: x }, x)))),
+            h('thead', null, h('tr', null, ['对话 / 来源', '已上报调用', '输入 Tokens', '输出 Tokens', '合计 Tokens', '缓存命中率', '官方参考费用', ...(priced ? ['渠道估算'] : [])].map(x => h('th', { key: x }, x)))),
             h('tbody', null, rows.map(r => h('tr', { key: r.key },
               h('td', null, nameOf(r.key)), h('td', null, exact(r.runs)),
               h('td', { title: tokenTitle(r.promptTokens) }, tokens(r.promptTokens)), h('td', { title: tokenTitle(r.completionTokens) }, tokens(r.completionTokens)),
-              h('td', { title: tokenTitle(r.totalTokens) }, tokens(r.totalTokens)), h('td', null, hit(r)),
-              priced ? h('td', null, typeof r.cost === 'number' ? fmtCost(r.cost, report.currency) : '—') : null)))))
+              h('td', { title: tokenTitle(r.totalTokens) }, tokens(r.totalTokens)), h('td', null, hit(r)), h('td', null, official(r)),
+              priced ? h('td', null, price(r)) : null)))))
       }
       const cur = report?.current
       return h('div', { className: 'ab-grid ab-usage' },
-        h('button', { type: 'button', className: 'ab-card ab-usage-summary', 'aria-expanded': open, onClick: () => { setOpen(!open); if (!open) load(range) } },
+        h('button', { type: 'button', className: 'ab-card ab-usage-summary', 'aria-expanded': open, onClick: () => { setOpen(!open); if (!open) load(range, true) } },
           h('span', { className: 'ab-section-title' }, 'Tokens 用量'),
           h('strong', { className: 'ab-usage-number', title: total ? tokenTitle(total.totalTokens) : undefined }, total ? tokens(total.totalTokens) : busy ? '读取中…' : '暂时无法读取'),
-          h('span', null, '已记录合计 · 输入缓存命中率 ' + hit(total) + money(total)),
-          h('span', { className: 'ab-muted' }, open ? '收起明细 ↑' : '查看各对话用量 →')),
-        open ? h(Card, { title: '用量明细', right: h(Btn, { small: true, onClick: () => load(range), disabled: busy }, busy ? '读取中…' : '刷新'),
-          desc: '只统计已上报的用量；输入包含缓存读取和写入。命中率按输入 Token 数计算，不是请求次数。' },
+          h('span', null, '近 90 天 · 缓存命中率 ' + hit(total) + money(total)),
+          h('span', { className: 'ab-muted' }, open ? '收起明细 ↑' : '查看明细 →')),
+        open ? h(Card, { title: '用量明细', right: h(Btn, { small: true, onClick: () => load(range, true), disabled: busy }, busy ? '读取中…' : '刷新'),
+          desc: '只统计服务已上报的 Tokens。' },
           h('div', { className: 'ab-flex', style: { flexWrap: 'wrap', gap: 6 } },
-            [['all','已记录（近 90 天）'],['today','今天'],['yesterday','昨天'],['7','近 7 天'],['30','近 30 天']].map(([value,name]) =>
+            [['all','近 90 天'],['today','今天'],['yesterday','昨天'],['7','近 7 天'],['30','近 30 天']].map(([value,name]) =>
               h('button', { key: value, type: 'button', className: cx('ab-btn',range === value && 'primary'), 'aria-pressed': range === value, onClick: () => setRange(value) }, name))),
           h('div', { className: 'ab-flex', style: { flexWrap: 'wrap', gap: 8, alignItems: 'center', marginTop: 8 } },
-            h('span', { className: 'ab-muted ab-small' }, 'K = 千 · M = 百万 · B = 十亿'),
+            h('label', { className: 'ab-flex', style: { alignItems: 'center', gap: 6 } }, '显示币种',
+              h('select', { className: 'ab-select', value: currency, onChange: e => {
+                const c = e.target.value; setCurrency(c); try { localStorage.setItem('aurabot.usage.currency', c) } catch {}
+              } }, Object.entries(usageCurrencies).map(([c, label]) => h('option', { key: c, value: c }, label + ' · ' + c)))),
             h('button', { type: 'button', className: 'ab-btn', 'aria-pressed': precise, onClick: () => setPrecise(!precise) }, precise ? '使用简写' : '显示精确数字')),
           failed ? h('div', { className: 'ab-note warn', role: 'alert' }, '暂时没能读取最新用量，请点刷新重试。' + (report ? '当前仍显示上次结果。' : '')) : null,
           report?.writeFailed ? h('div', { className: 'ab-note warn', role: 'alert' }, '用量暂未保存成功；重启可能丢失最近的记录。') : null,
           busy || report?.range !== range ? h('p', { className: 'ab-muted', role: 'status' }, busy ? '正在读取所选时段…' : '请刷新以读取所选时段。') : cur ? h(Fragment, null,
             h('div', { className: 'ab-note', title: tokenTitle(cur.totalTokens) }, '合计 ' + tokens(cur.totalTokens) + ' Tokens · 命中率 ' + hit(cur) + money(cur)),
-            table(cur.byChat, label),
-            cur.background?.runs ? h('div', { className: 'ab-note', title: tokenTitle(cur.background.totalTokens) }, '未归入具体对话的后台用量：' + tokens(cur.background.totalTokens) + ' Tokens · 命中率 ' + hit(cur.background) + money(cur.background) + '。已包含在合计中。') : null,
-            h('details', { style: { marginTop: 12 } }, h('summary', null, '按来源和模型查看'),
-              table(cur.byModule, k => k), table(cur.byModel, k => k))) : null,
-          h('p', { className: 'ab-muted ab-small' },
-            '按北京时间分日，保留近 90 天的数字记录。没有上报用量的调用、搜索或生图等独立 API 费用不计入。',
-            report?.startedAt ? ' 独立后台调用从 ' + new Date(report.startedAt).toLocaleString('zh-CN', { hour12: false, timeZone: 'Asia/Shanghai' }) + ' 起记录；更早的未记录用量无法补算。' : '',
-            ' 没有可靠渠道价格时不显示金额；显示的金额也仅供参考，以账单为准。')) : null)
+            h('details', { style: { marginTop: 12 } }, h('summary', null, '群和私聊'), table(cur.byChat, label)),
+            h('details', { style: { marginTop: 12 } }, h('summary', null, '记忆用量'),
+              cur.byMemoryTask?.length ? table(cur.byMemoryTask, k => k) : h('p', { className: 'ab-muted' }, '这段时间没有单列的记忆用量。旧版未区分的记录仍在原分类里。')),
+            h('details', { style: { marginTop: 12 } }, h('summary', null, '按来源查看'),
+              cur.background?.runs ? h('p', { className: 'ab-muted' }, '后台任务：' + tokens(cur.background.totalTokens) + ' Tokens（已计入合计）') : null,
+              table(cur.byModule, k => k)),
+            h('details', { style: { marginTop: 12 } }, h('summary', null, '按模型查看'), table(cur.byModel, k => k))) : null,
+          h('details', { className: 'ab-muted ab-small', style: { marginTop: 12 } }, h('summary', null, '统计口径与价目'),
+            h('p', null, '官方参考费用按原厂标准 API 价（美元）折算，中转按同价。价目核对：' + (report?.referenceDate || '—') + '。外部搜索、生图等单独计费。'),
+            report?.fx?.date ? h('p', null, '换算汇率：欧洲央行 · ' + report.fx.date) : null,
+            h('p', null, '按北京时间分日。输入含缓存读写，命中率按输入 Tokens 计算。',
+              report?.startedAt ? ' 后台用量自 ' + new Date(report.startedAt).toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai' }) + ' 起记录。' : ''))) : null)
     }
 
     function Overview({ st, toast, go }) {
@@ -2471,7 +2504,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const validGroupId = /^[1-9]\d{4,11}$/.test(groupId)
       const modeLabel = id => !draft.allow.groups.includes(id) ? '不响应' : (draft.group.moduleOnlyGroups || []).includes(id) ? '仅模块' : 'AI 聊天'
       return h('div', { className: 'ab-grid' },
-        h(Card, { title: '选择群', right: h(Btn, { small: true, kind: 'ghost', onClick: () => setSection('defaults') }, '群聊通用设置'), desc: '选一个群，设置它能做什么；改好后点「保存设置」。' },
+        h(Card, { title: '选择群', desc: '选一个群，设置它能做什么；改好后点「保存设置」。' },
           h('div', { className: 'ab-flex', style: { marginBottom: 12 } },
             h('input', { className: 'ab-input', 'aria-label': '查找或添加群号', placeholder: '查找或添加群号', inputMode: 'numeric', value: newGid, onChange: e => setNewGid(e.target.value) }),
             h(Btn, { small: true, disabled: !validGroupId, onClick: () => {
@@ -2488,6 +2521,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
               const raw = overrides[gid]
               const mode = !draft.allow.groups.includes(gid) ? 'off' : (draft.group.moduleOnlyGroups || []).includes(gid) ? 'modules' : 'chat'
               const changeMode = value => {
+                setSelected(gid)
                 const n = clone(draft)
                 n.allow.groups = value === 'off' ? n.allow.groups.filter(x => x !== gid) : [...new Set([...n.allow.groups, gid])]
                 const restricted = n.group.moduleOnlyGroups || []
@@ -2509,8 +2543,13 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
               return h('div', { key: gid, style: { borderTop: '1px solid var(--ab-line)', paddingTop: 10, marginTop: 10 } },
                 h('h3', null, '群 ' + gid),
                 h(Row, { label: '群响应模式' }, h(Select, { ariaLabel: '群 ' + gid + ' 响应模式', value: mode,
-                  options: [{ value: 'off', label: '不响应群消息' }, { value: 'modules', label: '仅模块' }, { value: 'chat', label: '允许 AI 聊天' }], onChange: changeMode })),
-                mode !== 'chat' ? h('div', { className: 'ab-note' }, mode === 'modules' ? '群消息只交给模块；是否回应仍看各模块的开关、权限和时段。AI 聊天设置暂不生效。' : '未加入白名单，群消息不触发模块或 AI；以下接话设置暂不生效。') : h('p', { className: 'ab-muted ab-small' }, '被 @、引用或叫名字时按规则回复，仍受总开关、暂停和次数限制。'),
+                  options: [{ value: 'off', label: '不响应群消息' }, { value: 'modules', label: '仅模块' }, { value: 'chat', label: '允许 AI 聊天' }], onChange: changeMode }),
+                  mode === 'off' ? h('label', { className: 'ab-flex' }, '不响应时仍旁听',
+                    h(Switch, { title: '群 ' + gid + ' 不响应时仍旁听', on: (draft.memory.passiveGroups || []).includes(gid), onChange: on => {
+                      const ids = draft.memory.passiveGroups || []
+                      setDraft(setPath(draft, 'memory.passiveGroups', on ? [...new Set([...ids, gid])] : ids.filter(x => x !== gid)))
+                    } })) : null),
+                mode !== 'chat' ? h('div', { className: 'ab-note' }, mode === 'modules' ? '群消息只交给模块；是否回应仍看各模块的开关、权限和时段。AI 聊天设置暂不生效。' : '群消息不触发模块或 AI。' + (!draft.enabled ? '总开关已关闭，旁听暂不记录。' : draft.debug ? '调试模式不记录记忆。' : !draft.memory.enabled ? '记忆已关闭，旁听暂不记录。' : '开启旁听只记新文字，不回复；记忆整理可能产生费用。')) : h('p', { className: 'ab-muted ab-small' }, '被 @、引用或叫名字时按规则回复，仍受总开关、暂停和次数限制。'),
                 h('details', { key: gid + ':' + mode, open: mode === 'chat' ? true : undefined },
                   h('summary', { style: { cursor: 'pointer', margin: '12px 0' } }, mode === 'chat' ? 'AI 聊天设置' : 'AI 聊天设置（开启 AI 聊天后生效）'),
                 ...[['proactiveEnabled', '没人叫时主动插话'], ['engagedEnabled', '聊起来后继续回应']].map(([key, label]) =>
@@ -2531,13 +2570,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
                 })()),
                 h(Btn, { small: true, kind: 'ghost', title: '清除本群单独设置的接话规则；不改响应模式和旁听。', disabled: !Object.keys(o).length, onClick: () => { const n = { ...overrides }; delete n[gid]; setDraft(setPath(draft, 'group.overrides', n)) } }, '本群接话改用通用设置'))),
                 h('div', { style: { marginTop: 12 } }, h(Btn, { small: true, kind: 'ghost', onClick: () => setSection('manage') },
-                  '管理不回应名单（本群 ' + (draft.memberFilter?.enabled ? (draft.memberFilter.rules || []).filter(r => r.userId !== String(draft.ownerQQ) && (r.scope === 'all' || r.groups.includes(gid))).length : 0) + ' 人）')),
-                h(Row, { label: '不响应时仍旁听', hint: mode === 'off' ? '只记住之后收到的文字，不回复。' : '当前记忆按群记忆规则处理；此项仅在切换为「不响应群消息」后生效。' },
-                  h(Switch, { title: '群 ' + gid + ' 不响应时仍旁听', on: (draft.memory.passiveGroups || []).includes(gid), onChange: on => {
-                    const ids = draft.memory.passiveGroups || []
-                    setDraft(setPath(draft, 'memory.passiveGroups', on ? [...new Set([...ids, gid])] : ids.filter(x => x !== gid)))
-                  } })),
-                h('p', { className: 'ab-muted ab-small' }, !draft.enabled ? '总开关已关闭，旁听暂不记录。' : draft.debug ? '调试模式不记录记忆。' : !draft.memory.enabled ? '记忆已关闭，旁听暂不记录。' : '记忆整理可能产生费用；此项不删除旧记忆，也不关闭其他模式的群记忆。'))
+                  '管理不回应名单（本群 ' + (draft.memberFilter?.enabled ? (draft.memberFilter.rules || []).filter(r => r.userId !== String(draft.ownerQQ) && (r.scope === 'all' || r.groups.includes(gid))).length : 0) + ' 人）')))
             }),
         ),
       )
@@ -2552,6 +2585,15 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       return h('div', { className: 'ab-grid' },
         h('div', { className: 'ab-flex', style: { marginBottom: 2 } },
           h(Seg, { value: section, onChange: setSection, options: [{ value: 'single', label: '单个群' }, { value: 'all', label: '所有群默认' }] })),
+        h(Card, { title: '群聊通用设置', desc: '允许 AI 聊天的群默认按这些规则接话；单个群另有设置的项目优先。' },
+          h('div', { className: 'ab-grp-row' },
+            h(Row, { label: '没人叫时主动插话', hint: '没人叫它、也没在聊天时，偶尔加入话题。' }, f.sw('group.proactiveEnabled', { on: draft.group.proactiveEnabled !== false, title: '没人叫时主动插话' })),
+            h(Row, { label: '聊起来后继续回应', hint: '最近 3 分钟聊过，可以继续接相关话题，不必每次 @。' }, f.sw('group.engagedEnabled', { on: typeof draft.group.engagedEnabled === 'boolean' ? draft.group.engagedEnabled : draft.group.interjectChance > 0, title: '聊起来后继续回应' })),
+            h(Row, { label: '主动插话概率', hint: '话题越相关，实际概率可能越高；0 表示不主动插话。' }, f.percent('group.interjectChance')),
+            h(Row, { label: '最多连续接话几次', hint: '聊起来后，没有人再次叫它时，最多继续回应几次。0 表示不继续接话。' }, f.range('group.engagedMax', 0, 10, 1, (v) => v + ' 次')),
+          ),
+          draft.group.interjectChance === 0 ? h('div', { className: 'ab-note warn' }, '概率为 0，不会主动插话；想继续接话，可以单独打开「聊起来后继续回应」。') : null),
+
         section === 'single' ? h(Fragment, null,
           h(GroupOverrides, { draft, setDraft, setSection: () => setSection('all') }),
           h(Card, { title: '相关设置' },
@@ -2563,7 +2605,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         ) : null,
         section === 'all' ? h(Fragment, null,
 
-        // ===== 可见区：3 个组行（每组一行，行内自由流式排版）=====
+        // 其余通用设置按用途分组。
 
         // 组行 ① 被叫到时怎么回：6 项流式排一行
         h(Card, { title: '被叫到时怎么回', desc: '群模式为「允许 AI 聊天」时，被 @、引用回复或叫名字会触发回复，仍受总开关、暂停和次数限制。' },
@@ -2582,17 +2624,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
                   : h('span', { className: 'ab-muted ab-small' }, '未启用')))
           )),
 
-        // 组行 ② 没人叫时怎么接话：核心 4 参数排一行（时段/话题/防刷屏进折叠）
-        h(Card, { title: '没人叫时怎么接话', desc: '控制没人叫它时的主动插话与继续接话；被叫到时仍按上一张卡的规则回复。' },
-          h('div', { className: 'ab-grp-row' },
-            h(Row, { label: '没人叫时主动插话', hint: '没人叫它、也没在聊天时，偶尔加入话题。' }, f.sw('group.proactiveEnabled', { on: draft.group.proactiveEnabled !== false, title: '没人叫时主动插话' })),
-            h(Row, { label: '聊起来后继续回应', hint: '最近 3 分钟聊过，可以继续接相关话题，不必每次 @。' }, f.sw('group.engagedEnabled', { on: typeof draft.group.engagedEnabled === 'boolean' ? draft.group.engagedEnabled : draft.group.interjectChance > 0, title: '聊起来后继续回应' })),
-            h(Row, { label: '主动插话概率', hint: '话题越相关，实际概率可能越高；0 表示不主动插话。' }, f.percent('group.interjectChance')),
-            h(Row, { label: '最多连续接话几次', hint: '聊起来后，没有人再次叫它时，最多继续回应几次。0 表示不继续接话。' }, f.range('group.engagedMax', 0, 10, 1, (v) => v + ' 次')),
-          ),
-          draft.group.interjectChance === 0 ? h('div', { className: 'ab-note warn' }, '概率为 0，不会主动插话；想继续接话，可以单独打开「聊起来后继续回应」。') : null),
-
-        // 组行 ③ 一条消息怎么变成回复：3 个总开关排一行
+        // 组行 ② 一条消息怎么变成回复：3 个总开关排一行
         h(Card, { title: '一条消息怎么变成回复', desc: '连发合并、合并转发、发送节奏与超时。' },
           h('div', { className: 'ab-grp-row' },
             h(Row, { label: '连发合并', hint: '人常常一口气发好几句。打开后ta会等对方说完再一起回，而不是一句一回。' }, f.sw('merge.enabled')),
@@ -2943,7 +2975,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       // 试听用面板上现在这一份（Key 没保存也能听），不用先存配置
       const preview = async () => {
         setPv({ src: '', busy: true, err: '' })
-        const r = await post('/voice/volcano-preview', { apiKey: cv.apiKey || '', voiceType: cv.voiceType || '', resourceId: cv.resourceId || '', speedRatio: cv.speedRatio })
+        const r = await post('/voice/volcano-preview', { keyPool: draft.voice.keyPools?.volcano, apiKey: cv.apiKey || '', voiceType: cv.voiceType || '', resourceId: cv.resourceId || '', speedRatio: cv.speedRatio })
         if (r && r.ok) setPv({ src: 'data:' + r.mime + ';base64,' + r.data, busy: false, err: '' })
         // 后端还是老进程时，这个接口根本不存在，插件框架会统一回「模块没开」——别让人去翻「已安装」
         else if (r && r.moduleOff) setPv({ src: '', busy: false, err: '试听接口还没生效：把 DeepSeek Harness 关掉重开一次，再回来点这个' })
@@ -3070,28 +3102,215 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             h('b', null, more ? '收起' : '更多'),
             h('small', null, more ? '只看常用接口' : '还有 ' + Math.max(0, options.length - visible.length) + ' 个接口')),
         ]),
-        h('div', { className: 'ab-muted ab-small', style: { marginTop: 8 } }, '保存设置后，正在使用的接口自动排第一；最多置顶 4 个，超出会取消末尾的置顶。'))
+        h('div', { className: 'ab-muted ab-small', style: { marginTop: 8 } }, '常用的声音来源可以置顶，最多四个。'))
     }
 
-    function Voice({ st, draft, setDraft, toast, reload }) {
+    const VOICE_SERVICES = { 'fish-free': 'Fish Audio', breeze: 'Breeze', edge: '微软在线语音', volcano: '豆包语音', minimax: 'MiniMax', cosyvoice: 'CosyVoice', gptsovits: 'GPT-SoVITS', rimtts: 'RimTTS', http: '自定义 HTTP' }
+
+    function FishBalance() {
+      const [busy, setBusy] = useState(false), [result, setResult] = useState(null)
+      const check = async () => {
+        setBusy(true)
+        try { setResult(await get('/voice/fish-balances')) }
+        finally { setBusy(false) }
+      }
+      return h(Row, { label: '账号余额' }, h('div', null,
+        h(Btn, { small: true, disabled: busy, onClick: check }, busy ? '查询中…' : '查询已保存账号'),
+        result && h('div', { role: 'status', style: { marginTop: 8 } }, result.ok && Array.isArray(result.rows) && result.rows.length ? [
+          ...result.rows.map(({ name, wallet, pack }, i) => h('div', { key: i }, h('b', null, name), ' · API 余额：', wallet.error || ('$' + wallet.usd), ' · 套餐点数：', pack.error || (pack.remaining.toLocaleString() + ' / ' + pack.total.toLocaleString() + (pack.extra ? '，额外 ' + pack.extra.toLocaleString() : '')))),
+          h('small', { className: 'ab-muted', key: 'note' }, '免费语音不扣 API 余额。Fish 未提供免费语音的剩余字数。'),
+        ] : result.ok ? '还没有已保存的 Fish 密钥。' : '查询失败，请稍后重试。')))
+    }
+
+    function VoiceKeyPool({ id, draft, setDraft }) {
+      const path = 'voice.keyPools.' + id
+      const pool = getPath(draft, path) || {}, rows = pool.accounts || []
+      let origin = ''
+      if (id === 'http') { try { const u = new URL(draft.voice.http.urlTemplate); if (u.protocol === 'https:') origin = u.origin } catch {} }
+      const update = (field, value) => setDraft(setPath(draft, path + '.' + field, value))
+      const edit = (row, patch) => update('accounts', rows.map(a => a.id === row.id ? { ...a, ...patch } : a))
+      return h('details', { className: 'ab-card ab-pool' }, h('summary', null, '多账号设置' + (rows.length ? ' · ' + rows.length + ' 个附加账号' : '')),
+        h(Row, { label: '分配方式' }, h(Select, { ariaLabel: '分配方式', width: 230, value: pool.strategy || 'balanced', onChange: v => update('strategy', v), options: [
+          { value: 'balanced', label: '均衡使用（推荐）', desc: '优先空闲账号，同样空闲就轮流用' },
+          { value: 'ordered', label: id === 'http' ? '按添加顺序' : '优先主账号', desc: id === 'http' ? '先用排在前面的账号' : '主账号不可用时，按添加顺序使用' },
+        ] })),
+        ...rows.map((row, i) => h(Row, { key: row.id, label: '附加账号 ' + (i + 1), hint: id === 'http' && row.origin !== origin ? '服务地址已更换，请重新填写密钥。' : '' },
+          h('input', { className: 'ab-input', 'aria-label': '账号备注 ' + (i + 1), placeholder: '账号备注（可选）', value: row.name || '', maxLength: 80, onChange: e => edit(row, { name: e.target.value }) }),
+          h('input', { className: 'ab-input', type: 'password', autoComplete: 'new-password', 'aria-label': '附加密钥 ' + (i + 1), placeholder: row.apiKeySet ? '密钥已保存，留空不改' : '粘贴 API Key', value: row.apiKey || '', onChange: e => edit(row, { apiKey: e.target.value, ...(id === 'http' && { origin }) }) }),
+          h(Btn, { small: true, onClick: () => update('accounts', rows.filter(a => a.id !== row.id)) }, '移除'))),
+        id === 'http' && !origin ? h('span', { className: 'ab-muted' }, '先填写 HTTPS 服务地址。') : h(Btn, { small: true, onClick: () => update('accounts', [...rows, { id: globalThis.crypto?.randomUUID?.() || 'k-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2), name: '', apiKey: '', ...(id === 'http' && { origin }) }]) }, '添加账号'))
+    }
+
+    function VoiceServices({ selected, onSelect, extensions = [], st, draft, setDraft, toast, reload }) {
+      const options = [...Object.entries(VOICE_SERVICES).map(([value, label]) => ({ value, label })), ...extensions.map(m => ({ value: 'ext:' + m.id, label: m.name || m.id }))]
+      const active = options.find(o => o.value === selected) || options[0]
+      const httpPool = active.value === 'http' && String(draft.voice.http?.headers || '').includes('{apiKey}')
+      const poolId = httpPool ? 'http' : ['fish-free', 'minimax', 'volcano'].includes(active.value) || (active.value === 'breeze' && draft.voice.breeze?.mode !== 'local') ? active.value : null
+      return h('div', { className: 'ab-grid ab-voice-services' },
+        h('div', { className: 'ab-flex' }, h('b', null, '配置服务'), h(Select, { ariaLabel: '配置服务', options, value: active.value, onChange: onSelect, width: 220 })),
+        active.value.startsWith('ext:')
+          ? h(ExtPage, { key: active.value, mod: active.value.slice(4), st, draft, setDraft, toast, reload, embedded: true })
+          : h(Card, { key: active.value, title: active.label }, h(VoiceServiceFields, { id: active.value, st, draft, setDraft, toast, reload })),
+        poolId ? h(VoiceKeyPool, { key: poolId, id: poolId, draft, setDraft }) : null)
+    }
+
+    function VoiceServiceFields({ id, st, draft, setDraft, toast, reload }) {
+      const f = useField(draft, setDraft)
+      if (id === 'edge') return [
+        !st.voice.edgeInstalled ? h(Row, { key: 'i', label: 'edge-tts', hint: '装在插件自己的 Python 环境里，不影响系统' }, h(Btn, { small: true, onClick: async () => { toast('正在安装，可能要一两分钟…'); const r = await post('/voice/install'); toast(r.message); reload() } }, '安装 edge-tts')) : null,
+        h(Row, { key: 'v', label: '音色' }, f.select('voice.voice', [
+          { value: 'zh-CN-XiaoyiNeural', label: '晓伊', desc: '活泼女声', group: '普通话' }, { value: 'zh-CN-XiaoxiaoNeural', label: '晓晓', desc: '温柔女声', group: '普通话' },
+          { value: 'zh-CN-YunxiNeural', label: '云希', desc: '少年男声', group: '普通话' },
+          { value: 'zh-CN-liaoning-XiaobeiNeural', label: '晓北', desc: '东北女声', group: '方言' }, { value: 'zh-CN-shaanxi-XiaoniNeural', label: '晓妮', desc: '陕西女声', group: '方言' },
+          { value: 'zh-TW-HsiaoChenNeural', label: '曉臻', desc: '台湾女声', group: '方言' }], { width: 220 })),
+        h(Row, { key: 'r', label: '语速' }, f.select('voice.rate', [{ value: '-20%', label: '慢一点' }, { value: '-10%', label: '稍慢' }, { value: '+0%', label: '正常' }, { value: '+10%', label: '稍快' }, { value: '+20%', label: '快一点' }], { width: 140 })),
+        h(Row, { key: 'p', label: '音调', hint: '只调整微软在线声音的高低。' },
+          h(Range, {
+            min: -80,
+            max: 80,
+            step: 10,
+            value: pitchNum(draft.voice.pitch),
+            fmt: pitchLabel,
+            onChange: (v) => setDraft(setPath(draft, 'voice.pitch', pitchText(v))),
+          })),
+      ]
+      if (id === 'cosyvoice') return [
+        h(Row, { key: 'u', label: '服务地址', hint: '填写已启动的 CosyVoice 服务地址。' }, f.text('voice.cosyvoice.url', { size: 'wide', placeholder: 'http://127.0.0.1:50000' })),
+        h(Row, { key: 'm', label: '模式' }, f.select('voice.cosyvoice.mode', [{ value: 'sft', label: '预置音色（sft）' }, { value: 'instruct', label: '带语气指令（instruct）' }], { width: 220 })),
+        h(Row, { key: 's', label: '音色 ID', hint: '例如 中文女、中文男' }, f.text('voice.cosyvoice.spkId')),
+        draft.voice.cosyvoice.mode === 'instruct' ? h(Row, { key: 'i', label: '语气指令', hint: '例如：用甜美撒娇的语气说' }, f.text('voice.cosyvoice.instruct', { size: 'wide' })) : null,
+        h(Row, { key: 'r', label: '采样率', hint: 'CosyVoice 1 是 22050，CosyVoice 2 是 24000' }, f.select('voice.cosyvoice.sampleRate', [{ value: 22050, label: '22050 Hz' }, { value: 24000, label: '24000 Hz' }], { width: 160 })),
+      ]
+      if (id === 'gptsovits') return [
+        h(Row, { key: 'u', label: '服务地址', hint: '填写已启动的 GPT-SoVITS v2 服务地址。' }, f.text('voice.gptsovits.url', { size: 'wide', placeholder: 'http://127.0.0.1:9880' })),
+        h(Row, { key: 'a', label: '参考音频路径', hint: '服务那台电脑上的路径' }, f.text('voice.gptsovits.refAudio', { size: 'wide' })),
+        h(Row, { key: 'p', label: '参考音频的文字' }, f.text('voice.gptsovits.promptText', { size: 'wide' })),
+      ]
+      if (id === 'fish-free') return h(Fragment, null,
+        h(Row, { label: 'API 密钥', hint: draft.voice.fishApiKeySet ? '' : '已在 DSH 配过密钥可留空。' },
+          h('input', { className: 'ab-input wide', type: 'password', autoComplete: 'new-password', 'aria-label': 'Fish API Key', value: draft.voice.fishApiKey || '', placeholder: draft.voice.fishApiKey === null ? '保存后移除' : draft.voice.fishApiKeySet ? '已保存，留空不改' : '粘贴 Fish API Key', onChange: e => setDraft(setPath(draft, 'voice.fishApiKey', e.target.value)) }),
+          h('a', { href: 'https://fish.audio/app/developers/get-started/', target: '_blank', rel: 'noreferrer', className: 'ab-btn sm' }, '获取密钥 ↗'),
+          draft.voice.fishApiKeySet ? h(Btn, { small: true, onClick: () => setDraft(setPath(draft, 'voice.fishApiKey', draft.voice.fishApiKey === null ? '' : null)) }, draft.voice.fishApiKey === null ? '撤销移除' : '移除已存密钥') : null),
+        h(Row, { label: '音色 ID', hint: '留空使用默认声音。' }, f.text('voice.fishReferenceId', { size: 'wide', placeholder: '音色 ID（32 位）' })), h(FishBalance))
+      if (id === 'volcano') return h(VolcanoVoice, { key: 'volcano', draft, setDraft })
+      if (id === 'breeze') return [
+        (() => {
+          // 缺东西时先提示（不拦保存）：不然只有点「试听」才报错，还看不懂缺哪个
+          const b = draft.voice.breeze || {}
+          const miss = b.mode === 'local'
+            ? (!String(b.url || '').trim() ? ['服务地址'] : [])
+            : [
+              !String(b.key || '').trim() && !b.keySet && !draft.voice.keyPools?.breeze?.accounts?.some(a => a.apiKeySet || a.apiKey) ? 'API Key' : '',
+              !String(b.voiceId || '').trim() ? '音色 id' : '',
+            ].filter(Boolean)
+          const localDown = b.mode === 'local' && !String(b.url || '').trim()
+          return miss.length
+            ? h('div', { className: 'ab-note warn', style: { marginBottom: 8 } },
+              '还差：' + miss.join('、') + '。不填的话说话会退回 Windows 语音（照常发声，只是不是 Breeze 的音色）。',
+              localDown ? '本地模式要先把 breeze_infer 跑起来，地址填它的 /v1 前缀（例如 http://127.0.0.1:7860）。' : '')
+            : null
+        })(),
+        h(Row, { key: 'mode', label: '模式', hint: '云端走 BreezeBlue 官方接口；本地走自己跑的 breeze_infer' }, h(Select, {
+          width: 240,
+          value: draft.voice.breeze?.mode || 'cloud',
+          options: [{ value: 'cloud', label: '云端（BreezeBlue）' }, { value: 'local', label: '本地自建（breeze_infer）' }],
+          // 切模式时顺手把服务地址换成对应的默认值（自己填过的自定义地址不动）
+          onChange: (v) => {
+            const cur = String(draft.voice.breeze?.url || '').trim()
+            const defaults = ['', 'https://api.breeze.blue', 'http://127.0.0.1:7860']
+            const url = defaults.includes(cur) ? (v === 'local' ? 'http://127.0.0.1:7860' : 'https://api.breeze.blue') : cur
+            setDraft(setPath(setPath(draft, 'voice.breeze.mode', v), 'voice.breeze.url', url))
+          },
+        })),
+        h(Row, { key: 'u', label: '服务地址', hint: '云端填 https://api.breeze.blue；自建就填自己的地址' }, f.text('voice.breeze.url', { size: 'wide', placeholder: 'https://api.breeze.blue' })),
+        draft.voice.breeze?.mode === 'local' ? null : h(Row, { key: 'k', label: 'API Key', hint: 'Breeze 控制台 → API Keys 生成，brz_ 开头；已保存就不回显' }, f.text('voice.breeze.key', { type: 'password', placeholder: draft.voice.breeze?.keySet ? '已保存' : 'brz_…', size: 'wide' })),
+        draft.voice.breeze?.mode === 'local' ? null : h(Row, { key: 'v', label: '音色 id', hint: '从音色库复制，或点下方「列出音色」选择。' }, f.text('voice.breeze.voiceId', { size: 'wide', placeholder: 'voc_…' })),
+        draft.voice.breeze?.mode === 'local' ? null : h(BreezeVoices, { key: 'voices', b: draft.voice.breeze, draft, setDraft }),
+        h('details', { key: 'tuning', className: 'ab-voice-options' }, h('summary', null, 'Breeze 声音微调'),
+          h(Row, { key: 'm', label: '模型', hint: '默认 breeze-tts-2' }, f.text('voice.breeze.model', { placeholder: 'breeze-tts-2' })),
+          h(Row, { key: 'l', label: '语种' }, f.text('voice.breeze.languageCode', { placeholder: 'zh' })),
+          draft.voice.breeze?.mode === 'local' ? h(Row, { key: 'i', label: '语气说明', hint: '本地模式用：这段描述就是音色设计（voice design），不填就用模型默认声音' }, f.text('voice.breeze.instructions', { size: 'wide', placeholder: '清亮柔软、略带奶气的普通话少女音' })) : null,
+          draft.voice.breeze?.mode === 'local' ? h(Row, { key: 'g', label: '指令遵循强度', hint: '数值越高，声音越接近你的描述。' }, f.range('voice.breeze.guidanceScale', 0, 10, 0.5, (v) => (String(v || '4')))) : null,
+        ),
+        draft.voice.breeze?.mode === 'local' ? null : h('details', { key: 'quota-settings', className: 'ab-voice-options' }, h('summary', null, '每日额度与签到'),
+          h(Row, { key: 'em', label: '账号邮箱', hint: '填了才能自动领每日额度（免费额度约 250 句短话）' }, f.text('voice.breeze.email', { size: 'wide', placeholder: 'you@example.com' })),
+          h(Row, { key: 'pw', label: '账号密码', hint: '存在本机 config.json（和别的密钥一样，面板里不回显）；留空 = 用已保存的' }, f.text('voice.breeze.password', { type: 'password', placeholder: draft.voice.breeze?.passwordSet ? '已保存' : '不填就不自动领额度' })),
+          h(Row, { key: 'ac', label: '自动领每日额度', hint: '每小时醒一次，一天最多领一次；失败只记日志' }, f.sw('voice.breeze.autoClaim')),
+          h(BreezeQuota, { key: 'quota', b: draft.voice.breeze }),
+        ),
+      ]
+      if (id === 'minimax') return [
+        (() => {
+          // 缺东西时先提示（不拦保存）：不然只有点「试听」才报错，还看不懂缺哪个
+          const m = draft.voice.minimax || {}
+          const miss = [
+            !String(m.apiKey || '').trim() && !m.apiKeySet && !draft.voice.keyPools?.minimax?.accounts?.some(a => a.apiKeySet || a.apiKey) ? 'API Key' : '',
+            !String(m.voiceId || '').trim() ? 'Voice ID' : '',
+          ].filter(Boolean)
+          return miss.length
+            ? h('div', { className: 'ab-note warn', style: { marginBottom: 8 } },
+              '还差：' + miss.join('、') + '。不填的话说话会退回 Windows 语音（照常发声，只是不是 MiniMax 的音色）。')
+            : null
+        })(),
+        h(Row, { key: 'k', label: 'API Key', hint: 'MiniMax 开放平台「接口密钥」里创建；只存在本机' }, f.text('voice.minimax.apiKey', { size: 'wide', type: 'password', placeholder: draft.voice.minimax?.apiKeySet ? '已保存（不改就留空）' : 'sk-api-…' })),
+        h(Row, { key: 'l', label: '开放平台', hint: '还没注册就先注册；拿 Key 在「接口密钥」页' },
+          h('div', { className: 'ab-flex' },
+            h('a', { href: 'https://platform.minimax.cn/console/home', target: '_blank', rel: 'noreferrer' }, '注册 / 登录开放平台 ↗'),
+            h('span', { className: 'ab-muted' }, '·'),
+            h('a', { href: 'https://platform.minimax.cn/audio/voices', target: '_blank', rel: 'noreferrer' }, '音色库（试听后复制 Voice ID）↗'))),
+        h(Row, { key: 'v', label: 'Voice ID', hint: '音色库右侧「复制 Voice ID」；声音设计 / 复刻拿到的自定义 id 也填这里' }, f.text('voice.minimax.voiceId', { size: 'wide', placeholder: 'Chinese (Mandarin)_Soft_Girl' })),
+        h('details', { key: 'tuning', className: 'ab-voice-options' }, h('summary', null, 'MiniMax 声音与服务设置'),
+          h(Row, { key: 'm', label: '模型' }, f.select('voice.minimax.model', [{ value: 'speech-2.8-turbo', label: '2.8 Turbo（快、便宜）' }, { value: 'speech-2.8-hd', label: '2.8 HD（更细腻）' }, { value: 'speech-2.6-turbo', label: '2.6 Turbo（没有语气词）' }, { value: 'speech-2.6-hd', label: '2.6 HD（没有语气词）' }], { width: 220 })),
+          h(Row, { key: 'e', label: '情绪', hint: '选「自动」会按文字判断。' }, f.select('voice.minimax.emotion', [{ value: 'auto', label: '自动' }, { value: 'happy', label: '高兴' }, { value: 'sad', label: '难过' }, { value: 'angry', label: '生气' }, { value: 'fearful', label: '害怕' }, { value: 'disgusted', label: '嫌弃' }, { value: 'surprised', label: '惊讶' }, { value: 'calm', label: '平静' }], { width: 160 })),
+          h(Row, { key: 's', label: '语速' }, f.range('voice.minimax.speed', 0.5, 2, 0.05, (v) => (Number(v) || 1).toFixed(2) + '×')),
+          h(Row, { key: 'p', label: '语调' }, f.range('voice.minimax.pitch', -12, 12, 1, (v) => (Number(v) > 0 ? '+' : '') + (Number(v) || 0))),
+          h(Row, { key: 'b', label: '服务地址', hint: '国内用 api.minimax.cn；海外账号改 api.minimax.io' }, f.text('voice.minimax.baseUrl', { size: 'wide', placeholder: 'https://api.minimax.cn' })),
+        ),
+      ]
+      if (id === 'http') return [
+        h(Row, { key: 'u', label: '接口地址', hint: 'GET：地址里带 {text}；POST：填接口地址就行' }, f.text('voice.http.urlTemplate', { size: 'wide', placeholder: 'https://openspeech.bytedance.com/api/v1/tts' })),
+        h(Row, { key: 'm', label: '请求方式' }, f.select('voice.http.method', [{ value: 'GET', label: 'GET' }, { value: 'POST', label: 'POST' }], { width: 140 })),
+        h(Row, { key: 'h', label: '请求头', hint: '每行一项。多账号可填 Authorization: Bearer {apiKey}。' }, f.area('voice.http.headers', { size: 'wide', rows: 2, placeholder: 'Authorization: Bearer;你的token' })),
+        String((draft.voice.http || {}).method || 'GET').toUpperCase() !== 'GET'
+          ? h(Row, { key: 'b', label: '请求体', hint: '{text} 换成要念的话（自动转义），{reqid} 换成每次不同的随机串' }, f.area('voice.http.body', { size: 'wide', rows: 6, placeholder: '{"app":{"appid":"你的appid","token":"随便填","cluster":"volcano_tts"},"user":{"uid":"aurabot"},"audio":{"voice_type":"zh_female_wanwanxiaohe_moon_bigtts","encoding":"mp3"},"request":{"reqid":"{reqid}","text":"{text}"}}' }))
+          : null,
+      ]
+      if (id === 'rimtts') return [
+        h(Row, { key: 'r', label: 'RimTTS 目录', hint: 'RimTTS 项目的根目录（里面有 tools/GPT-SoVITS 和 pipeline/refs_pool.json）' }, f.text('voice.rimtts.root', { size: 'wide', placeholder: 'D:\\RimTTS' })),
+        h(Row, { key: 'c', label: '配置文件', hint: '相对 tools/GPT-SoVITS。turbo 最快；v5dev 音质更好但慢一倍' }, f.text('voice.rimtts.configYaml', { size: 'wide' })),
+        h(Row, { key: 'p', label: '端口', hint: '端口上已经有服务（比如划词朗读）就直接用它，不重复启动，也不会去关它' }, f.num('voice.rimtts.port', { min: 1024, max: 65535 })),
+        h(Row, { key: 'idle', label: '说完多久关掉', hint: '模型常驻约 4 GB 内存 + 2 GB 显存，所以默认说完就放掉；0 = 每句念完立刻关（每句都要重新冷启动 30-40 秒）' },
+          f.range('voice.rimtts.idleSeconds', 0, 900, 30, (v) => (v === 0 ? '念完立刻关' : v + ' 秒'))),
+        h(Row, { key: 'w', label: '预热', hint: '起来后先合成一句，把 CUDA 预热掉（第一句少等约 5 秒）' }, f.sw('voice.rimtts.warmup')),
+        h(Row, { key: 'pm', label: '预启动', hint: '有人明确要语音时，趁她还在想怎么回先把服务拉起来，冷启动的等待就藏进思考时间里' }, f.sw('voice.rimtts.prewarm')),
+        h(Row, { key: 'nf', label: '起不来时', hint: '开着 = 这条改发文字（推荐）；关掉 = 退回 Windows 机械音' }, f.sw('voice.rimtts.noFallback')),
+        h(RimTtsStatus, { toast }),
+      ]
+      return null
+    }
+
+    function Voice({ st, draft, setDraft, toast, reload, configure }) {
       const f = useField(draft, setDraft)
       const voiceDirty = Boolean(st && st.config) && JSON.stringify(draft.voice) !== JSON.stringify(st.config.voice)
       const [txt, setTxt] = useState('晚安啦，今天也辛苦了，明天见～')
       const [src, setSrc] = useState('')
+      const source = draft.voice.engine === 'auto' ? 'edge' : draft.voice.engine
       const engineOptions = [
-        { value: 'auto', label: '自动', desc: 'edge-tts 优先，不行用 Windows 语音' },
+        { value: 'auto', label: '自动', desc: '先用微软在线语音，不可用时用 Windows 声音' },
         { value: 'edge', label: '微软 edge-tts', desc: st.voice.edgeInstalled ? '在线，音色自然（已装好）' : '在线，音色自然（还没装）' },
         { value: 'cosyvoice', label: '本地 CosyVoice', desc: '自己部署的 CosyVoice 服务，可克隆音色' },
-        { value: 'gptsovits', label: '本地 GPT-SoVITS', desc: 'GPT-SoVITS api_v2，用参考音频定音色' },
+        { value: 'gptsovits', label: '本地 GPT-SoVITS', desc: '用自己准备的录音定音色' },
+        { value: 'rimtts', label: 'RimTTS（Rim 的声音）', desc: 'RimTTS 项目训练好的 Rim 音色；模型大，说话时才起、说完就关' },
         { value: 'volcano', label: '豆包语音（火山）', desc: '只填 API Key，选个音色就行' },
+        { value: 'fish-free', label: 'Fish Audio', desc: 'S2.1 Pro Free，可选音色' },
         { value: 'breeze', label: 'Breeze 语音', desc: 'BreezeBlue 云端或自建，填 Key + 音色 id' },
         { value: 'minimax', label: 'MiniMax 语音', desc: '在线，音色多，支持自定义音色和情绪' },
         { value: 'http', label: '其他 HTTP 接口', desc: '任意返回音频的地址' },
         { value: 'windows', label: 'Windows 自带', desc: '离线可用，机械感重一些' },
       ]
       return h('div', { className: 'ab-grid' },
-        h(Card, { title: '说话（文字转语音）', right: f.sw('voice.enabled'), desc: '回复里写了 <voice>…</voice> 的部分会变成 QQ 语音条；对方明确要语音时一定发语音；短回复也有一定概率整条变语音。' },
-          voiceDirty ? h('div', { className: 'ab-note' }, '语音设置有未保存的改动：点「生成」试听会直接用当前设置；真正聊天要等点底部「保存设置」后生效。') : null,
+        h(Card, { title: '说话（文字转语音）', right: f.sw('voice.enabled', { title: '允许发送语音' }), desc: '选好声音可以先试听，保存后用于聊天。' },
+          voiceDirty ? h('div', { className: 'ab-note' }, '有未保存的改动，聊天仍使用之前的声音。') : null,
           h('div', { style: { margin: '4px 0 12px' } }, h(VoiceEngineChoices, {
             options: engineOptions,
             value: draft.voice.engine,
@@ -3099,159 +3318,46 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             onChange: (v) => setDraft(setPath(draft, 'voice.engine', v)),
             toast,
           })),
-          ['auto', 'edge'].includes(draft.voice.engine) ? [
-            !st.voice.edgeInstalled ? h(Row, { key: 'i', label: 'edge-tts', hint: '装在插件自己的 Python 环境里，不影响系统' }, h(Btn, { small: true, onClick: async () => { toast('正在安装，可能要一两分钟…'); const r = await post('/voice/install'); toast(r.message); reload() } }, '安装 edge-tts')) : null,
-            h(Row, { key: 'v', label: '音色' }, f.select('voice.voice', [
-              { value: 'zh-CN-XiaoyiNeural', label: '晓伊', desc: '活泼女声', group: '普通话' }, { value: 'zh-CN-XiaoxiaoNeural', label: '晓晓', desc: '温柔女声', group: '普通话' },
-              { value: 'zh-CN-YunxiNeural', label: '云希', desc: '少年男声', group: '普通话' },
-              { value: 'zh-CN-liaoning-XiaobeiNeural', label: '晓北', desc: '东北女声', group: '方言' }, { value: 'zh-CN-shaanxi-XiaoniNeural', label: '晓妮', desc: '陕西女声', group: '方言' },
-              { value: 'zh-TW-HsiaoChenNeural', label: '曉臻', desc: '台湾女声', group: '方言' }], { width: 220 })),
-            h(Row, { key: 'r', label: '语速' }, f.select('voice.rate', [{ value: '-20%', label: '慢一点' }, { value: '-10%', label: '稍慢' }, { value: '+0%', label: '正常' }, { value: '+10%', label: '稍快' }, { value: '+20%', label: '快一点' }], { width: 140 })),
-            h(Row, { key: 'p', label: '音调', hint: '拖动调整，±80Hz 为上限（实测再往上 edge-tts 会静默夹住）；只对 edge-tts 有效' },
-              h(Range, {
-                min: -80,
-                max: 80,
-                step: 10,
-                value: pitchNum(draft.voice.pitch),
-                fmt: pitchLabel,
-                onChange: (v) => setDraft(setPath(draft, 'voice.pitch', pitchText(v))),
-              })),
-          ] : null,
-          draft.voice.engine === 'cosyvoice' ? [
-            h(Row, { key: 'u', label: '服务地址', hint: 'CosyVoice 自带 runtime/python/fastapi/server.py' }, f.text('voice.cosyvoice.url', { size: 'wide', placeholder: 'http://127.0.0.1:50000' })),
-            h(Row, { key: 'm', label: '模式' }, f.select('voice.cosyvoice.mode', [{ value: 'sft', label: '预置音色（sft）' }, { value: 'instruct', label: '带语气指令（instruct）' }], { width: 220 })),
-            h(Row, { key: 's', label: '音色 ID', hint: '例如 中文女、中文男' }, f.text('voice.cosyvoice.spkId')),
-            draft.voice.cosyvoice.mode === 'instruct' ? h(Row, { key: 'i', label: '语气指令', hint: '例如：用甜美撒娇的语气说' }, f.text('voice.cosyvoice.instruct', { size: 'wide' })) : null,
-            h(Row, { key: 'r', label: '采样率', hint: 'CosyVoice 1 是 22050，CosyVoice 2 是 24000' }, f.select('voice.cosyvoice.sampleRate', [{ value: 22050, label: '22050 Hz' }, { value: 24000, label: '24000 Hz' }], { width: 160 })),
-          ] : null,
-          draft.voice.engine === 'gptsovits' ? [
-            h(Row, { key: 'u', label: '服务地址', hint: 'GPT-SoVITS 的 api_v2.py' }, f.text('voice.gptsovits.url', { size: 'wide', placeholder: 'http://127.0.0.1:9880' })),
-            h(Row, { key: 'a', label: '参考音频路径', hint: '服务那台电脑上的路径' }, f.text('voice.gptsovits.refAudio', { size: 'wide' })),
-            h(Row, { key: 'p', label: '参考音频的文字' }, f.text('voice.gptsovits.promptText', { size: 'wide' })),
-          ] : null,
-          draft.voice.engine === 'volcano' ? h(VolcanoVoice, { key: 'volcano', draft, setDraft }) : null,
-          draft.voice.engine === 'breeze' ? [
-            (() => {
-              // 缺东西时先提示（不拦保存）：不然只有点「试听」才报错，还看不懂缺哪个
-              const b = draft.voice.breeze || {}
-              const miss = b.mode === 'local'
-                ? (!String(b.url || '').trim() ? ['服务地址'] : [])
-                : [
-                  !String(b.key || '').trim() && !b.keySet ? 'API Key' : '',
-                  !String(b.voiceId || '').trim() ? '音色 id' : '',
-                ].filter(Boolean)
-              const localDown = b.mode === 'local' && !String(b.url || '').trim()
-              return miss.length
-                ? h('div', { className: 'ab-note warn', style: { marginBottom: 8 } },
-                  '还差：' + miss.join('、') + '。不填的话说话会退回 Windows 语音（照常发声，只是不是 Breeze 的音色）。',
-                  localDown ? '本地模式要先把 breeze_infer 跑起来，地址填它的 /v1 前缀（例如 http://127.0.0.1:7860）。' : '')
-                : null
-            })(),
-            h(Row, { key: 'mode', label: '模式', hint: '云端走 BreezeBlue 官方接口；本地走自己跑的 breeze_infer' }, h(Select, {
-              width: 240,
-              value: draft.voice.breeze?.mode || 'cloud',
-              options: [{ value: 'cloud', label: '云端（BreezeBlue）' }, { value: 'local', label: '本地自建（breeze_infer）' }],
-              // 切模式时顺手把服务地址换成对应的默认值（自己填过的自定义地址不动）
-              onChange: (v) => {
-                const cur = String(draft.voice.breeze?.url || '').trim()
-                const defaults = ['', 'https://api.breeze.blue', 'http://127.0.0.1:7860']
-                const url = defaults.includes(cur) ? (v === 'local' ? 'http://127.0.0.1:7860' : 'https://api.breeze.blue') : cur
-                setDraft(setPath(setPath(draft, 'voice.breeze.mode', v), 'voice.breeze.url', url))
-              },
-            })),
-            h(Row, { key: 'u', label: '服务地址', hint: '云端填 https://api.breeze.blue；自建就填自己的地址' }, f.text('voice.breeze.url', { size: 'wide', placeholder: 'https://api.breeze.blue' })),
-            draft.voice.breeze?.mode === 'local' ? null : h(Row, { key: 'k', label: 'API Key', hint: 'Breeze 控制台 → API Keys 生成，brz_ 开头；已保存就不回显' }, f.text('voice.breeze.key', { type: 'password', placeholder: draft.voice.breeze?.keySet ? '已保存' : 'brz_…', size: 'wide' })),
-            draft.voice.breeze?.mode === 'local' ? null : h(Row, { key: 'v', label: '音色 id', hint: '云端只用这个 id（不发描述，音色最稳）；也可以点下面的「列出音色」直接挑' }, f.text('voice.breeze.voiceId', { size: 'wide', placeholder: 'voc_…' })),
-            draft.voice.breeze?.mode === 'local' ? null : h(BreezeVoices, { key: 'voices', b: draft.voice.breeze, draft, setDraft }),
-            h(Row, { key: 'm', label: '模型', hint: '默认 breeze-tts-2' }, f.text('voice.breeze.model', { placeholder: 'breeze-tts-2' })),
-            h(Row, { key: 'l', label: '语种' }, f.text('voice.breeze.languageCode', { placeholder: 'zh' })),
-            draft.voice.breeze?.mode === 'local' ? h(Row, { key: 'i', label: '语气说明', hint: '本地模式用：这段描述就是音色设计（voice design），不填就用模型默认声音' }, f.text('voice.breeze.instructions', { size: 'wide', placeholder: '清亮柔软、略带奶气的普通话少女音' })) : null,
-            draft.voice.breeze?.mode === 'local' ? h(Row, { key: 'g', label: '指令遵循强度', hint: '本地模式的 cfg_scale，越大越贴着描述走（默认 4）' }, f.range('voice.breeze.guidanceScale', 0, 10, 0.5, (v) => (String(v || '4')))) : null,
-            draft.voice.breeze?.mode === 'local' ? null : h(Row, { key: 'em', label: '账号邮箱', hint: '填了才能自动领每日额度（免费额度约 250 句短话）' }, f.text('voice.breeze.email', { size: 'wide', placeholder: 'you@example.com' })),
-            draft.voice.breeze?.mode === 'local' ? null : h(Row, { key: 'pw', label: '账号密码', hint: '存在本机 config.json（和别的密钥一样，面板里不回显）；留空 = 用已保存的' }, f.text('voice.breeze.password', { type: 'password', placeholder: draft.voice.breeze?.passwordSet ? '已保存' : '不填就不自动领额度' })),
-            draft.voice.breeze?.mode === 'local' ? null : h(Row, { key: 'ac', label: '自动领每日额度', hint: '每小时醒一次，一天最多领一次；失败只记日志' }, f.sw('voice.breeze.autoClaim')),
-            draft.voice.breeze?.mode === 'local' ? null : h(BreezeQuota, { key: 'quota', b: draft.voice.breeze }),
-          ] : null,
-          draft.voice.engine === 'minimax' ? [
-            (() => {
-              // 缺东西时先提示（不拦保存）：不然只有点「试听」才报错，还看不懂缺哪个
-              const m = draft.voice.minimax || {}
-              const miss = [
-                !String(m.apiKey || '').trim() && !m.apiKeySet ? 'API Key' : '',
-                !String(m.voiceId || '').trim() ? 'Voice ID' : '',
-              ].filter(Boolean)
-              return miss.length
-                ? h('div', { className: 'ab-note warn', style: { marginBottom: 8 } },
-                  '还差：' + miss.join('、') + '。不填的话说话会退回 Windows 语音（照常发声，只是不是 MiniMax 的音色）。')
-                : null
-            })(),
-            h(Row, { key: 'k', label: 'API Key', hint: 'MiniMax 开放平台「接口密钥」里创建；只存在本机' }, f.text('voice.minimax.apiKey', { size: 'wide', type: 'password', placeholder: draft.voice.minimax?.apiKeySet ? '已保存（不改就留空）' : 'sk-api-…' })),
-            h(Row, { key: 'l', label: '开放平台', hint: '还没注册就先注册；拿 Key 在「接口密钥」页' },
-              h('div', { className: 'ab-flex' },
-                h('a', { href: 'https://platform.minimax.cn/console/home', target: '_blank', rel: 'noreferrer' }, '注册 / 登录开放平台 ↗'),
-                h('span', { className: 'ab-muted' }, '·'),
-                h('a', { href: 'https://platform.minimax.cn/audio/voices', target: '_blank', rel: 'noreferrer' }, '音色库（试听后复制 Voice ID）↗'))),
-            h(Row, { key: 'v', label: 'Voice ID', hint: '音色库右侧「复制 Voice ID」；声音设计 / 复刻拿到的自定义 id 也填这里' }, f.text('voice.minimax.voiceId', { size: 'wide', placeholder: 'Chinese (Mandarin)_Soft_Girl' })),
-            h(Row, { key: 'm', label: '模型' }, f.select('voice.minimax.model', [{ value: 'speech-2.8-turbo', label: '2.8 Turbo（快、便宜）' }, { value: 'speech-2.8-hd', label: '2.8 HD（更细腻）' }, { value: 'speech-2.6-turbo', label: '2.6 Turbo（没有语气词）' }, { value: 'speech-2.6-hd', label: '2.6 HD（没有语气词）' }], { width: 220 })),
-            h(Row, { key: 'e', label: '情绪', hint: '自动 = 不传，交给模型按文字匹配' }, f.select('voice.minimax.emotion', [{ value: 'auto', label: '自动' }, { value: 'happy', label: '高兴' }, { value: 'sad', label: '难过' }, { value: 'angry', label: '生气' }, { value: 'fearful', label: '害怕' }, { value: 'disgusted', label: '嫌弃' }, { value: 'surprised', label: '惊讶' }, { value: 'calm', label: '平静' }], { width: 160 })),
-            h(Row, { key: 's', label: '语速' }, f.range('voice.minimax.speed', 0.5, 2, 0.05, (v) => (Number(v) || 1).toFixed(2) + '×')),
-            h(Row, { key: 'p', label: '语调' }, f.range('voice.minimax.pitch', -12, 12, 1, (v) => (Number(v) > 0 ? '+' : '') + (Number(v) || 0))),
-            h(Row, { key: 'b', label: '服务地址', hint: '国内用 api.minimax.cn；海外账号改 api.minimax.io' }, f.text('voice.minimax.baseUrl', { size: 'wide', placeholder: 'https://api.minimax.cn' })),
-          ] : null,
-          draft.voice.engine === 'http' ? [
-            h(Row, { key: 'u', label: '接口地址', hint: 'GET：地址里带 {text}；POST：填接口地址就行' }, f.text('voice.http.urlTemplate', { size: 'wide', placeholder: 'https://openspeech.bytedance.com/api/v1/tts' })),
-            h(Row, { key: 'm', label: '请求方式' }, f.select('voice.http.method', [{ value: 'GET', label: 'GET' }, { value: 'POST', label: 'POST' }], { width: 140 })),
-            h(Row, { key: 'h', label: '请求头', hint: '一行一个。多个头就多写几行' }, f.area('voice.http.headers', { size: 'wide', rows: 2, placeholder: 'Authorization: Bearer;你的token' })),
-            String((draft.voice.http || {}).method || 'GET').toUpperCase() !== 'GET'
-              ? h(Row, { key: 'b', label: '请求体', hint: '{text} 换成要念的话（自动转义），{reqid} 换成每次不同的随机串' }, f.area('voice.http.body', { size: 'wide', rows: 6, placeholder: '{"app":{"appid":"你的appid","token":"随便填","cluster":"volcano_tts"},"user":{"uid":"aurabot"},"audio":{"voice_type":"zh_female_wanwanxiaohe_moon_bigtts","encoding":"mp3"},"request":{"reqid":"{reqid}","text":"{text}"}}' }))
-              : null,
-          ] : null,
-          draft.voice.engine === 'rimtts' ? [
-            h(Row, { key: 'r', label: 'RimTTS 目录', hint: 'RimTTS 项目的根目录（里面有 tools/GPT-SoVITS 和 pipeline/refs_pool.json）' }, f.text('voice.rimtts.root', { size: 'wide', placeholder: 'D:\\RimTTS' })),
-            h(Row, { key: 'c', label: '配置文件', hint: '相对 tools/GPT-SoVITS。turbo 最快；v5dev 音质更好但慢一倍' }, f.text('voice.rimtts.configYaml', { size: 'wide' })),
-            h(Row, { key: 'p', label: '端口', hint: '端口上已经有服务（比如划词朗读）就直接用它，不重复启动，也不会去关它' }, f.num('voice.rimtts.port', { min: 1024, max: 65535 })),
-            h(Row, { key: 'idle', label: '说完多久关掉', hint: '模型常驻约 4 GB 内存 + 2 GB 显存，所以默认说完就放掉；0 = 每句念完立刻关（每句都要重新冷启动 30-40 秒）' },
-              f.range('voice.rimtts.idleSeconds', 0, 900, 30, (v) => (v === 0 ? '念完立刻关' : v + ' 秒'))),
-            h(Row, { key: 'w', label: '预热', hint: '起来后先合成一句，把 CUDA 预热掉（第一句少等约 5 秒）' }, f.sw('voice.rimtts.warmup')),
-            h(Row, { key: 'pm', label: '预启动', hint: '有人明确要语音时，趁她还在想怎么回先把服务拉起来，冷启动的等待就藏进思考时间里' }, f.sw('voice.rimtts.prewarm')),
-            h(Row, { key: 'nf', label: '起不来时', hint: '开着 = 这条改发文字（推荐）；关掉 = 退回 Windows 机械音' }, f.sw('voice.rimtts.noFallback')),
-            h(RimTtsStatus, { toast }),
-          ] : null,
-          h(Row, { label: '试听', hint: '用当前页面设置试听（没保存也生效；本地接口不会把这里顶掉）' },
-            h('input', { className: 'ab-input', value: txt, onChange: (e) => setTxt(e.target.value) }),
+          VOICE_SERVICES[source] ? h(Btn, { small: true, onClick: () => configure(source) }, '配置 ' + VOICE_SERVICES[source]) : null,
+          h(Row, { label: '试听', hint: '试听当前选择，不用先保存。' },
+            h('input', { className: 'ab-input', 'aria-label': '试听文字', value: txt, onChange: (e) => setTxt(e.target.value) }),
             h(Btn, { small: true, onClick: async () => {
               setSrc('')
               const r = await post('/voice/test', { text: txt, voice: draft.voice })
               if (r.ok) setSrc('data:' + r.mime + ';base64,' + r.data)
               else toast(r.message)
-            } }, '生成'),
+            } }, '播放试听'),
             src ? h('audio', { key: src, src, controls: true, autoPlay: true, style: { height: 32 } }) : null),
         ),
         // 低频参数收进折叠卡：默认不展开，展开区才挂载（不展开就不渲染、不注册控件）
-        h(Card, { title: '更多设置（3 项）', desc: '什么时候自动变语音、表情和语音怎么分开发。不改也能正常用。', collapsible: true, defaultOpen: false },
+        h(Card, { title: '什么时候发语音', collapsible: true, defaultOpen: false },
           h(Row, { label: '短回复变语音的概率' }, f.percent('voice.autoChance')),
           h(Row, { label: '多短算短回复' }, f.range('voice.autoMaxChars', 10, 200, 5, (v) => v + ' 字')),
-          h(Row, { label: '表情和语音分开发', hint: '语音条里的表情 / emoji 不念出来，语音发完再单独补一条文字发出去（没有表情就不补）；关掉 = 表情直接丢掉，不补发' }, f.sw('voice.emojiSeparate'))),
+          h(Row, { label: '表情和语音分开发', hint: '开启后，表情会作为文字另发；关闭后跳过表情。' }, f.sw('voice.emojiSeparate'))),
         // 语音条变声（翻唱音色）属于低频功能：收进默认收起的折叠卡，
         // 展开才挂载 VoiceSongModel，从而延迟 GET /voice/song-voices —— 不进语音页首屏。
-        h(Card, { title: '语音条变声（用翻唱音色）', desc: '把ta说话的声音换成「翻唱」页导入的 RVC 音色模型。默认不变声，直接用 TTS 原声。', collapsible: true, defaultOpen: false },
+        h(Card, { title: '语音条变声（用翻唱音色）', desc: '选用已导入的翻唱音色。不选就保留原声。', collapsible: true, defaultOpen: false },
           h(VoiceSongModel, { draft, setDraft, flat: true })),
       )
     }
 
     /**
-     * 语音页外壳：发语音 / 听语音两个子视图共用一个页签。
+     * 语音页外壳：发语音 / 听语音 / 扩展服务三个子视图共用一个页签。
      * 关键约束：听语音（Asr）只在 view==='listen' 时挂载——不挂载即不发请求、不跑轮询。
      */
-    function VoiceTab({ voiceView, setVoiceView, st, draft, setDraft, toast, reload }) {
+    function VoiceTab({ voiceView, setVoiceView, st, draft, setDraft, toast, reload, extensions = [] }) {
+      const [service, setService] = useState('fish-free')
+      const configure = id => { setService(id); setVoiceView('services') }
       const seg = h('div', { className: 'ab-seg', role: 'tablist', 'aria-label': '语音子视图' },
         h('button', { type: 'button', role: 'tab', 'aria-selected': voiceView === 'send', className: cx(voiceView === 'send' && 'on'), onClick: () => setVoiceView('send') }, '发语音'),
-        h('button', { type: 'button', role: 'tab', 'aria-selected': voiceView === 'listen', className: cx(voiceView === 'listen' && 'on'), onClick: () => setVoiceView('listen') }, '听语音'))
+        h('button', { type: 'button', role: 'tab', 'aria-selected': voiceView === 'listen', className: cx(voiceView === 'listen' && 'on'), onClick: () => setVoiceView('listen') }, '听语音'),
+        h('button', { type: 'button', role: 'tab', 'aria-selected': voiceView === 'services', className: cx(voiceView === 'services' && 'on'), onClick: () => setVoiceView('services') }, '扩展服务'))
       return h('div', null,
         h('div', { className: 'ab-flex', style: { margin: '0 0 12px' } }, seg),
         voiceView === 'listen'
           ? h(Asr, { draft, setDraft, toast })
-          : h(Voice, { st, draft, setDraft, toast, reload }))
+          : voiceView === 'services' ? h(VoiceServices, { selected: service, onSelect: setService, extensions, st, draft, setDraft, toast, reload })
+          : h(Voice, { st, draft, setDraft, toast, reload, configure }))
     }
 
     /** 语音识别：作为「语音」页的「听语音」子视图渲染（不再单独占页签）。 */
@@ -4237,6 +4343,9 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const [emUrl, setEmUrl] = useState(null)
       // 对话框（pet 1.0.5）配置草稿：快捷键/关键字/数字/城市要「保存」才下发，开关即点即存
       const [cc, setCc] = useState(null)
+      // 语音对讲（pet 1.2.0）配置草稿：热键/地址/音色/数字要「保存」才下发，开关与下拉即点即存。
+      // 独立草稿，不跟对话框的 cc 抢状态；null = 跟着服务端下发的 pet.voiceTalk 走。
+      const [cac, setCac] = useState(null)
       const load = async () => {
         const [pr, pu] = await Promise.all([get('/panel/pet/status'), get('/panel/purpose/status')])
         if (pr.ok) { setPet(pr.pet); setWs((old) => old || (pr.pet && pr.pet.whisper ? { ...pr.pet.whisper } : null)) }
@@ -4390,6 +4499,18 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         toast((r && r.message) || '没成功', 'err')
         return false
       }
+      // ---------- 语音对讲（pet 1.2.0）独立配置：从 pet.voiceTalk 读，写入仍走 savePetSetting ----------
+      // 服务端 status() 下发 pet.voiceTalk（hotkey/engine/rvc/rvcVoice/maxChars/asrUrl/sovitsUrl/
+      // micDeviceId/speakerDeviceId/asrReady/asrReason）。老模块只下发 pet.call 时兼容读取，
+      // 两者都没有时用安全默认值兜底照常渲染，这样模块升级顺序不同也不会白屏；
+      // 保存即写 ext.pet.call*（引擎等沿用 call* 键）+ ext.pet.voiceHotkey，宿主白名单见 host.js /panel/pet/config。
+      const CALL_DEFAULTS = { hotkey: 'Alt+Space', engine: 'native', rvc: false, rvcVoice: '', maxChars: 120, asrUrl: 'http://127.0.0.1:8000', sovitsUrl: 'http://127.0.0.1:9880', micDeviceId: '', speakerDeviceId: '', asrReady: null, asrReason: '' }
+      // 优先读新快照 pet.voiceTalk，老模块只有 pet.call 时兼容读取；状态字段（asrReady/asrReason）只在新快照里
+      const voiceTalk = pet?.voiceTalk || pet?.call || {}
+      const callCfg = { ...CALL_DEFAULTS, ...voiceTalk }
+      const cacVal = (k) => (cac && cac[k] != null ? cac[k] : callCfg[k])
+      const setCacVal = (k, v) => setCac((old) => ({ ...(old || {}), [k]: v }))
+      const saveCall = async (patch, msg) => { const ok = await savePetSetting(patch, msg); if (ok) setCac(null); return ok }
       return h('div', { className: 'ab-grid' },
         h(Card, { title: '桌宠', desc: '把「大肥鱼」请到桌面上：一个小小的ta待在屏幕角落，主动搭话走气泡；你也可以点ta聊天。' },
         h('div', { className: 'ab-flex', style: { marginBottom: 8 } },
@@ -4525,6 +4646,54 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         h(Row, { label: '表情预览', hint: '气泡与心情事件会用到这些表情' },
           h('div', { style: { flex: 1, display: 'flex', flexWrap: 'wrap', gap: 6 } },
             moods.map((m, i) => h('span', { key: (m.key || m) + i, className: 'ab-pill' }, moodLabel(m))))),
+        ),
+        // ---------- 语音对讲（1.2.0）：桌宠页里**独立的一张卡**，不是对话框卡的一部分 ----------
+        // 值从 pet.voiceTalk（兼容 pet.call）读，写入仍走 savePetSetting → /panel/pet/config。
+        // 下拉与开关即点即存；文本/数字用独立草稿 cac（改一半别被 8 秒轮询冲掉），点各自的「保存」才下发。
+        // toggle 模式：热键按一下开始听、再按一下发送；不设独立界面状态概念，只做收听与外放。
+        h(Card, { title: '语音对讲', desc: '按一下热键开始听、再按一下发送——大肥鱼「听到」（识别）→ 想（人格+记忆）→ 直接用系统音箱说出来，像智能音箱一样对讲。不弹窗、不发 QQ，设备由桌宠客户端上报。' },
+          h('div', { className: 'ab-small ab-muted', style: { marginBottom: 6 } },
+            '当前：' + (callCfg.engine === 'sovits' ? '本地 GPT-SoVITS' : callCfg.engine === 'voice' ? '「语音」页接管' : '系统原生')
+            + '｜触发热键：' + (callCfg.hotkey || '（未启用）')
+            + (callCfg.rvc ? '｜RVC 变声：' + (callCfg.rvcVoice || '未设音色') : '')),
+          // ASR 前置状态：未连通时红字显示人话原因，别等说完才报错（设计权威 §3）
+          callCfg.asrReady === false
+            ? h('div', { className: 'ab-small', style: { color: '#d9534f', marginBottom: 6 } }, '⚠ 识别未就绪：' + (callCfg.asrReason || '本地识别未连通，请配 faster-whisper 或开 DSH 语音输入'))
+            : callCfg.asrReady === true
+              ? h('div', { className: 'ab-small ab-muted', style: { marginBottom: 6 } }, '✓ 识别已就绪，可以开始对讲')
+              : null,
+          h(Row, { label: '触发热键', hint: '全局热键：按一下开始听、再按一下发送。留空 = 不启用' },
+            h('div', { className: 'ab-flex', style: { alignItems: 'center', gap: 8 } },
+              h('input', { className: 'ab-input', style: { width: 'min(200px, 100%)' }, placeholder: 'Alt+Space', value: cacVal('hotkey'), onChange: (e) => setCacVal('hotkey', e.target.value) }),
+              h(Btn, { small: true, disabled: busy === 'cfg', onClick: async () => { await saveCall({ voiceHotkey: String(cacVal('hotkey')).trim() }, '触发热键已保存') } }, '保存'))),
+          h(Row, { label: '麦克风设备 ID', hint: '桌宠客户端上报；空 = 系统默认。面板只显示当前值，要换设备请到桌宠客户端里选' },
+            h('span', { className: 'ab-muted ab-small' }, callCfg.micDeviceId || '系统默认')),
+          h(Row, { label: '扬声器设备 ID', hint: '桌宠客户端上报；空 = 系统默认外放' },
+            h('span', { className: 'ab-muted ab-small' }, callCfg.speakerDeviceId || '系统默认')),
+          h(Row, { label: '识别地址（callAsrUrl）', hint: '本地 faster-whisper 地址；DSH「语音输入」没开或音频不是 WAV 时退回这里。留空 = 回落内置默认 http://127.0.0.1:8000。识别未就绪看上面的提示' },
+            h('div', { className: 'ab-flex', style: { alignItems: 'center', gap: 8 } },
+              h('input', { className: 'ab-input', style: { width: 'min(320px, 100%)' }, placeholder: 'http://127.0.0.1:8000', value: cacVal('asrUrl'), onChange: (e) => setCacVal('asrUrl', e.target.value) }),
+              h(Btn, { small: true, disabled: busy === 'cfg', onClick: async () => { await saveCall({ callAsrUrl: String(cacVal('asrUrl')).trim() }, '识别地址已保存') } }, '保存'))),
+          h(Row, { label: '回答引擎（嘴）', hint: '只影响对讲里回答的声音，不改全局语音设置。系统原生 = edge 合成失败退 Windows 语音；本地 GPT-SoVITS = 用参考音频音色；语音页接管 = 豆包，你自选接管时才碰' },
+            h(Select, { value: cacVal('engine'), width: 320, options: [
+              { value: 'native', label: 'native 系统原生（默认，edge 合成，失败退 Windows 语音）' },
+              { value: 'sovits', label: 'sovits 本地 GPT-SoVITS（参考音频音色）' },
+              { value: 'voice', label: 'voice 语音页接管（豆包，自选才碰）' },
+            ], onChange: (v) => saveCall({ callEngine: v }, '回答引擎已保存') })),
+          h(Row, { label: 'GPT-SoVITS 地址', hint: '引擎选「本地 GPT-SoVITS」才用；参考音频沿用「语音」页的 gptsovits 配置。留空 = 回落内置默认 http://127.0.0.1:9880' },
+            h('div', { className: 'ab-flex', style: { alignItems: 'center', gap: 8 } },
+              h('input', { className: 'ab-input', style: { width: 'min(320px, 100%)' }, placeholder: 'http://127.0.0.1:9880', value: cacVal('sovitsUrl'), onChange: (e) => setCacVal('sovitsUrl', e.target.value) }),
+              h(Btn, { small: true, disabled: busy === 'cfg', onClick: async () => { await saveCall({ sovitsUrl: String(cacVal('sovitsUrl')).trim() }, 'GPT-SoVITS 地址已保存') } }, '保存'))),
+          h(Row, { label: 'RVC 变声', hint: 'TTS 出稿后用「翻唱」模块导入的音色再变一次声；翻唱没就绪时自动不变声并在状态里说明' },
+            h(Switch, { on: Boolean(cacVal('rvc')), onChange: (v) => saveCall({ callRvc: v }, v ? 'RVC 变声已开启' : 'RVC 变声已关闭') })),
+          h(Row, { label: '音色名', hint: '翻唱模块里导入的音色名（翻唱页能看到清单）；RVC 变声打开才生效' },
+            h('div', { className: 'ab-flex', style: { alignItems: 'center', gap: 8 } },
+              h('input', { className: 'ab-input', style: { width: 'min(200px, 100%)' }, placeholder: '如 小鱼', value: cacVal('rvcVoice'), onChange: (e) => setCacVal('rvcVoice', e.target.value) }),
+              h(Btn, { small: true, disabled: busy === 'cfg', onClick: async () => { await saveCall({ callRvcVoice: String(cacVal('rvcVoice')).trim() }, '音色名已保存') } }, '保存'))),
+          h(Row, { label: '一次最多字数', hint: '回答别太长，长了反而不像人（20~300 字，默认 120）' },
+            h('div', { className: 'ab-flex', style: { alignItems: 'center', gap: 8 } },
+              h('input', { className: 'ab-input', type: 'number', min: 20, max: 300, step: 1, style: { width: 96 }, value: cacVal('maxChars'), onChange: (e) => setCacVal('maxChars', e.target.value) }),
+              h(Btn, { small: true, disabled: busy === 'cfg', onClick: async () => { const v = Number(cacVal('maxChars')); if (!(v >= 20 && v <= 300)) { toast('一次最多字数要填 20 ~ 300 之间的数', 'err'); return } await saveCall({ callMaxChars: Math.round(v) }, '字数上限已保存') } }, '保存'))),
         ),
         // ---------- 素材包：默认形象包（大肥鱼）自动下载落位，也可在这里换镜像地址重下 ----------
         h(Card, { title: '素材包', desc: '桌宠的形象与动画（「大肥鱼」那 106 段）。插件发现缺包会自动从素材仓库下载落位，通常不用你动手；下载不动时可以在这里换镜像地址再重下。没有素材时桌宠会显示内置的静态形象（蓝色小鲸鱼）。' },
@@ -5441,6 +5610,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const [data, setData] = useState(null)
       const [form, setForm] = useState(null)
       const [editing, setEditing] = useState(false)
+      const [relationEdit, setRelationEdit] = useState(null)
       const [tagInput, setTagInput] = useState('')
       const [error, setError] = useState('')
       const [notesBusy, setNotesBusy] = useState(false)
@@ -5495,6 +5665,20 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         const r = await post('/persona/person/save', { qq, ...fields, ...(tagsChanged ? { tags } : {}) })
         toast(r.message, r.ok ? 'ok' : 'err')
         if (r.ok) { setEditing(false); await load(false, Math.max(20, (data.notes || []).length)); onChanged() }
+      }
+      const editRelation = async (r) => {
+        setRelationEdit(r.id)
+        const text = window.prompt('按「主语 关系 宾语」修改这条关系，例如：大肥鱼 是 主人的猫', r.text)
+        if (text == null) { setRelationEdit(null); return }
+        const parts = String(text).trim().split(/\s+/)
+        if (parts.length < 3) { toast('要写成「主语 关系 宾语」', 'err'); setRelationEdit(null); return }
+        const subj = parts.shift()
+        const obj = parts.pop()
+        const pred = parts.join(' ')
+        const res = await post('/memory/relations/save', { ...r, subj, pred, obj })
+        toast(res.message || (res.ok ? '改好了' : '没改成'), res.ok ? 'ok' : 'err')
+        setRelationEdit(null)
+        if (res.ok) await load(true)
       }
       const rebuild = async () => {
         if (!(data.notesLive > 0)) return toast('还没有能用来重写小档案的事实', 'err')
@@ -5557,7 +5741,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         (data.relations || []).length ? h(Card, { title: '人物关系' }, data.relations.map((r) => h('div', { key: r.id, className: 'ab-pm-fact' },
           h('span', { className: 'ab-pm-dot', 'aria-hidden': 'true' }),
           h('div', { className: 'main' }, h('div', { className: 'text' }, r.text), h('div', { className: 'sub' }, h('span', null, memoryDate(r.at)), h('span', null, gistSource(r.chatId)))),
-          h('div', { className: 'ab-pm-acts' }, h('button', { type: 'button', className: 'ab-pm-link danger', onClick: async () => {
+          h('div', { className: 'ab-pm-acts' }, h('button', { type: 'button', className: 'ab-pm-link', disabled: relationEdit === r.id, onClick: () => editRelation(r) }, relationEdit === r.id ? '改…' : '改'), h('button', { type: 'button', className: 'ab-pm-link danger', onClick: async () => {
             if (!confirm('删除这条关系？')) return
             const res = await post('/memory/relations/delete', { id: r.id })
             toast(res.message, res.ok ? 'ok' : 'err')
@@ -5857,6 +6041,26 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
     const SM_CHILD_TINTS = ['255, 159, 200', '127, 212, 255', '255, 209, 102', '167, 139, 250', '134, 239, 172', '240, 166, 202', '186, 146, 255']
     const SM_GROUP_TINTS = ['255, 209, 102', '134, 239, 172', '127, 212, 255', '255, 159, 200', '167, 139, 250', '255, 160, 122', '186, 146, 255', '248, 113, 113']
     const smClamp = (n, min, max) => Math.min(max, Math.max(min, n))
+    /** 星图搜索/筛选：记忆星图渲染前统一判一次，避免筛选逻辑和渲染各写一套（#85）。 */
+    const smStarMatches = (s, query = '', typeFilter = '', quickFilter = '', nowMs = Date.now()) => {
+      const q = String(query || '').trim().toLowerCase()
+      if (q) {
+        const hay = [s.text, s.about, s.aboutName, ...(Array.isArray(s.tags) ? s.tags : [])].join(' ').toLowerCase()
+        if (!hay.includes(q)) return false
+      }
+      if (typeFilter) {
+        if (typeFilter === 'archived') { if (!s.archivedAt) return false }
+        else if (typeFilter === 'outdated') { if (!s.invalidAt || s.archivedAt) return false }
+        else if (typeFilter === 'core') { if (s.tier !== 'core' && s.region !== 'core') return false }
+        else if (s.region !== typeFilter) return false
+      }
+      if (quickFilter === 'dim' && !(Number(s.brightness) < 0.35)) return false
+      if (quickFilter === 'recent') {
+        const at = Number(s.lastHit || s.at || 0)
+        if (!at || nowMs - at > 7 * 86400_000) return false
+      }
+      return true
+    }
     const smTintIndexOf = (id) => {
       const text = String(id || '')
       let hash = 0
@@ -9466,7 +9670,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       })
       const [toastMsg, setToastMsg] = useState(null)
       // 语音页子视图：'send' 发语音 / 'listen' 听语音（旧「语音识别」页迁入 listen）
-      const [voiceView, setVoiceView] = useState(() => { try { return localStorage.getItem('aurabot.voice-view') === 'listen' ? 'listen' : 'send' } catch (e) { return 'send' } })
+      const [voiceView, setVoiceView] = useState(() => { try { const v = localStorage.getItem('aurabot.voice-view'); return ['listen', 'services'].includes(v) ? v : 'send' } catch (e) { return 'send' } })
       // 切换子视图时记住选择：下次进来还停在同一视图
       const pickVoiceView = (v) => { setVoiceView(v); try { localStorage.setItem('aurabot.voice-view', v) } catch (e) {} }
       // 记忆页子视图：'starmap' 星图（默认）/ 'entries' 记忆条目 / 'person' 人物。
@@ -9662,7 +9866,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         if (draftBaseRef.current) setDraft(clone(draftBaseRef.current))
         loadConfigDraft() // 顺手把基线对齐到最新权威快照（没在编辑时直接采纳）
       }
-      const save = async (override) => {
+      const saveImpl = async (override) => {
         const { allow, commandAllow, capabilityAllow, ...rest } = clone(override || draft)
         // 基线来自 /panel/config 快照；只提交本次编辑过的顶层字段，没变的键不回传
         //（整表字段照旧整键发送，mergeFromPanel 语义不变）。
@@ -9740,6 +9944,14 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         // 按约定再读一次 /panel/config 校准快照（在途合并；在编辑的草稿不会被覆盖）
         loadConfigDraft()
         return true
+      }
+      const savingRef = useRef(false)
+      const save = async (override) => {
+        if (savingRef.current) return false
+        savingRef.current = true
+        try { return await saveImpl(override) }
+        catch (error) { toast('保存失败：' + (error && error.message ? error.message : error), 'err'); return false }
+        finally { savingRef.current = false }
       }
       saveRef.current = save
       // 右上角的开关立刻生效；有没保存的改动时连同改动一起保存，不会把它们冲掉
@@ -9846,6 +10058,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const tabs = TABS.filter((t) => !TAB_MODS[t.id] || TAB_MODS[t.id].some(running))
       tabs.splice(tabs.findIndex((t) => t.id === 'logs'), 0, ...extTabs)
       const curTab = tabs.find((t) => t.id === tab) || tabs[0]
+      const voiceExtensions = curTab.id === 'voice' ? mods.filter(m => hasUi(m) && tabOf(m) === 'voice') : []
       const body = curTab.ext ? ExtPage : {
         overview: Overview, manage: Manage, connect: Connect, character: Persona, access: Access, group: Group, model: Model, voice: VoiceTab,
         stickers: Stickers, imagegen: ImageGen, video: Video, diary: Diary, speakup: SpeakUp, autotelic: Autotelic, pet: PetPanel, mood: Mood, memory: MemoryTab, song: Song, douyin: Douyin, heybox: Heybox, local: LocalApi, browser: Browser, security: Security, market: Market, modules: Modules, logs: Logs, about: About, backup: Backup,
@@ -9892,9 +10105,9 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           }),
           showWizard ? null : h(SnowLumaCompatBanner, { st, go }),
           saveConflict ? h('div', { className: 'ab-note err', role: 'alert' }, saveConflict, h(Btn, { small: true, onClick: discardDraft }, '读取最新设置')) : null,
-          showWizard ? null : h(TabBoundary, { key: curTab.id, onHome: () => go('overview') }, h(body, { ...props, mod: curTab.ext })),
+          showWizard ? null : h(TabBoundary, { key: curTab.id, onHome: () => go('overview') }, h(body, { ...props, mod: curTab.ext, extensions: voiceExtensions })),
           // dsh-image 已经嵌进「生图」页的「接口格式」里了，这里再渲染一次就是同一张卡出现两遍。
-          showWizard || curTab.ext ? null : mods.filter((m) => hasUi(m) && tabOf(m) === curTab.id && !(curTab.id === 'imagegen' && m.id === 'dsh-image')).map((m) => h('div', { key: 'embed-' + m.id, style: { marginTop: 14 } }, h(ExtPage, { ...props, mod: m.id, embedded: true }))),
+          showWizard || curTab.ext || curTab.id === 'voice' ? null : mods.filter((m) => hasUi(m) && tabOf(m) === curTab.id && !(curTab.id === 'imagegen' && m.id === 'dsh-image')).map((m) => h('div', { key: 'embed-' + m.id, style: { marginTop: 14 } }, h(ExtPage, { ...props, mod: m.id, embedded: true }))),
           dirty && !showWizard ? h('div', { className: 'ab-savebar' }, h('span', { className: 'msg' }, '有改动还没保存'),
             h('span', { className: 'ab-muted ab-small' }, h('span', { className: 'ab-kbd' }, 'Ctrl'), ' + ', h('span', { className: 'ab-kbd' }, 'S')),
             h(Btn, { kind: 'ghost', onClick: discardDraft }, '撤销'),

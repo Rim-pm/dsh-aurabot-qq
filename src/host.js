@@ -37,6 +37,7 @@ import { createMediaAccess } from './core/media.js'
 import { buildFaceIndex } from './chat/faces.js'
 import { FACE_TABLE } from './chat/face-table.js'
 import { dataDir, ensureDir } from './core/store.js'
+import { createUsageFx } from './core/usage-fx.js'
 import { initUsage, usageReport, closeUsage } from './core/usage.js'
 import { createUpdateChecker, changelogSection, hostEnv, updatePlan, repoOf } from './core/update.js'
 import { parseCommand, runCommand, createMutes, commandList } from './chat/commands.js'
@@ -180,7 +181,12 @@ export function apply(ctx) {
   const getConfig = () => cfg
   const personaMemoryRuntime = createPersonaMemoryRuntime({ getConfig })
   setSsrpMode(() => (getConfig().security && getConfig().security.ssrfMode === 'loose' ? 'loose' : 'strict'))
-  const secrets = () => { for (const k of ['webuiPassword', 'httpToken', 'wsToken']) registerSecret(cfg.snowluma[k]); registerSecret(cfg.imageGen.apiKey); for (const e of cfg.imageGen.fallbacks || []) registerSecret(e.apiKey); registerSecret(cfg.bridge.token); registerSecret(cfg.backup?.remote?.token); registerSecret(cfg.backup?.remote?.webdav?.password) } // backup 令牌/WebDAV 密码也按密钥脱敏（云备份）
+  const secrets = () => {
+    registerSecret(cfg.voice?.fishApiKey)
+    for (const pool of Object.values(cfg.voice?.keyPools || {})) {
+      for (const account of pool.accounts || []) registerSecret(account.apiKey)
+    }
+    for (const k of ['webuiPassword', 'httpToken', 'wsToken']) registerSecret(cfg.snowluma[k]); registerSecret(cfg.imageGen.apiKey); for (const e of cfg.imageGen.fallbacks || []) registerSecret(e.apiKey); registerSecret(cfg.bridge.token); registerSecret(cfg.backup?.remote?.token); registerSecret(cfg.backup?.remote?.webdav?.password) } // backup 令牌/WebDAV 密码也按密钥脱敏（云备份）
   const setConfig = (next) => {
     const before = cfg
     // 统一提交函数（方案 §2.2）：落盘 + 发布 + configRevision 递增都收敛在 commitConfig 里；
@@ -496,6 +502,9 @@ export function apply(ctx) {
     outbox,
     stickers,
     tts,
+    // ACP 标记的模型兜底（chat.acpSanitize.modelFallback，默认关）要用它问一次宿主模型。
+    // 走的是「不进会话」的既有封装 askModel，不占聊天会话、不计入她的上下文。
+    askModel: (opts) => askModel(ctx, { cfg: getConfig(), ...opts }),
     buildTools: (where) => mods.buildTools(where),
     // 模块声明的能力（module.json capabilities）：子智能体委派这类要本机权限的能力靠它把关（一审 #177）
     capabilitiesOf: (id) => (typeof mods.capabilitiesOf === 'function' ? mods.capabilitiesOf(id) : []),
@@ -1402,7 +1411,8 @@ export function apply(ctx) {
   route('/state', async () => overview())
   // token 用量与花费：今日 / 昨日 / 近 7 天 / 近 30 天，各带模块明细
   // ?range=today|yesterday|7|30|all —— 面板点哪张指标卡就按哪个区间出明细
-  route('/usage', async (req) => ({ ok: true, ...usageReport({ range: query(req).range || '7' }) }))
+  const getUsageFx = createUsageFx()
+  route('/usage', async (req) => ({ ok: true, fx: await getUsageFx(query(req).fx === 'refresh'), ...usageReport({ range: query(req).range || '7' }) }))
 
   // JSON Pointer（RFC 6901）小工具：保存回执按 /voice/enabled 这类路径逐字段确认（方案 §2.2）。
   const pointerGet = (obj, pointer) => String(pointer || '').split('/').slice(1)
@@ -1773,6 +1783,29 @@ export function apply(ctx) {
     // 历史上限与保留天数：与模块 settings 的 min/max 对齐（10~2000 条；0 天 = 永久保留）
     if (Number.isFinite(b.petChatMaxEntries)) patch.petChatMaxEntries = Math.min(2000, Math.max(10, Math.round(b.petChatMaxEntries)))
     if (Number.isFinite(b.petChatRetentionDays)) patch.petChatRetentionDays = Math.min(3650, Math.max(0, Math.round(b.petChatRetentionDays)))
+    // ---------- 语音对讲（pet 1.2.0 起在模块库）：独立设置键的唯一写入通道 ----------
+    // 同「三处必须同步」：模块 defaults/settings 已声明这些键，这里补白名单，
+    // client/client.js 桌宠页另起一张独立的「语音对讲」卡（不塞进对话框卡）。
+    // toggle 模式：按一下开始听、再按一下发送，不再需要 PTT 键与静音断句秒数，
+    // 因此 callPttKey / callVadSilence 不再写入（旧配置里残留的值也不再被面板改动）。
+    // 口径与现有键一致：类型/枚举/协议不对的坏值忽略（不写 patch，保持原值）；
+    // 数值用有限数并 clamp 到模块 settings 的 min/max；文本 trim 后按上限截断（空串合法 = 关掉/回落默认）。
+    if (b.callEngine === 'native' || b.callEngine === 'sovits' || b.callEngine === 'voice') patch.callEngine = b.callEngine
+    // 说话方式固定 toggle；旧值 free/ptt 也收，仅为兼容旧配置读写，面板不再暴露该控件
+    if (b.callTalkMode === 'free' || b.callTalkMode === 'ptt' || b.callTalkMode === 'toggle') patch.callTalkMode = b.callTalkMode
+    if (typeof b.callRvc === 'boolean') patch.callRvc = b.callRvc
+    for (const [k, max] of [['callRvcVoice', 60], ['voiceHotkey', 40], ['callMicDeviceId', 200], ['callSpeakerDeviceId', 200]]) {
+      if (typeof b[k] === 'string') patch[k] = b[k].trim().slice(0, max)
+    }
+    // 两个服务地址：只收 http/https，留空 = 回落模块内置默认（sovitsUrl 默认 9880 / callAsrUrl 默认 8000）
+    for (const k of ['sovitsUrl', 'callAsrUrl']) {
+      if (typeof b[k] === 'string') {
+        const u = b[k].trim().slice(0, 300)
+        if (!u || /^https?:\/\//i.test(u)) patch[k] = u
+      }
+    }
+    // 一次最多字数 20~300（与模块 settings 的 min/max 对齐）；toggle 模式不再有「说完判定秒数」
+    if (Number.isFinite(b.callMaxChars)) patch.callMaxChars = Math.min(300, Math.max(20, Math.round(b.callMaxChars)))
     if (typeof b.whisperLines === 'string') patch.whisperLines = b.whisperLines.slice(0, 4000)
     // 素材包下载地址：内建模块的 settings 字段不渲染成表单（同上），这里是它唯一的写入通道。
     // 只收 http/https（或空 = 回到内置默认），别把 file:// 之类塞进来当下载源
