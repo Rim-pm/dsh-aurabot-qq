@@ -3238,7 +3238,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           const localDown = b.mode === 'local' && !String(b.url || '').trim()
           return miss.length
             ? h('div', { className: 'ab-note warn', style: { marginBottom: 8 } },
-              '还差：' + miss.join('、') + '。不填的话说话会退回 Windows 语音（照常发声，只是不是 Breeze 的音色）。',
+              '还差：' + miss.join('、') + '。不填的话说话会退回 系统语音（照常发声，只是不是 Breeze 的音色）。',
               localDown ? '本地模式要先把 breeze_infer 跑起来，地址填它的 /v1 前缀（例如 http://127.0.0.1:7860）。' : '')
             : null
         })(),
@@ -3281,7 +3281,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           ].filter(Boolean)
           return miss.length
             ? h('div', { className: 'ab-note warn', style: { marginBottom: 8 } },
-              '还差：' + miss.join('、') + '。不填的话说话会退回 Windows 语音（照常发声，只是不是 MiniMax 的音色）。')
+              '还差：' + miss.join('、') + '。不填的话说话会退回 系统语音（照常发声，只是不是 MiniMax 的音色）。')
             : null
         })(),
         h(Row, { key: 'k', label: 'API Key', hint: 'MiniMax 开放平台「接口密钥」里创建；只存在本机' }, f.text('voice.minimax.apiKey', { size: 'wide', type: 'password', placeholder: draft.voice.minimax?.apiKeySet ? '已保存（不改就留空）' : 'sk-api-…' })),
@@ -4707,9 +4707,9 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             h('div', { className: 'ab-flex', style: { alignItems: 'center', gap: 8 } },
               h('input', { className: 'ab-input', style: { width: 'min(320px, 100%)' }, placeholder: 'http://127.0.0.1:8000', value: cacVal('asrUrl'), onChange: (e) => setCacVal('asrUrl', e.target.value) }),
               h(Btn, { small: true, disabled: busy === 'cfg', onClick: async () => { await saveCall({ callAsrUrl: String(cacVal('asrUrl')).trim() }, '识别地址已保存') } }, '保存'))),
-          h(Row, { label: '回答引擎（嘴）', hint: '只影响对讲里回答的声音，不改全局语音设置。系统原生 = edge 合成失败退 Windows 语音；本地 GPT-SoVITS = 用参考音频音色；语音页接管 = 豆包，你自选接管时才碰' },
+          h(Row, { label: '回答引擎（嘴）', hint: '只影响对讲里回答的声音，不改全局语音设置。系统原生 = edge 合成失败退 系统语音；本地 GPT-SoVITS = 用参考音频音色；语音页接管 = 豆包，你自选接管时才碰' },
             h(Select, { value: cacVal('engine'), width: 320, options: [
-              { value: 'native', label: 'native 系统原生（默认，edge 合成，失败退 Windows 语音）' },
+              { value: 'native', label: 'native 系统原生（默认，edge 合成，失败退 系统语音）' },
               { value: 'sovits', label: 'sovits 本地 GPT-SoVITS（参考音频音色）' },
               { value: 'voice', label: 'voice 语音页接管（豆包，自选才碰）' },
             ], onChange: (v) => saveCall({ callEngine: v }, '回答引擎已保存') })),

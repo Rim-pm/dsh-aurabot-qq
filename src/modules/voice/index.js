@@ -17,10 +17,10 @@ import { toMono16k } from '../../voice/wav.js'
 import { fileOf } from '../../local/local.js'
 
 /** 识别链路只吃 PCM16 WAV：自检拿到 mp3 时先用 ffmpeg 转一道（#255）。 */
-export function asPcmWav (file, buf, ffmpegPath = '', { platform = process.platform } = {}) {
+export function asPcmWav (file, buf, ffmpegPath = '', { platform = process.platform, findFfmpegFn = findFfmpeg, runFn = spawnSync } = {}) {
   // RIFF 还要是 PCM16 才能直接进识别（WAVE_FORMAT_EXTENSIBLE / float 会被 toMono16k 拒掉）。
   if (buf.length > 44 && buf.toString('ascii', 0, 4) === 'RIFF' && buf.readUInt16LE(20) === 1 && buf.readUInt16LE(34) === 16) return buf
-  const ff = findFfmpeg(ffmpegPath)
+  const ff = findFfmpegFn(ffmpegPath)
   if (!ff) {
     const hint = platform === 'linux'
       ? '这台机器没有系统语音兜底，装好 ffmpeg 再试，或在「语音」页改用本地 TTS 服务'
@@ -28,11 +28,15 @@ export function asPcmWav (file, buf, ffmpegPath = '', { platform = process.platf
     throw new Error('自检拿到的音频不是 PCM16 WAV，这台机器也没找到 ffmpeg，转不了：' + hint)
   }
   const out = file.replace(/\.[a-z0-9]+$/i, '') + '.16k.wav'
-  const r = spawnSync(ff, ['-y', '-i', file, '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', out], { timeout: 60000, windowsHide: true })
-  const failed = r.error || r.status !== 0 || !existsSync(out)
-  try { if (existsSync(out)) unlinkSync(out) } catch {}
-  if (failed) throw new Error('音频转 WAV 失败：' + String(r.error?.message || r.stderr || '').slice(-200))
-  return readFileSync(out)
+  const r = runFn(ff, ['-y', '-i', file, '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', out], { timeout: 60000, windowsHide: true })
+  let converted = null
+  try {
+    if (!r.error && r.status === 0 && existsSync(out)) converted = readFileSync(out)
+  } finally {
+    try { if (existsSync(out)) unlinkSync(out) } catch {}
+  }
+  if (!converted) throw new Error('音频转 WAV 失败：' + String(r.error?.message || r.stderr || '').slice(-200))
+  return converted
 }
 
 import { asrConfigured, transcribeAudio } from '../../voice/asr.js'
