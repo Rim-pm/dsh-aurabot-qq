@@ -102,7 +102,9 @@ test('早展开开着：消息一进来就拉一次（哪怕这条不回她）',
   createHubRef = createHub
   const { hub, calls } = setup(t, { forward: { expandEarly: true } })
   await hub.onMessage(groupEvent())
-  assert.deepEqual(calls, ['fw1'], '没叫她也要展开，否则之后问她看不见')
+  // #526 之后回退顺序是 outerId → 段内 id：这里 mock 对外层 message_id=11 也返回内容，
+  // 命中即停，所以只调一次、且用的是外层 id（顺序细节由 forward-fallback.test.js 覆盖）。
+  assert.deepEqual(calls, ['11'], '没叫她也要展开；外层 id 能拿到就不再试段内 id')
 })
 
 test('早展开关着：不叫她的时候一次都不拉', async (t) => {
