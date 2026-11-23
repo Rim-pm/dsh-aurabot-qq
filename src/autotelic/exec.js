@@ -146,11 +146,6 @@ export function createExecV5({
       args: { ticket: ticket.id, tag: ticket.tag, status: outcome.status },
       outcome: outcome.why,
     })
-    // score 只锚真实复用终态（§3.4，lead 裁决 2026-11-17）：执行器是第一见证人，
-    // 终态落账时同步调成员 D 的 skills.recordOutcome；失败同权重沉淀，aborted/rejected 不计分不调。
-    if (ticket.skillId && (outcome.status === 'done' || outcome.status === 'failed') && typeof skills?.recordOutcome === 'function') {
-      try { skills.recordOutcome(ticket.skillId, outcome.status, outcome.ownerResponse || '') } catch (error) { log?.warn?.('自驱v5：recordOutcome 回调出错：', error?.message) }
-    }
     // 回调 B 的复盘环（reviewRound 入参契约，lead 裁决 2026-11-17 定稿）
     const review = {
       roundId: outcome.roundId || `round-${ticket.id}`,
@@ -165,7 +160,9 @@ export function createExecV5({
       evidence: outcome.evidence || '',
       lesson: outcome.lesson || '',
     }
-    try { outcome.plan?.reviewRound?.(review) } catch (error) { log?.warn?.('自驱v5：reviewRound 回调出错：', error?.message) }
+    try {
+      Promise.resolve(outcome.plan?.reviewRound?.(review)).catch((error) => log?.warn?.('自驱v5：reviewRound 回调出错：', error?.message))
+    } catch (error) { log?.warn?.('自驱v5：reviewRound 回调出错：', error?.message) }
     return outcome
   }
 
@@ -381,6 +378,11 @@ export function createExecV5({
 
     const outcome = { status, why, results, plan }
     auditNote?.({ kind: 'autotelic/ticket-run', tool: 'exec-v5', args: { ticket: ticket.id, tag: ticket.tag }, outcome: `${status} ${why}`.trim() })
+    // score 只锚真实复用终态（§3.4，lead 裁决 2026-11-17）：执行器是第一见证人，
+    // 终态落账时调用成员 D 的 skills.recordOutcome；失败同权重沉淀，aborted/rejected 不计分不调。
+    if (ticket.skillId && (outcome.status === 'done' || outcome.status === 'failed') && typeof skills?.recordOutcome === 'function') {
+      try { await skills.recordOutcome(ticket.skillId, outcome.status, outcome.ownerResponse || '') } catch (error) { log?.warn?.('自驱v5：recordOutcome 回调出错：', error?.message) }
+    }
     return settle(ticket, outcome)
   }
 

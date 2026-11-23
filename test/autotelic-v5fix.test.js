@@ -33,35 +33,35 @@ test('buildTicket 步骤带 level：发言类 touch-owner、其余 write-data（
 
 // ---------- ① skillId 链路 ----------
 
-test('skillId 链路：resolveMethod 命中既有技能 → 记账落条目；未命中 → 对象形态立候选记忆（必修①）', (t) => {
+test('skillId 链路：resolveMethod 命中既有技能 → 记账落条目；未命中 → 对象形态立候选记忆（必修①）', async (t) => {
   const root = tmp(t, 'skillid')
   const store = createSkillStore(join(root, 'skills'), { now: () => Date.now() })
   // 攒 3 条同主题记忆 → 提炼晋升技能层（distill 不给，模板兜底）
   let n = 0
   for (const text of ['整理相册要按月份分目录', '整理相册先备份再动手', '整理相册完事写一条记录']) {
     n++
-    const r = store.ingestReflection({ roundId: `round-${n}`, tag: '整理', text })
+    const r = await store.ingestReflection({ roundId: `round-${n}`, tag: '整理', text })
     assert.equal(r.ok, true)
   }
   const hit = store.resolveMethod('整理', { kind: '整理', text: '把相册整理一遍' })
   assert.ok(hit?.doc?.meta?.id, '同主题技能已晋升，resolveMethod 命中')
   // 命中路径：行动单带 skillId → recordOutcome(skillId, done) → uses+1 score+0.1
   const before = store.get(hit.doc.meta.id)
-  const r1 = store.recordOutcome(hit.doc.meta.id, 'done', '')
+  const r1 = await store.recordOutcome(hit.doc.meta.id, 'done', '')
   assert.equal(r1.ok, true)
   const after = store.get(hit.doc.meta.id)
   assert.equal(after.meta.uses, before.meta.uses + 1)
   assert.ok(after.meta.score > before.meta.score, 'done 加分（D9：真实复用终态锚定）')
   // 未命中路径（探索模式，集成层口径）：对象形态记账落不到条目时，集成层把真实终态立为候选记忆
-  const r2 = store.recordOutcome({ tag: '好奇', status: 'done', ownerResponse: '' })
+  const r2 = await store.recordOutcome({ tag: '好奇', status: 'done', ownerResponse: '' })
   if (!r2.ok && String(r2.why || '').includes('落不到任何条目')) {
-    const ing = store.ingestReflection({ topic: '好奇', text: '行动「试着弄懂 X」真实复用终态 done（立为候选经验）', finalStatus: 'done' })
+    const ing = await store.ingestReflection({ topic: '好奇', text: '行动「试着弄懂 X」真实复用终态 done（立为候选经验）', finalStatus: 'done' })
     assert.equal(ing.ok, true)
   } else {
     assert.equal(r2.ok, true, r2.why)
   }
   // 立了候选之后，同方向再 done 就能按 tag 找到条目记账（下一轮 resolveMethod 可命中）
-  const r3 = store.recordOutcome({ tag: '好奇', status: 'done', ownerResponse: '' })
+  const r3 = await store.recordOutcome({ tag: '好奇', status: 'done', ownerResponse: '' })
   assert.equal(r3.ok, true, r3.why || JSON.stringify(r3))
 })
 

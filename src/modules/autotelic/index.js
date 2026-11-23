@@ -188,7 +188,7 @@ export default {
       const skillsStore = createSkillStore(api.dataDir('skills'), {
         distill: (entries) => distillViaLlm(entries),
         personaFile: personaCardPath(),
-        log: (...v) => log.debug?.(...v),
+        log: (...v) => log.warn?.(...v),
       })
       // 决策环（decisions.jsonl 路径在初始化时定死；人格切换后由下一次 init 生效）
       const planner = createPlanner({ decisionFile: own('decisions.jsonl'), hub, settings, log })
@@ -274,7 +274,7 @@ export default {
       const c = ctxOf()
       return async (review) => {
         const artifact = await reviewRound(review, { decisionFile: own('decisions.jsonl'), hub, settings, log })
-        const ing = c.skillsStore.ingestReflection(artifact)
+        const ing = await c.skillsStore.ingestReflection(artifact)
         if (ing.ok) {
           note({ kind: 'autotelic/reflect', args: { ticket: review.ticketId, next: artifact.suggestions?.next }, outcome: `沉淀：${ing.id}` })
           if ((ing.promoted || []).length) queueIgnite() // 晋升发生 → 下一拍点燃一次回味（心念点火）
@@ -375,9 +375,9 @@ export default {
         // 库里还没有该方向条目时（探索模式），把真实终态立为候选记忆（下一轮就能被 resolveMethod 命中）
         if (!tk.skillId && (outcome.status === 'done' || outcome.status === 'failed')) {
           try {
-            const rec = c.skillsStore.recordOutcome({ tag: tk.tag, status: outcome.status, ownerResponse: outcome.ownerResponse || '' })
+            const rec = await c.skillsStore.recordOutcome({ tag: tk.tag, status: outcome.status, ownerResponse: outcome.ownerResponse || '' })
             if (!rec.ok && String(rec.why || '').includes('落不到任何条目')) {
-              c.skillsStore.ingestReflection({ topic: tk.tag, text: `行动「${tk.intent}」真实复用终态 ${outcome.status}（立为候选经验）`, finalStatus: outcome.status })
+              await c.skillsStore.ingestReflection({ topic: tk.tag, text: `行动「${tk.intent}」真实复用终态 ${outcome.status}（立为候选经验）`, finalStatus: outcome.status })
             }
           } catch (e) { log.debug?.('自驱v5：终态记账失败：', e?.message) }
         }

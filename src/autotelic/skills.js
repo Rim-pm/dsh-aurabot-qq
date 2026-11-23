@@ -216,9 +216,9 @@ export function createSkillStore(root, opts = {}) {
    * 注意：本函数只「落片段」不改分——score 由执行侧（成员 C exec.js）在终态落账时
    * 调 recordOutcome，复盘侧只有建议权（lead 裁决）。
    * @param {object} artifact 复盘产物
-   * @returns {{ok:boolean, id?:string, why?:string}}
+   * @returns {Promise<{ok:boolean, id?:string, promoted?:string[], why?:string}>}
    */
-  function ingestReflection(artifact) {
+  async function ingestReflection(artifact) {
     if (!artifact || typeof artifact !== 'object') return { ok: false, why: '复盘产物不是对象' }
     const a = artifact
     const text = firstText(a, ['lesson', 'text', 'summary', 'content', 'observation', 'note', 'body'])
@@ -235,8 +235,8 @@ export function createSkillStore(root, opts = {}) {
     const tags = Array.isArray(a.tags) && a.tags.length ? a.tags.map(String) : (topic ? [topic] : [])
     const doc = composeDoc({ meta: { id, title: prev?.meta?.title || title, kind: topic || prev?.meta?.kind, tags: [...new Set([...(prev?.meta?.tags || []), ...tags])], layer: 'memory', score: prev?.meta?.score ?? 0.5, uses: prev?.meta?.uses ?? 0, createdAt, updatedAt: now(), ticketId: a.ticketId, roundId: a.roundId, finalStatus: a.finalStatus, ownerResponse: a.ownerResponse, source: 'reflection' }, content, origin })
     try { writeDoc('memory', doc) } catch (error) { return { ok: false, why: `写不了：${error?.message || error}` } }
-    tryMaybePromote(id)
-    return { ok: true, id }
+    const promoted = await tryMaybePromote(id)
+    return { ok: true, id, promoted }
   }
 
   const firstText = (a, keys) => { for (const k of keys) { const v = a[k]; if (typeof v === 'string' && v.trim()) return v.trim(); if (Array.isArray(v) && v.length && typeof v[0] === 'string') return v.join('；') } return '' }
@@ -251,9 +251,9 @@ export function createSkillStore(root, opts = {}) {
    *   - done +0.1 / failed −0.2 / aborted 不计（uses 也不加——没走完不算复用）；
    *   - touch-owner 且 ownerResponse ∈ {ignored, perfunctory} 视同 failed（主人不买账 = 这招不对味）；
    *   - o.score（模型自评想混进来）被显式丢弃。
-   * @returns {{ok:boolean, promoted?:string[], stale?:boolean, why?:string}}
+   * @returns {Promise<{ok:boolean, promoted?:string[], stale?:boolean, why?:string}>}
    */
-  function recordOutcome(a, b, c) {
+  async function recordOutcome(a, b, c) {
     const o = typeof a === 'object' && a !== null ? a : { skillId: a, status: b, ownerResponse: c }
     const status = String(o.status || '').toLowerCase()
     if (!['done', 'failed', 'aborted'].includes(status)) return { ok: false, why: `终态「${o.status}」不认（只认 done/failed/aborted）` }
@@ -281,13 +281,13 @@ export function createSkillStore(root, opts = {}) {
       if (layer === 'instinct' || layer === 'archive') { writeDoc(layer, { meta: { ...doc.meta, ...patch }, body: doc.body }); touchIndex(); return { ok: true, stale } }
       snapshot(files)
       writeDoc(layer, { meta: { ...doc.meta, ...patch }, body: doc.body })
-      const promoted = tryMaybePromote(id, { fromOutcome: true, failed })
+      const promoted = await tryMaybePromote(id, { fromOutcome: true, failed })
       touchIndex()
       return { ok: true, promoted, stale }
     }
     // 记忆层都没有：done 终态本身是「真实复用成功」，按口径可以直接把这条经验立为候选
     if (o.tag || o.kind) {
-      ingestReflection({ topic: o.tag || o.kind, text: `行动单真实复用终态 ${status}，立为候选经验`, id: undefined })
+      await ingestReflection({ topic: o.tag || o.kind, text: `行动单真实复用终态 ${status}，立为候选经验`, id: undefined })
       return { ok: true, why: '库里没有同名条目，已按终态立了候选记忆' }
     }
     return { ok: false, why: '库里没有这个条目' }
@@ -304,16 +304,32 @@ export function createSkillStore(root, opts = {}) {
 
   // ===== 晋升链 =====
 
+  let promotionTail = Promise.resolve()
+
+  function queuePromotion(work) {
+    const pending = promotionTail.then(work).catch((error) => {
+      log(`晋升检查失败：${error?.message || error}`)
+      return null
+    })
+    promotionTail = pending
+    return pending
+  }
+
+  // 入队后重新读取记忆。前一项已晋升并吸收的片段直接跳过。
+  async function tryMaybePromote(id, options) {
+    return (await queuePromotion(() => checkPromotion(id, options))) || []
+  }
+
   /** 记忆条目 x 是否满足晋升技能层：同主题(kind)≥3 条 或 真实复用成功（该条 done 过）。 */
-  function tryMaybePromote(memoryId, { fromOutcome = false, failed = false } = {}) {
+  async function checkPromotion(memoryId, { fromOutcome = false, failed = false } = {}) {
     const promoted = []
     const seed = readDoc('memory', memoryId)
     if (seed) {
       const topic = seed.meta.kind || (seed.meta.tags || [])[0]
       const sameTopic = topic ? listDocs('memory').filter((d) => (d.meta.kind === topic) || ((d.meta.tags || []).includes(topic))) : [seed]
       const reuseSuccess = fromOutcome === true && !failed // 只有 done（真实复用成功）才走这条晋升线
-      if (sameTopic.length >= 3 || (reuseSuccess && true)) {
-        const p = promoteMemoryToSkill(sameTopic.length >= 3 ? sameTopic : [seed])
+      if (sameTopic.length >= 3 || reuseSuccess) {
+        const p = await promoteMemoryToSkill(sameTopic.length >= 3 ? sameTopic : [seed])
         if (p) promoted.push(`memory→skills:${p}`)
       }
     }
@@ -329,21 +345,15 @@ export function createSkillStore(root, opts = {}) {
   }
 
   /** 同主题记忆 → 技能层：一次提炼调用（注入点 distill），失败用模板兜底。晋升前先快照。 */
-  function promoteMemoryToSkill(entries) {
+  async function promoteMemoryToSkill(entries) {
     if (!entries.length) return null
     const files = entries.map((e) => e.file)
     snapshot(files)
     const topic = entries[0].meta.kind || (entries[0].meta.tags || [])[0] || entries[0].meta.id
     let distilled = null
-    let pending = null
-    try {
-      const out = distill ? distill(entries.map((e) => ({ id: e.meta.id, title: e.meta.title, kind: e.meta.kind, tags: e.meta.tags, content: sectionOf(e.body, '内容'), origin: sectionOf(e.body, '来历') }))) : null
-      // 注入点可能是异步的（模块壳的 distillViaLlm 要等一次 LLM 调用）：不能把 Promise 当数组用，
-      // 更不能让它的拒绝逃出去——dsh-app-boot 把 unhandledRejection 当 fatal 直接 exit(1)，
-      // 以前这里一次「上一轮还没结束」就能把整个进程带走。先落模板兜底，结果回来再补写正文。
-      if (out && typeof out.then === 'function') pending = out
-      else distilled = out
-    } catch (error) { log(`提炼调用失败，走模板兜底：${error?.message || error}`) }
+    try { distilled = distill ? await distill(entries.map((e) => ({ id: e.meta.id, title: e.meta.title, kind: e.meta.kind, tags: e.meta.tags, content: sectionOf(e.body, '内容'), origin: sectionOf(e.body, '来历') }))) : null } catch (error) { log(`提炼调用失败，走模板兜底：${error?.message || error}`) }
+    // 提炼期间新写入的复盘不能被旧快照吸收，留给已排队的检查处理。
+    if (entries.some((entry) => readDoc('memory', entry.meta.id)?.body !== entry.body)) return null
     const first = Array.isArray(distilled) ? distilled[0] : null
     const id = validId(first?.id) || slug(topic, '') || validId(entries[0].meta.id)
       || `skill-${stampOf(new Date(now())).slice(8, 20).toLowerCase()}`
@@ -365,18 +375,6 @@ export function createSkillStore(root, opts = {}) {
     // 不删的话同 id 的记忆副本会在 priority 解析下遮住技能条目，score 更新就落错层。
     for (const e of entries) { try { unlinkSync(e.file) } catch {} }
     touchIndex()
-    if (pending) {
-      // 异步提炼结果回来：按修订口径补正文（保留 score/uses，先快照），失败只记日志——
-      // 这条链路绝不能抛出未处理拒绝，否则又回到「一次 LLM 抖动炸整个 dsh 进程」。
-      pending.then((arr) => {
-        const f = Array.isArray(arr) ? arr[0] : null
-        if (!f || typeof f !== 'object') return
-        const content = String(f.content || '').trim()
-        const title = String(f.title || '').trim()
-        if (!content && !title) return
-        try { revise(id, { content: content || undefined, title: title || undefined }) } catch (error) { log(`异步提炼补写失败（模板兜底已落盘）：${error?.message || error}`) }
-      }, (error) => { log(`提炼调用失败，模板兜底已落盘：${error?.message || error}`) }).catch((error) => { log(`异步提炼补写失败（模板兜底已落盘）：${error?.message || error}`) })
-    }
     return id
   }
 
@@ -520,7 +518,10 @@ export function createSkillStore(root, opts = {}) {
   touchIndex()
   return {
     ingestReflection, recordOutcome,
-    promoteMemoryToSkill, promoteSkillToInstinct,
+    promoteMemoryToSkill: (entries) => queuePromotion(() => promoteMemoryToSkill(
+      entries.map((entry) => readDoc('memory', entry.meta.id)).filter(Boolean),
+    )),
+    promoteSkillToInstinct,
     suggestStale, archive, revise,
     listSnapshots, rollback,
     resolveMethod,
