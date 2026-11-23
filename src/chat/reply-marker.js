@@ -11,7 +11,10 @@ export const REPLY_CLOSE = '⟦/REPLY⟧'
 
 // 解析时宽容一点：模型偶尔会写成 [[REPLY]] / 【REPLY】 或带空格。
 const OPEN_RE = /(?:⟦|\[\[|【)\s*REPLY\s*(?:⟧|\]\]|】)/gi
-const CLOSE_RE = /(?:⟦|\[\[|【)\s*\/\s*REPLY\s*(?:⟧|\]\]|】)/gi
+// 收尾标记：左边必须有个开括号，右边那个括号可以缺（模型常写成 ⟦/REPLY 就忘了 ⟧）。
+// 但不能两边都可有可无——那样正文里普通的 `/reply`（比如分支名 fix/reply-marker-system-skip）
+// 会被当成标记从中间整段吃掉，后面的话直接消失。
+const CLOSE_RE = /(?:⟦|\[\[|【)\s*\/\s*REPLY\s*(?:⟧|\]\]|】)?|\/\s*REPLY\s*(?:⟧|\]\]|】)/gi
 
 /** 注入给模型的格式要求（放在系统提示里，不动人格文件）。 */
 export function markerInstruction () {

@@ -59,6 +59,19 @@ test('stripMarkers：把标记从正文里清掉', () => {
   assert.equal(stripMarkers('[[REPLY]]你好[[/REPLY]]'), '你好')
 })
 
+// 正文里普通的 `/reply`（分支名 fix/reply-marker-system-skip 之类）不是标记：
+// 以前的收尾正则两边括号都写成可选，一出现 `/reply` 就把后面整段吃掉，一句话半截消失。
+test('stripMarkers：正文里的 /reply 原样保留', () => {
+  const s = '分支 fix/reply-marker-system-skip commit 8433540'
+  assert.equal(stripMarkers(s), s)
+  assert.equal(stripMarkers('x/reply-marker y'), 'x/reply-marker y')
+})
+
+test('stripMarkers：收尾缺右边括号仍然认', () => {
+  assert.equal(stripMarkers('⟦REPLY⟧你好⟦/REPLY'), '你好')
+  assert.equal(stripMarkers('【REPLY】你好【/REPLY'), '你好')
+})
+
 test('注入的格式要求里带标记', () => {
   const text = markerInstruction()
   assert.ok(text.includes(REPLY_OPEN))
