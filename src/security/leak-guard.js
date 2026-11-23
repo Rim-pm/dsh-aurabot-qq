@@ -64,6 +64,12 @@ const RUNTIME_CONTEXT_STANDALONE = /^(?:Current (?:runtime context|working direc
 // 注意：matchAll 会沿用共享 /g 正则的 lastIndex，这里用源头字符串每次新建。
 const TIME_CONTEXT_HEAD_SOURCE = '^[ \\t]*(?:Time sampled while preparing turn \\d+, step \\d+:|【当前本机时间】)'
 const TIME_CONTEXT_LINE = /^(?:Time sampled while preparing turn \d+, step \d+:|Browser time zone for this request:|Elapsed since the preceding (?:model-visible message|step context):|【当前本机时间】)/
+// memsearch 插件每轮还会在上下文最前面挂一行可用性提示（[memsearch] Recall available …）。
+// 它不是提示词复读、也不在 fingerprint 来源里，模型复述时会原样当正文发出去（2026-11-23 私聊）。
+const MEMSEARCH_LINE = /^\[memsearch\]\s*Recall available\b/i
+
+const isInjectionLine = (line) => TIME_CONTEXT_LINE.test(line) || MEMSEARCH_LINE.test(line)
+
 const OUTBOUND_SCAFFOLD_HEAD = /(?<!^)(?<!\n)【系统提醒[^】\n]*】/g
 const OUTBOUND_ROOM_HEAD = /【你在自己家里[^】\n]*】/g
 
@@ -81,7 +87,7 @@ function runtimeContextEnd(text, start) {
 function timeContextEnd(text, start) {
   let end = start
   for (const line of text.slice(start).split('\n')) {
-    if (line.trim() && !TIME_CONTEXT_LINE.test(line.trim())) break
+    if (line.trim() && !isInjectionLine(line.trim())) break
     end += line.length + 1
   }
   return Math.min(end, text.length)
@@ -149,7 +155,7 @@ export function contextInjectionRanges(text, { toEndOfText = false } = {}) {
   let offset = 0
   for (const line of raw.split('\n')) {
     const end = Math.min(offset + line.length + 1, raw.length)
-    if (TIME_CONTEXT_LINE.test(line.trim()) && !ranges.some((r) => r.start <= offset && end <= r.end)) {
+    if (isInjectionLine(line.trim()) && !ranges.some((r) => r.start <= offset && end <= r.end)) {
       ranges.push({ start: offset, end })
     }
     offset += line.length + 1
