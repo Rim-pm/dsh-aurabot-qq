@@ -97,21 +97,13 @@ export function pickEvict(items) {
 export function createStickerStore({ dsh, getConfig, onebot, log }) {
   const recent = [] // 每小时限额
 
-  /** NapCat 的 add_custom_face 接收文件路径；网关读不到本地文件时再尝试 base64。 */
-  async function addToQQ(buf, localPath, label) {
+  /** NapCat 的 add_custom_face 接收已落盘的表情文件路径。 */
+  async function addToQQ(localPath, label) {
     try {
-      let r
-      try {
-        r = await onebot.call('add_custom_face', { file: localPath })
-      } catch (error) {
-        // 超时或断线时收藏结果未知，重试可能重复收藏。
-        if (error?.uncertain || !/\b(?:ENOENT|EACCES|EPERM)\b|no such file|file not found|文件不存在/i.test(`${error?.code || ''} ${error?.message || ''}`)) throw error
-        r = await onebot.call('add_custom_face', { file: 'base64://' + buf.toString('base64') })
-      }
+      const r = await onebot.call('add_custom_face', { file: localPath })
       return String(r?.emoji_id || '')
-    } catch {
-      // 网关错误可能回显整段 base64，避免写入日志。
-      log.debug(`收藏到 QQ 失败（本地已留档：${label}）`)
+    } catch (error) {
+      log.debug(`收藏到 QQ 失败（本地已留档：${label}）`, error?.message || '未知错误')
       return ''
     }
   }
@@ -192,7 +184,7 @@ export function createStickerStore({ dsh, getConfig, onebot, log }) {
     recent.push(now)
     // 收藏到 QQ
     if (!getConfig().dryRun) {
-      item.emojiId = await addToQQ(buf, join(dir(), file), '自动收藏')
+      item.emojiId = await addToQQ(join(dir(), file), '自动收藏')
     }
     lib.items.push(item)
     saveLibrary(lib)
@@ -258,7 +250,7 @@ export function createStickerStore({ dsh, getConfig, onebot, log }) {
     const { width, height } = imageSize(buf)
     const item = { md5, file, name: String(name).slice(0, 12), tags, from, at: Date.now(), width, height, bytes: buf.length, emojiId: '' }
     if (toQQ && !getConfig().dryRun) {
-      item.emojiId = await addToQQ(buf, join(dir(), file), '手动收藏')
+      item.emojiId = await addToQQ(join(dir(), file), '手动收藏')
       if (item.emojiId && item.name) {
         try { await onebot.call('modify_custom_face', { emoji_id: item.emojiId, desc: item.name }) } catch (error) { log.debug('收藏备注写回失败：', error.message) }
       }

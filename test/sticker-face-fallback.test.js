@@ -58,16 +58,16 @@ test('#502 自动收藏先传本地文件', async (t) => {
   assert.deepEqual(calls.map(([action]) => action), ['add_custom_face'])
 })
 
-test('#502 网关读不到本地文件时改用 base64', async (t) => {
-  const { store, calls } = makeStore(t, (file) => {
-    if (file !== base64) throw new Error('ENOENT: no such file or directory')
-    return { emoji_id: 'e1' }
+test('#502 网关读不到路径时保留本地表情，不改用 base64', async (t) => {
+  const { store, calls } = makeStore(t, () => {
+    throw Object.assign(new Error('ENOENT: no such file or directory'), { code: 'ENOENT' })
   })
   const r = await store.addFromBuffer(png)
-  assert.equal(r.item.emojiId, 'e1')
-  assert.equal(calls.length, 2)
+  assert.equal(r.ok, true)
+  assert.equal(store.library().items[0].emojiId, '')
+  assert.equal(calls.length, 1)
   assert.ok(isAbsolute(calls[0][1].file))
-  assert.equal(calls[1][1].file, base64)
+  assert.deepEqual(readFileSync(calls[0][1].file), png)
 })
 
 test('#502 网关收藏超时保留本地表情', async (t) => {
