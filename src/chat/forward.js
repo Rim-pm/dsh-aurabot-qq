@@ -30,7 +30,7 @@ export async function readForward(onebot, id, { selfId, faceName, log, depth = 1
     st.count++
     const who = node.sender?.card || node.sender?.nickname || String(node.sender?.user_id ?? node.user_id ?? '某人')
     const m = parseMessageEvent({ message_type: 'private', user_id: node.sender?.user_id ?? node.user_id, message: node.message ?? node.content ?? [] }, selfId, { faceName })
-    st.lines.push(`${pad}${who}：${(m.text || '（图片/表情）').slice(0, MAX_LINE)}`)
+    st.lines.push(`${pad}${who}：${(m.text || (m.records.length ? '[语音]' : '（没有文字）')).slice(0, MAX_LINE)}`)
     for (const seg of m.images) if (st.images.length + st.stickers.length < MAX_FORWARD_IMAGES) st.images.push(seg)
     for (const seg of m.stickers) if (st.images.length + st.stickers.length < MAX_FORWARD_IMAGES) st.stickers.push(seg)
     if (depth < MAX_FORWARD_DEPTH) {

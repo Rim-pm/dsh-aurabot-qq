@@ -50,3 +50,9 @@ test('拉不到时不抛错', async () => {
   const r = await readForward(onebot, 'a', { selfId: 9 })
   assert.match(forwardBody(r), /内容没拉到/)
 })
+
+test('转发里的无正文、语音和图片分别按实际消息段展示', async () => {
+  const r = await readForward(gateway({ a: [node('甲', [{ type: 'at', data: { qq: '9' } }]), node('乙', [{ type: 'record', data: {} }]), node('丙', [image(1)])] }), 'a', { selfId: 9 })
+  assert.deepEqual(r.lines.map(s => s.trim()), ['甲：（没有文字）', '乙：[语音]', '丙：[图片]'])
+  assert.equal(r.images.length, 1)
+})

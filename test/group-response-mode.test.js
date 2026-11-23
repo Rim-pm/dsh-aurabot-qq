@@ -121,3 +121,13 @@ for (const stage of ['prompt', 'brain', 'send']) test(`在 ${stage} 等待期间
   await s.hub.sendText(`group:${G}`, '模块结果')
   assert.equal(s.calls.filter(x => x.action === 'send_group_msg').length, 1)
 })
+
+test('单独 @ 仍唤醒，正文不伪称有图片；真实图片按原样呈现', async t => {
+  const s = setup(t)
+  await s.hub.onMessage(event(' ', H, [at])); await settle()
+  const turn = s.fake.turns[0]
+  assert.match(turn.userText, /@了你：（没有文字）/)
+  assert.equal(turn.images, 0)
+  await s.hub.onMessage({ ...event('', H, [at, { type: 'image', data: { sub_type: 0, file: 'base64://iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5S8AAAAASUVORK5CYII=' } }]), message_id: 2 }); await settle()
+  assert.match(s.fake.turns[1].userText, /@了你：\[图片\]/)
+})

@@ -3293,7 +3293,7 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
     // 时间戳可能同一毫秒：直接取上一轮之后的消息，避免紧接着到达的消息丢失。
     const fresh = buf.filter((x) => !x.fed).slice(-20)
     const older = buf.filter((x) => x.fed).slice(-8)
-    // 这一段里还没转完的群语音：等它一下，免得交给她时那条还是「（图片/表情）」（#197）
+    // 这一段里还没转完的群语音：等它一下，免得交给她时那条只有空正文（#197）
     const pendingVoices = fresh.filter((x) => x.voicePromise && !x.voiceText).map((x) => x.voicePromise)
     if (pendingVoices.length) await Promise.all(pendingVoices)
     for (const x of buf) x.fed = true
@@ -3314,7 +3314,7 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
       need.forEach((x, i) => { x.quote = infos[i] })
     }
     const atLabel = (x) => x.at ? '@了你' : (x.atTargets?.length ? '@了' + x.atTargets.map((t) => `${t.name}(${t.qq})`).join('、') : '')
-    const line = (x) => `[${clockLabel(x.t)}] ${x.nick}(${x.uid})${atLabel(x)}：${x.text || '（图片/表情）'}${x.quote ? ' ' + quoteInline(x.quote) : ''}`
+    const line = (x) => `[${clockLabel(x.t)}] ${x.nick}(${x.uid})${atLabel(x)}：${x.text || '（没有文字）'}${x.quote ? ' ' + quoteInline(x.quote) : ''}`
     // 新消息带编号，她想专门回某一条时可以引用；编号 → QQ 消息 ID 记下来，发的时候换成引用
     const refs = {}
     const numbered = fresh.map((x, i) => {
