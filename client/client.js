@@ -3183,7 +3183,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         active.value.startsWith('ext:')
           ? h(ExtPage, { key: active.value, mod: active.value.slice(4), st, draft, setDraft, toast, reload, embedded: true })
           : h(Card, { key: active.value, title: active.label }, h(VoiceServiceFields, { id: active.value, st, draft, setDraft, toast, reload })),
-        poolId ? h(VoiceKeyPool, { key: poolId, id: poolId, draft, setDraft }) : null)
+        poolId ? h(VoiceKeyPool, { key: 'pool:' + poolId, id: poolId, draft, setDraft }) : null)
     }
 
     function VoiceServiceFields({ id, st, draft, setDraft, toast, reload }) {
