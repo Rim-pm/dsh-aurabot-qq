@@ -173,7 +173,8 @@ export function systemVoiceEngine (platform = process.platform) {
 async function saySynth (text) {
   const file = join(outDir(), `say-${randomUUID()}.wav`)
   const voice = String(process.env.AURABOT_SAY_VOICE || '').trim()
-  const args = ['-o', file, '--data-format=LEI16@16000', ...(voice ? ['-v', voice] : []), text]
+  // `--` 之后一律当文本：否则正文以 `-v`/`--progress` 开头会被 say 当选项解析，甚至转去读 stdin 卡到超时。
+  const args = ['-o', file, '--data-format=LEI16@16000', ...(voice ? ['-v', voice] : []), '--', text]
   const r = await run('say', args, { timeoutMs: 60000 })
   if (!existsSync(file) || statSync(file).size < 1000) throw new Error('系统语音（say）失败：' + (r.err || '').slice(-200))
   return file

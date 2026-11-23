@@ -3,7 +3,8 @@
 // 导出 speak(text) → { file, engine }：聊天中枢发语音时找它。替换这个模块就能换成任何你想要的念法。
 
 import { existsSync, readFileSync } from 'node:fs'
-import { textToSpeech, edgeInstalled, installEdge, voiceConverters, volcanoResourceFor, volcanoSynth } from '../../voice/tts.js'
+import { spawnSync } from 'node:child_process'
+import { textToSpeech, edgeInstalled, installEdge, voiceConverters, volcanoResourceFor, volcanoSynth, systemVoiceEngine } from '../../voice/tts.js'
 import { fishBalances, fishPrimary } from '../../voice/fish.js'
 import { runCloud } from '../../voice/tts.js'
 import { VOLCANO_VOICES } from '../../voice/volcano-voices.js'
@@ -14,8 +15,21 @@ import { status as rimttsStatus, stop as rimttsStop, hot as rimttsHot, prewarm a
 import { createSongVoice } from '../../voice/rvc.js'
 import { toMono16k } from '../../voice/wav.js'
 import { fileOf } from '../../local/local.js'
+
+/** 识别链路只吃 PCM16 WAV：自检拿到 mp3 时先用 ffmpeg 转一道（#255）。 */
+function asPcmWav (file, buf, ffmpegPath = '') {
+  if (buf.length > 4 && buf.toString('ascii', 0, 4) === 'RIFF') return buf
+  const ff = findFfmpeg(ffmpegPath)
+  if (!ff) throw new Error('自检拿到的是 MP3，这台机器没找到 ffmpeg，转不成 WAV；装好 ffmpeg 或在「语音」页改用系统语音')
+  const out = file.replace(/\.[a-z0-9]+$/i, '') + '.16k.wav'
+  const r = spawnSync(ff, ['-y', '-i', file, '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', out], { timeoutMs: 60000, windowsHide: true })
+  if (r.status !== 0 || !existsSync(out)) throw new Error('MP3 转 WAV 失败：' + String(r.stderr || '').slice(-200))
+  return readFileSync(out)
+}
+
 import { asrConfigured, transcribeAudio } from '../../voice/asr.js'
 import { mergeFromPanel, normalize } from '../../core/config.js'
+import { findFfmpeg } from '../../core/img.js'
 
 export default {
   id: 'voice',
@@ -175,15 +189,17 @@ export default {
       return { ok: Boolean(text), heard: text, at: new Date(last.time * 1000).toLocaleString(), ms: Date.now() - t }
     })
     // 自检「听语音」：系统/edge 语音念一句 → 转 16k 单声道 → DSH 自带识别 → 看能不能认回来
-    // 不写死 Windows 语音：macOS 走 say、Windows 走 System.Speech，装了 edge-tts 时先用它（#255）
+    // 不写死 Windows 语音：有系统语音就先用系统语音（Windows System.Speech / macOS say，都是 WAV），
+    // 没有才回落 edge-tts，并把 mp3 用 ffmpeg 转成 WAV 再送识别（#255）。
     api.route('/voice/asr-test', async (req) => {
       const b = await http.body(req)
       const s0 = stt()
       if (!s0 || typeof s0.resolve !== 'function') return { ok: false, message: 'DSH 里没有开启语音识别（设置 → 插件 → 语音输入）' }
       const text = String(b.text || '今天想吃白米饭')
-      const { file } = await textToSpeech(text)
+      const system = systemVoiceEngine()
+      const { file } = await textToSpeech(text, system ? { engine: system } : {})
       const t = Date.now()
-      const spec = s0.resolve({ audio: new Uint8Array(toMono16k(readFileSync(file))) })
+      const spec = s0.resolve({ audio: new Uint8Array(toMono16k(asPcmWav(file, readFileSync(file), api.config().bili?.ffmpegPath || ''))) })
       const r = await s0.transcribe(spec, AbortSignal.timeout(120000))
       const heard = typeof r === 'string' ? r : r?.text || r?.transcript || JSON.stringify(r)
       return { ok: Boolean(heard), said: text, heard, ms: Date.now() - t }
