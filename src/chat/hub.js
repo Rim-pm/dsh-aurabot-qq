@@ -3314,7 +3314,7 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
       need.forEach((x, i) => { x.quote = infos[i] })
     }
     const atLabel = (x) => x.at ? '@了你' : (x.atTargets?.length ? '@了' + x.atTargets.map((t) => `${t.name}(${t.qq})`).join('、') : '')
-    const line = (x) => `[${clockLabel(x.t)}] ${x.nick}(${x.uid})${atLabel(x)}：${x.text || '（没有文字）'}${x.quote ? ' ' + quoteInline(x.quote) : ''}`
+    const line = (x) => `[${clockLabel(x.t)}] ${x.nick}(${x.uid})${atLabel(x)}${x.text ? '：' + x.text : ''}${x.quote ? ' ' + quoteInline(x.quote) : ''}`
     // 新消息带编号，她想专门回某一条时可以引用；编号 → QQ 消息 ID 记下来，发的时候换成引用
     const refs = {}
     const numbered = fresh.map((x, i) => {
