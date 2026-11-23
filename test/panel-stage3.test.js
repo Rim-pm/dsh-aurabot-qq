@@ -323,6 +323,7 @@ test('记忆页折叠卡：向量/重排/整理参数收进「高级调优」折
   assert.ok(adv >= 0, '要有「高级调优」折叠卡')
   const advBlock = mpZone.slice(adv, adv + 12000)
   assert.match(advBlock, /memory\.vector/, '向量检索参数要收进高级调优折叠卡')
+  assert.match(advBlock, /stats\?\.vectorLastError && stats\.vectorLastErrorAt != null[\s\S]*?最近失败[\s\S]*?vectorLastErrorAt[\s\S]*?toLocaleString\(\)[\s\S]*?stats\.vectorLastError/, '向量卡同时显示最近失败原因和时间')
   assert.match(advBlock, /memory\.rerank/, '重排参数要收进高级调优折叠卡')
   assert.match(advBlock, /memory\.retentionBase|分层|遗忘/, '分层遗忘/整理参数要收进高级调优折叠卡')
   // 聊天流水留存等原配置键不动（MemoryPage 区域里，键名没被改名）

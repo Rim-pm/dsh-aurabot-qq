@@ -3926,7 +3926,7 @@ export function createMemoryStore({ dsh, getConfig, hub, log, fetchImpl, setConf
       const vmodel = (vector && typeof vector.modelStatus === 'function') ? vector.modelStatus() : null
       // vectorLocal：明确告诉面板「记忆联想现在能不能生效」。
       // 向量没就绪时它原本什么都不显示，用户只会以为「开关打开了却没反应」。
-      return { factTiers: factTierList, count: live.length, auto: live.filter((m) => m.source === 'auto').length, events: live.filter((m) => m.source === 'event').length, outdated: items.length - live.length, vector: vcount, vectorReady: vecReady, vectorMode: vecMode, vectorModel: vmodel || (vstat ? { present: vecReady, running: false, error: String(vstat.lastError || '') } : null), vectorLocal: { wanted: vecCfg.enabled !== false && vecMode === 'local', ready: vecReady, enabled: vecCfg.enabled !== false }, assoc: Math.round(assocEdges / 2), assocAt: state.assocBuiltAt || 0, tierSince: live.filter((m) => m.tierSince).length }
+      return { factTiers: factTierList, count: live.length, auto: live.filter((m) => m.source === 'auto').length, events: live.filter((m) => m.source === 'event').length, outdated: items.length - live.length, vector: vcount, vectorReady: vecReady, vectorMode: vecMode, vectorLastError: vstat?.lastError || '', vectorLastErrorAt: vstat?.lastErrorAt ?? null, vectorModel: vmodel || (vstat ? { present: vecReady, running: false, error: String(vstat.lastError || '') } : null), vectorLocal: { wanted: vecCfg.enabled !== false && vecMode === 'local', ready: vecReady, enabled: vecCfg.enabled !== false }, assoc: Math.round(assocEdges / 2), assocAt: state.assocBuiltAt || 0, tierSince: live.filter((m) => m.tierSince).length }
     },
   }
 }
