@@ -156,7 +156,13 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
       && (chatId === 'private:' + r.qq || (chatId.startsWith('group:') && message.role === 'user' && message.speakerId === r.qq))
       && (!r.query || matchesMemoryKeyword(message.text, r.query)))
   const conversationArchive = (namespace = String(getConfig().persona?.current || 'default')) => {
-    if (!archives.has(namespace)) archives.set(namespace, createConversationArchive({ directory: dataDir('conversation-context'), namespace, visible: conversationVisible }))
+    // visibleKey：忘了谁 / 清了谁的记忆都会改变可见性，切块缓存要跟着整份重建。
+    if (!archives.has(namespace)) archives.set(namespace, createConversationArchive({
+      directory: dataDir('conversation-context'),
+      namespace,
+      visible: conversationVisible,
+      visibleKey: () => conversationRules().length + '|' + JSON.stringify(memoryCutoffs(namespace)),
+    }))
     return archives.get(namespace)
   }
   // 心情对行为的影响（表情 / 语音概率、回复快慢、插话积极程度），没接就是 1
