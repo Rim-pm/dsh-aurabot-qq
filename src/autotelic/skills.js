@@ -335,7 +335,15 @@ export function createSkillStore(root, opts = {}) {
     snapshot(files)
     const topic = entries[0].meta.kind || (entries[0].meta.tags || [])[0] || entries[0].meta.id
     let distilled = null
-    try { distilled = distill ? distill(entries.map((e) => ({ id: e.meta.id, title: e.meta.title, kind: e.meta.kind, tags: e.meta.tags, content: sectionOf(e.body, '内容'), origin: sectionOf(e.body, '来历') }))) : null } catch (error) { log(`提炼调用失败，走模板兜底：${error?.message || error}`) }
+    let pending = null
+    try {
+      const out = distill ? distill(entries.map((e) => ({ id: e.meta.id, title: e.meta.title, kind: e.meta.kind, tags: e.meta.tags, content: sectionOf(e.body, '内容'), origin: sectionOf(e.body, '来历') }))) : null
+      // 注入点可能是异步的（模块壳的 distillViaLlm 要等一次 LLM 调用）：不能把 Promise 当数组用，
+      // 更不能让它的拒绝逃出去——dsh-app-boot 把 unhandledRejection 当 fatal 直接 exit(1)，
+      // 以前这里一次「上一轮还没结束」就能把整个进程带走。先落模板兜底，结果回来再补写正文。
+      if (out && typeof out.then === 'function') pending = out
+      else distilled = out
+    } catch (error) { log(`提炼调用失败，走模板兜底：${error?.message || error}`) }
     const first = Array.isArray(distilled) ? distilled[0] : null
     const id = validId(first?.id) || slug(topic, '') || validId(entries[0].meta.id)
       || `skill-${stampOf(new Date(now())).slice(8, 20).toLowerCase()}`
@@ -357,6 +365,18 @@ export function createSkillStore(root, opts = {}) {
     // 不删的话同 id 的记忆副本会在 priority 解析下遮住技能条目，score 更新就落错层。
     for (const e of entries) { try { unlinkSync(e.file) } catch {} }
     touchIndex()
+    if (pending) {
+      // 异步提炼结果回来：按修订口径补正文（保留 score/uses，先快照），失败只记日志——
+      // 这条链路绝不能抛出未处理拒绝，否则又回到「一次 LLM 抖动炸整个 dsh 进程」。
+      pending.then((arr) => {
+        const f = Array.isArray(arr) ? arr[0] : null
+        if (!f || typeof f !== 'object') return
+        const content = String(f.content || '').trim()
+        const title = String(f.title || '').trim()
+        if (!content && !title) return
+        try { revise(id, { content: content || undefined, title: title || undefined }) } catch (error) { log(`异步提炼补写失败（模板兜底已落盘）：${error?.message || error}`) }
+      }, (error) => { log(`提炼调用失败，模板兜底已落盘：${error?.message || error}`) }).catch((error) => { log(`异步提炼补写失败（模板兜底已落盘）：${error?.message || error}`) })
+    }
     return id
   }
 
