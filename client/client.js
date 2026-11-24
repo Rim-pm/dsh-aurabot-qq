@@ -8924,9 +8924,9 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           h('input', { className: 'ab-input', value: input, type: 'password', autoComplete: 'off', placeholder: waiting ? '粘贴完整回调地址' : '完成浏览器登录后再粘贴', onChange: (e) => setInput(e.target.value) }),
           h(Btn, { small: true, onClick: act('/image/codex/complete', { input }), disabled: busy || !waiting || !input.trim() }, '完成登录'),
           waiting ? h(Btn, { small: true, onClick: act('/image/codex/cancel'), disabled: busy }, '取消登录') : null) : null,
-        h(Row, { label: '模型', hint: '可用模型由服务端决定' }, f.select('imageGen.codex.model', [
-          { value: 'gpt-image-2', label: 'gpt-image-2' }, { value: 'gpt-image-2.5-flare', label: 'gpt-image-2.5-flare' }, { value: 'gpt-image-2.5-sunburst', label: 'gpt-image-2.5-sunburst' },
-        ], { width: 260 })),
+        // 预设只是提示，模型名允许自己填（#256）：新模型出现时不用改源码。
+        h(Row, { label: '模型', hint: '常用：gpt-image-2 / gpt-image-2.5-flare / gpt-image-2.5-sunburst；也可直接填服务端支持的自定义模型名' },
+          h('input', { className: 'ab-input', style: { width: 260 }, value: draft.imageGen?.codex?.model ?? '', onChange: (e) => setDraft(setPath(draft, 'imageGen.codex.model', e.target.value)) })),
         h(Row, { label: '质量', hint: '所选模型需支持该选项' }, f.select('imageGen.codex.quality', ['auto', 'low', 'medium', 'high', 'xhigh', 'max'].map((value) => ({ value, label: value })), { width: 180 })),
         h(Row, { label: '背景' }, f.select('imageGen.codex.background', ['auto', 'opaque', 'transparent'].map((value) => ({ value, label: value })), { width: 180 })),
         h('div', { className: 'ab-muted ab-small' }, '订阅接法通过构图提示引导，实际尺寸由服务端选择。'),

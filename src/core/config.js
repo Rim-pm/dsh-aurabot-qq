@@ -1165,7 +1165,10 @@ export function normalize(raw) {
     .slice(0, 20)
   if (!isObj(c.imageGen.codex)) c.imageGen.codex = { ...DEFAULTS.imageGen.codex }
   const igx = c.imageGen.codex
-  igx.model = ['gpt-image-2', 'gpt-image-2.5-flare', 'gpt-image-2.5-sunburst'].includes(igx.model) ? igx.model : 'gpt-image-2'
+  // 只校验格式，不再按固定白名单改写：#256 —— 预设之外的合法模型名要原样保留，
+  // 服务端到底支不支持由实际请求结果说话（静默换成别的模型比报错更难查）。
+  igx.model = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,79}$/.test(String(igx.model || '').trim())
+    ? String(igx.model).trim() : DEFAULTS.imageGen.codex.model
   igx.quality = ['auto', 'low', 'medium', 'high', 'xhigh', 'max'].includes(igx.quality) ? igx.quality : 'auto'
   igx.background = ['auto', 'transparent', 'opaque'].includes(igx.background) ? igx.background : 'auto'
   if (!c.imageGen.custom || typeof c.imageGen.custom !== 'object') c.imageGen.custom = { ...DEFAULTS.imageGen.custom }
