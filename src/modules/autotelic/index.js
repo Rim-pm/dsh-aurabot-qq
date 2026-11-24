@@ -154,6 +154,7 @@ export default {
     // 情绪观察桥（§9.2 R12）：mood 模块的情绪状态 advancing → 一条 source=emotion 观察。
     // 轮询接线（宿主 session/event 不直达模块；轮询是既有模块惯例），接不到就惰性 not-wired。
     let lastEmoAt = 0
+    let lastEmoKey = ''
     const emotionBridge = createEmotionBridge({
       observe,
       fetchEmotions: () => {
@@ -164,7 +165,8 @@ export default {
         const top = s.emotionTop?.[0]?.key
           || (s.emotions && Object.entries(s.emotions).sort((a, b) => (b[1] || 0) - (a[1] || 0))[0]?.[0])
           || ''
-        if (!top) return []
+        if (!top || top === lastEmoKey) return []
+        lastEmoKey = top
         return [{ text: `这阵子心里主要的感觉是「${top}」`, tag: '牵挂', salience: 0.6, ts: Number(s.emotionsAt) }]
       },
     })
@@ -308,9 +310,14 @@ export default {
 
       // 3) 观察窗口（近端 3 天原文；ts → plan 契约的 at；抑制/park 中 tag 的观察不进窗口）
       const since = Date.now() - 3 * 24 * 3600_000
-      const window = observe.list({ since, limit: 120 })
+      const kept = observe.list({ since, limit: 100000 })
+        .filter((r) => c.feedback.weightOf(r.tag) > 0)
+      const window = [
+        ...kept.filter((r) => r.source === 'chat').slice(-40),
+        ...kept.filter((r) => r.source !== 'chat').slice(-40),
+      ]
+        .sort((a, b) => a.ts - b.ts)
         .map((r) => ({ id: r.id, at: r.ts, source: r.source, tag: r.tag, text: r.text }))
-        .filter((o) => c.feedback.weightOf(o.tag) > 0)
       if (window.length < 2) return { outcome: 'skipped-no-observation' }
 
       // 4) 人格锚 + 本能附加段 + 技能索引 + 自身状态薄摘要（§9.3：前缀段稳定可缓存）
@@ -907,6 +914,7 @@ export default {
       return {
         ok: true,
         enabled: !!cfg.enabled,
+        running: !!schedule.view().inFlight,
         quiet: { now: quietNow(), quietStart: quiet.quietStart, quietEnd: quiet.quietEnd, awakeFrom: cfg.awakeFrom, awakeTo: cfg.awakeTo },
         audit: { wired: auditWired(), dir: auditDir(), today: countToday(auditDir()), chain },
         summary: book.summary(),

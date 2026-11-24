@@ -837,6 +837,7 @@ export function apply(ctx) {
     defaultModel: () => defaultModel(ctx, { model: {} }),
     http: { body: readBody, raw: readRaw, query, send },
     media: createMediaAccess({ root: ROOT, use, config: getConfig }),
+    identity: { owner: () => String(cfg.ownerQQ || '') },
     personas: {
       list: listPersonas, read: readPersona, current: () => currentPersonaText(cfg.persona.current),
       look: (sessionId) => {
