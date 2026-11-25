@@ -146,6 +146,39 @@ test('记忆→技能：提炼调用走注入点 distill（一次 LLM 调用的�
   assert.ok(s2.list('skills').length >= 1, '模板兜底照样晋升')
 })
 
+test('记忆→技能：异步 distill（真机走 hub.runSystemTurn）先落模板兜底，结果回来再补正文', async () => {
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const s = mkStore({ distill: async () => { await gate; return [{ title: '异步提炼法', content: '等 LLM 回来的正文' }] } })
+  for (let i = 0; i < 3; i++) s.ingestReflection({ roundId: `a-${i}`, tag: '异步', lesson: `第${i}条` })
+  const id = s.list('skills')[0]?.meta.id
+  assert.ok(id, 'Promise 不能被当数组用，模板兜底先落盘')
+  assert.equal(s.get(id).meta.layer, 'skills')
+  assert.match(readFileSync(s.get(id).file, 'utf8'), /异步/, '兜底正文来自记忆片段')
+  release()
+  await new Promise((resolve) => setImmediate(resolve))
+  await new Promise((resolve) => setImmediate(resolve))
+  const doc = s.get(id)
+  assert.ok(doc.body.includes('等 LLM 回来的正文'), '异步结果补写了正文')
+  assert.equal(doc.meta.score, 0.5, '补写不动 score')
+})
+
+test('记忆→技能：异步 distill 拒绝不许冒成未处理拒绝（否则 dsh-app-boot 会 fatal exit）', async () => {
+  const seen = []
+  const onRejection = (error) => seen.push(error)
+  process.on('unhandledRejection', onRejection)
+  try {
+    const s = mkStore({ distill: async () => { throw new Error('这个后台会话的上一轮还没结束') } })
+    for (let i = 0; i < 3; i++) s.ingestReflection({ roundId: `r-${i}`, tag: '拒绝', lesson: `第${i}条` })
+    const id = s.list('skills')[0]?.meta.id
+    assert.ok(id, '拒绝也要靠模板兜底完成晋升')
+    await new Promise((resolve) => setImmediate(resolve))
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(seen.length, 0, '没有未处理拒绝')
+    assert.equal(s.get(id).layer, 'skills')
+  } finally { process.off('unhandledRejection', onRejection) }
+})
+
 test('技能→本能：uses≥5 且 score≥0.8 自动晋升 instinct/ + 写人格卡附加段（写前快照，写坏只影响附加段）', () => {
   const personaFile = join(root, 'personas', 'dafeiyu.md')
   mkdirSync(join(root, 'personas'), { recursive: true })

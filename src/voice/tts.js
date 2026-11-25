@@ -9,6 +9,7 @@ import { fishSpeech } from './fish.js'
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, statSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { buildWav } from './wav.js'
+// RimTTS 引擎已弃用（见 rimtts.js 头部与 docs/RIM-TTS.md）：保留挂载，切换引擎后不再走到。
 import { rimttsSynth } from './rimtts.js'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
@@ -555,6 +556,7 @@ export async function textToSpeech(text, opt = {}, log) {
   if (!clean) throw new Error('没有要念的文字')
   let file = ''
   let engine = ''
+  // rimtts 已弃用：保留映射只为让旧配置（engine=rimtts）继续能用，切换引擎后这段不会被命中。
   const local = { cosyvoice: cosyvoiceSynth, gptsovits: gptsovitsSynth, http: httpSynth, volcano: volcanoSynth, breeze: breezeSynth, minimax: minimaxSynth, rimtts: rimttsSynth }[opt.engine]
   if (opt.engine === 'fish-free') {
     file = saveAudio(await runCloud('fish-free', opt.fishApiKey, opt.keyPools?.['fish-free'], key => fishSpeech(clean, key, undefined, opt.fishReferenceId)))
