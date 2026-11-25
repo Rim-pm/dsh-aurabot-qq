@@ -132,9 +132,9 @@ export default {
       const labeled = content.flatMap((block) => {
         if (block.type !== 'image') return [block]
         const item = recent.find((x) => /^-?[1-9]\d*$/.test(x.messageId || '') && block.name === `qqref-${x.messageId}-${x.imageIndex}`)
-        return item ? [{ type: 'text', text: `【参考图 msg:${item.messageId}:${item.imageIndex}，发送者 QQ ${item.userId}】` }, block] : [block]
+        return item ? [{ type: 'text', text: `【聊天图片 msg:${item.messageId}:${item.imageIndex}，发送者 QQ ${item.userId}】` }, block] : [block]
       })
-      return [...labeled, { type: 'text', text: '【绘图参考】改图优先将目标图旁的 msg 编号填入 image；编号指向固定图片，不随群友新图变化。没有编号时才按明确的目标选择 quote/last；缺图或不确定时请对方引用原图，不能省略参考图生成一张新图来代替。' }]
+      return [...labeled, { type: 'text', text: '新画以请求者指定的人物或作品为准，旁人的图片只是聊天背景，不把其中的人物或外形写进新画。对方要照某张图画或修改它时，优先用目标图旁的 msg 编号；没有编号才用明确指向目标的 quote/last。要改的原图不明确或缺失时，请对方引用它，不能省略参考图生成一张新图来代替。' }]
     })
     api.tool(({ chat, sessionId }) => ((chat.kind !== 'system' && canDraw()) ? defineTool({
       name: 'qq_draw_image',
