@@ -45,7 +45,7 @@ function loadPanel() {
   const marker = '    exports.apply = apply'
   assert.ok(source.includes(marker), 'client.js 的导出锚点变了，测试要跟着改')
   const script = new Script(
-    source.replace(marker, '    exports.panelTest = { TABS, TAB_MODS, NAV_GROUPS, NAV_ALIAS, MANAGE_FEATURES, Manage, VoiceTab, Voice, VoiceServiceFields, Asr, AsrStatus, Card }\n' + marker),
+    source.replace(marker, '    exports.panelTest = { TABS, TAB_MODS, NAV_GROUPS, NAV_ALIAS, MANAGE_FEATURES, Manage, VoiceTab, Voice, VoiceServices, VoiceServiceFields, Asr, AsrStatus, Card }\n' + marker),
     { filename: 'client/client.js' },
   )
   const store = new Map()
@@ -229,6 +229,18 @@ test('未选 Fish、没有外接模块也可配置 Fish；只看服务不合成�
   assert.ok(text(tree).includes('音色 ID'))
   assert.equal(p.calls.length, 0)
   assert.equal(p.intervals.length, 0)
+})
+
+test('扩展服务：服务表单和多账号卡片的 React key 不冲突，切换时不残留旧表单', () => {
+  const { panelTest } = loadPanel()
+  const draft = { voice: { http: { headers: 'Authorization: Bearer {apiKey}' } } }
+  for (const selected of ['fish-free', 'http', 'breeze', 'minimax', 'volcano']) {
+    const { children } = panelTest.VoiceServices({ selected, draft })
+    const [, form, accounts] = children
+    assert.equal(form.children[0].props.id, selected)
+    assert.equal(accounts.props.id, selected)
+    assert.notEqual(form.props.key, accounts.props.key, selected)
+  }
 })
 
 test('Breeze 服务的音色在前，签到单独展开；本地模式不出现账户选项', () => {

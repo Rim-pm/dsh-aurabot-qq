@@ -521,7 +521,7 @@ export function apply(ctx) {
       if (!cmd) return null
       if (!ownerStillCurrent()) {
         const key = delegatedCommandKey(cmd)
-        if (!canUseDelegatedCommand(getConfig(), msg, key)) return '你没有使用这个命令的权限，请联系主人设置。'
+        if (!canUseDelegatedCommand(getConfig(), msg, key)) return '这条命令没有执行，你当前没有使用权限。'
         if (key === 'help') {
           const list = commandList(commands).filter((item) => canUseDelegatedCommand(getConfig(), msg, delegatedCommandKey(parseCommand('/' + item.name, commands))))
           return '你可以使用的命令：\n' + list.map((item) => {
@@ -837,6 +837,7 @@ export function apply(ctx) {
     defaultModel: () => defaultModel(ctx, { model: {} }),
     http: { body: readBody, raw: readRaw, query, send },
     media: createMediaAccess({ root: ROOT, use, config: getConfig }),
+    identity: { owner: () => String(cfg.ownerQQ || '') },
     personas: {
       list: listPersonas, read: readPersona, current: () => currentPersonaText(cfg.persona.current),
       look: (sessionId) => {

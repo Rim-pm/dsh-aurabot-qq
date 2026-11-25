@@ -371,7 +371,7 @@ test('参考图提示追加在本条消息后，不改原消息、不改历史�
   const owner = drawTool(cfg), guest = drawTool(cfg, { turnSendersAllOwner: () => false })
   const original = [{ type: 'text', text: '请改这张图' }, { type: 'image', attachment: 'test-image' }]
   const out = owner.prompt(original, groupChat), text = out.at(-1).text
-  assert.match(text, /改图优先将目标图旁的 msg 编号填入 image/)
+  assert.match(text, /新画以请求者指定的人物或作品为准.*优先用目标图旁的 msg 编号/)
   assert.match(text, /不能省略参考图生成一张新图来代替/)
   assert.deepEqual(out.slice(0, -1), original)
   assert.equal(original.length, 2)
@@ -462,9 +462,9 @@ test('标签紧贴对应图片，发送者/编号只进入新消息，未知来�
   ]
   const out = s.prompt(original, groupChat)
   assert.equal(out[0], original[0])
-  assert.equal(out[1].text, '【参考图 msg:602:1，发送者 QQ 10000002】')
+  assert.equal(out[1].text, '【聊天图片 msg:602:1，发送者 QQ 10000002】')
   assert.equal(out[2], original[1])
-  assert.equal(out[3].text, `【参考图 msg:-601:1，发送者 QQ ${OWNER}】`)
+  assert.equal(out[3].text, `【聊天图片 msg:-601:1，发送者 QQ ${OWNER}】`)
   assert.equal(out[4], original[2])
   assert.equal(out[5], original[3], '未绑定的合并转发图不借用同名附件编号')
   assert.equal(original.length, 4)

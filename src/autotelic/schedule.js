@@ -140,7 +140,10 @@ export function createSchedule({ settings, file = '', run, now = () => Date.now(
       state.lastRunAt = startedAt
       state.nextFireAt = 0
       state.countToday += 1
-      state.lastOutcome = meta.scheduled ? 'tick' : reason
+      const tail = result && typeof result === 'object'
+        ? String(result.outcome || (result.why ? `silent/${result.why}` : '') || '')
+        : ''
+      state.lastOutcome = `${meta.scheduled ? 'tick' : reason}${tail ? `→${tail}` : ''}`
       state.lastSkip = null
       save()
       // 定时轨：跑完立刻排下一次（含直方图轻推）

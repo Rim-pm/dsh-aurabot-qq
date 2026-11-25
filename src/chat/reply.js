@@ -10,7 +10,7 @@
 //   - 整轮只输出 `[沉默]`（或空）= 这次不说话（群聊插话用）
 // 另外顺手把模型偶尔漏出来的 Markdown 洗掉——QQ 不渲染 Markdown。
 
-import { chatRecordRanges, contextInjectionRanges, currentPromptSources, memoryTranscriptRanges, promptFingerprint, promptTextRanges } from '../security/leak-guard.js'
+import { chatRecordRanges, contextInjectionRanges, currentPromptSources, imageHandleRanges, memoryTranscriptRanges, promptFingerprint, promptTextRanges } from '../security/leak-guard.js'
 import { stripWrapMarkers } from './wrap-up.js'
 import { stripMarkers } from './reply-marker.js'
 import { stripHtmlFragments, fenceRanges } from './html-fragments.js'
@@ -378,7 +378,7 @@ const FULLWIDTH = (s) => String(s || '').replace(/[！-～]/g, (c) => String.fro
 // 「解释格式/示例」的上下文：这类回答里的代码块/示例不该被工具删除掏空。
 const EXPLAIN_CONTEXT = /(?:例如|比如|示例|例子|举例|解释|说明|格式|写法|怎么写|怎样写|如何写|这样写|这么写|写成|教我|模板|代码如下|代码块|演示|demo|example|提示词|标签)/i
 const PROTO_ATTRS = /^(?:name|arguments?|input|id|callid|type|function|parameters?|parameter|prompt|content|text|json|args|new|old|value|tool|query|q)$/
-const PROTO_NAMES = ['functioncalls', 'functioncall', 'toolcalls', 'toolcall', 'tooloutputs', 'tooloutput', 'toolsection', 'tooluse', 'parameter', 'parameters', 'invoke', 'calls', 'call', 'prompt']
+const PROTO_NAMES = ['functioncalls', 'functioncall', 'toolcalls', 'toolcall', 'tooloutputs', 'tooloutput', 'toolsection', 'tooluse', 'parameter', 'parameters', 'invoke', 'calls', 'call', 'prompt', 'outputs', 'output', 'results', 'result', 'observations', 'observation']
 
 /** 代码围栏 / 行内代码范围：解释语境下里面的工具示例保留。 */
 function codeRanges (raw) {
@@ -627,7 +627,7 @@ function toolTextRanges (raw, { ownerPrivate = false } = {}) {
 
   // 4) 通用下划线标签：只认 tool/param/invoke 类名（<x_1>、<snake_case> 这类正常文字不删）
   // 只认协议类名和本插件已知的工具名前缀（qq_/bili_/...），避免 <x_1>、<snake_case> 这类正常文字被误删。
-  for (const match of raw.matchAll(/[<＜]\s*[\/／]?\s*(?:tool|function|invoke|param(?:eter)?|antml|dsml|arguments?|call|qq|bili|qzone|song|pet|memory|mood|sticker|diary|video|voice|contact|profile|purpose|speak|draw|image|send|get|set)[_:\s]+[a-z0-9_]+["＂]?\s*[>＞]/gi)) {
+  for (const match of raw.matchAll(/[<＜]\s*[\/／]?\s*(?:tool|function|invoke|param(?:eter)?|antml|dsml|arguments?|call|outputs?|results?|observations?|qq|bili|qzone|song|pet|memory|mood|sticker|diary|video|voice|contact|profile|purpose|speak|draw|image|send|get|set)[_:\s]+[a-z0-9_]+["＂]?\s*[>＞]/gi)) {
     if (toolTag(match[0])) continue // 已知协议标签已单独处理，这里只补通用下划线形式
     found.push({ start: match.index, end: match.index + match[0].length, kind: 'generic', paired: false })
   }
@@ -708,8 +708,10 @@ export function cleanOutboundText(text, { warn, promptSources, fingerprint, user
   // 这是所有出站口的**公共必经点**，放这里一次就覆盖 deliver / sendText / sendSegments / 语音 /
   // 模块快捷 API 全部出口，不必在每个出口各写一遍。
   const acpRanges = acpLeakRanges(raw)
-  const noiseCount = toolRanges.length + contextRanges.length + htmlCuts.length + acpRanges.length
-  const tools = [...toolRanges, ...contextRanges, ...silence, ...stateRanges, ...recordRanges, ...pokeRanges, ...memoRanges, ...acpRanges]
+  // 图片句柄与真实附件路径（#518）同样在这一层一次收干净。
+  const imageRanges = imageHandleRanges(raw)
+  const noiseCount = toolRanges.length + contextRanges.length + htmlCuts.length + acpRanges.length + imageRanges.length
+  const tools = [...toolRanges, ...contextRanges, ...silence, ...stateRanges, ...recordRanges, ...pokeRanges, ...memoRanges, ...acpRanges, ...imageRanges]
     .sort((a, b) => a.start - b.start || b.end - a.end)
   const baseRanges = mergeRanges([...tools, ...htmlCuts, ...mediaCuts])
   const toolClean = withoutToolRanges(raw, baseRanges)
@@ -810,12 +812,26 @@ function normalizeParamTags (text) {
   })
 }
 
+/** 完整语音块中的分条标记作为停顿，不能先拆断标签；代码示例和嵌套标签不改写。 */
+function joinVoiceBubbles(text) {
+  return text.replace(/```[\s\S]*?```|`[^`\n]+`|<voice>([\s\S]*?)<\/voice>/g, (block, speech) => {
+    if (speech === undefined || /<\/?voice\b/i.test(speech)) return block
+    return `<voice>${speech.replace(/\|{3,}/g, '\n')}</voice>`
+  })
+}
+
 /** 解析一轮回复；在拆气泡/语音前清洗，避免协议里的竖线被误作气泡分隔符。 */
 export function parseReply(text, options) {
+  const original = String(text || '')
+  const quotedCode = codeRanges(original)
+  // Repair a model's missing '<' only at a bubble/line prefix; preserve code examples.
+  const repaired = original.replace(/(^|\n|\|{3,})([ \t]*)\/reply:\s*(\d+)\s*>/gi, (tag, boundary, space, id, offset) =>
+    insideCode(quotedCode, offset + boundary.length, offset + tag.length) ? tag : `${boundary}${space}<reply:${id}>`)
+
   // 模型偶尔把「戳人」写成方括号动作（[戳了戳你：尾巴往回一收]），插件不认这种写法，
   // 会原样当文字发出去。这里统一转成 <poke>，让戳一戳变成真的系统动作。
   // 模型偶尔写中文参数标签 <参数 name="sticker">…<参数>，同样在解析前归一成协议标签。
-  const forwarded = normalizeParamTags(String(text || '')).replace(/[[【]\s*戳了戳(?:你|他|她)?[^\]】]*[\]】]/g, '<poke>')
+  const forwarded = normalizeParamTags(repaired).replace(/[[【]\s*戳了戳(?:你|他|她)?[^\]】]*[\]】]/g, '<poke>')
   // 模型偶尔把换行写成 HTML `<br>`：当真正的换行处理；代码示例里的字面量保留。
   // 收尾 / 等待的标记先摘掉：它是给插件看的，不是要发出去的字（调用方通常已经摘过一次，这里兜底）
   const cleaned = stripWrapMarkers(stripModelArtifacts(cleanOutboundText(forwarded, options)))
@@ -836,7 +852,7 @@ export function parseReply(text, options) {
     }
   }
   // 连续多写的竖线仍是同一个分隔符，避免 |||| 拆完残留一条 | 消息。
-  for (const bubble of raw.split(/\|{3,}/)) {
+  for (const bubble of joinVoiceBubbles(raw).split(/\|{3,}/)) {
     const part = bubble.trim()
     if (!part) continue
     // 依次切出 poke / reply / voice / sticker / markdown 图片，其余是文字
@@ -885,18 +901,26 @@ export function parseReply(text, options) {
 
 const MAX_BUBBLES = 5
 
-/** 文字气泡最多 5 条，多出来的并进最后一条（防止刷屏）。 */
+/** 优先合并靠后的相邻文字，尽量收在 5 条内。媒体和新的引用各自保留位置。 */
 function capBubbles(items) {
-  const texts = items.filter((i) => i.kind === 'text')
-  if (texts.length <= MAX_BUBBLES) return items
-  const keep = new Set(texts.slice(0, MAX_BUBBLES - 1))
-  const tail = texts.slice(MAX_BUBBLES - 1)
-  const merged = { kind: 'text', value: tail.map((t) => t.value).join('\n') }
+  let excess = items.filter(item => item.kind === 'text').length - MAX_BUBBLES
+  if (excess <= 0) return items
+
+  // 从后往前挑可以合并的边界，纯文字仍然先保留前四条。
+  const joinPrevious = new Set()
+  for (let i = items.length - 1; i > 0 && excess > 0; i--) {
+    if (items[i].kind === 'text' && !items[i].replyTo && items[i - 1].kind === 'text') {
+      joinPrevious.add(i)
+      excess--
+    }
+  }
   const out = []
-  let placed = false
-  for (const it of items) {
-    if (it.kind !== 'text' || keep.has(it)) out.push(it)
-    else if (!placed) { out.push(merged); placed = true }
+  for (let i = 0; i < items.length; i++) {
+    const first = items[i]
+    if (!joinPrevious.has(i + 1)) { out.push(first); continue }
+    const lines = [first.value]
+    while (joinPrevious.has(i + 1)) lines.push(items[++i].value)
+    out.push({ ...first, value: lines.join('\n') })
   }
   return out
 }

@@ -46,6 +46,9 @@ export function parseCommand(text, extra = []) {
   return best.ext ? { name: best.ext.name, arg, ext: best.ext } : { name: best.name, arg }
 }
 
+// Only command-shaped messages: ordinary paths, URLs and prose remain chat content.
+export const isSlashCommand = (text) => /^[/／]\s*[A-Za-z一-龥][A-Za-z0-9一-龥_-]*(?:\s+[\s\S]*)?$/.test(String(text || '').trim())
+
 const ALIASES = {
   群设置: 'groupsettings',
   闭嘴: 'silent', 安静: 'silent', 静音: 'silent', shutup: 'silent', mute: 'silent',

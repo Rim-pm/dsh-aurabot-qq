@@ -3144,10 +3144,29 @@ export function createMemoryStore({ dsh, getConfig, hub, log, fetchImpl, setConf
   let consolidateDeferLogged = false
   let idleDeferLogged = false
   let vectorDeferLogged = false
+  let turnYieldLogged = false
+
+  /**
+   * 她正在跟人说话（聊天/工具回合进行中）：后台提炼要让路。
+   *
+   * issue #376：空闲提炼单轮最多连发 12 次模型调用，和交互回合抢同一个端点，实测把她的一轮
+   * 卡到六分钟不出字，用户只看到「她不说话了」。这里在每批模型调用前问一次 hub，
+   * 有回合在跑就立刻收手；已完成的批次已 checkpoint，下一轮 tick 从断点继续，不丢进度。
+   */
+  function turnInProgress() {
+    try { return hub?.busy?.() === true } catch { return false }
+  }
+  function noteTurnYield() {
+    if (!turnYieldLogged) {
+      log.debug?.('她有回合正在进行：后台提炼先让路，等空闲再继续（进度已保存，不会丢）')
+      turnYieldLogged = true
+    }
+  }
 
   /**
    * 整理临时记忆。
-   * @param {{includeToday?:boolean}} o includeToday：连今天的也提炼（手动整理时），但今天的流水不删（写日记还要用）
+   * @param {{includeToday?:boolean, background?:boolean}} o includeToday：连今天的也提炼（手动整理时），但今天的流水不删（写日记还要用）；
+   *   background：这是后台定时整理，有回合在跑时让路。手动整理（面板/命令）传 false，人已经点了就得跑完。
    */
   async function consolidate(o = {}) {
     if (busy) return { ok: false, message: '正在整理中' }
@@ -3196,6 +3215,8 @@ export function createMemoryStore({ dsh, getConfig, hub, log, fetchImpl, setConf
               while (n < lines.length && (lines[n].line.forgottenAt || isIdleDone(progress, lines[n].index))) n++
               if (n >= lines.length) break
               if (batches >= EXTRACT_LIMIT) { stopped = true; break }
+              // issue #376：她正在回话/跑工具时先让路，别抢同一个模型端点把她的一轮挤死。
+              if (o.background && turnInProgress()) { noteTurnYield(); stopped = true; break }
               if (!takeBatch()) { stopped = true; budgetExhausted = true; break }
               const part = []
               let end = n
@@ -3463,6 +3484,8 @@ export function createMemoryStore({ dsh, getConfig, hub, log, fetchImpl, setConf
               return line?.chatId === q.chatId && !line.forgottenAt ? [{ index, line }] : []
             })
             if (!part.length) { progressed = true; continue }
+            // issue #376：空闲提炼同样要给交互回合让路（之前已 checkpoint 的进度保留）。
+            if (turnInProgress()) { noteTurnYield(); return { ok: true, batches, yielded: true } }
             if (!takeBatch()) return { ok: true, batches }
             const version = forgetVersion
             const key = `idle:${task.day}:${q.chatId}:${part[0].index}`
@@ -3566,7 +3589,7 @@ export function createMemoryStore({ dsh, getConfig, hub, log, fetchImpl, setConf
       return mins >= hh * 60 + mm && runs[t] !== today
     })
     if (Date.now() < retryAt || busy) return
-    const r = due.length ? await consolidate({ includeToday: true }) : cfg.extractIdleMinutes > 0 ? await extractIdle() : { ok: true }
+    const r = due.length ? await consolidate({ includeToday: true, background: true }) : cfg.extractIdleMinutes > 0 ? await extractIdle() : { ok: true }
     if (r.busy) return
     // 失败后退避：10 分钟起步翻倍，最多 2 小时，不每分钟打一次模型
     failures = r.ok ? 0 : failures + 1
@@ -3701,6 +3724,8 @@ export function createMemoryStore({ dsh, getConfig, hub, log, fetchImpl, setConf
     for (const [qq, rows] of groups) {
       if (!canProfile(qq)) continue
       if (calls >= EXTRACT_LIMIT || busy || shouldDeferBackground(getConfig())) break
+      // issue #376：短期印象也是模型调用，同样不能跟交互回合抢。
+      if (turnInProgress()) { noteTurnYield(); break }
       const last = Number(rows.at(-1).t)
       const old = shortTermOf(qq)
       const switched = shortSwitch.has(qq) || rows.some((row, i) => i > 0 && Number(row.t) > (old?.through || 0) && (row.via || '') !== (rows[i - 1].via || ''))
@@ -3901,7 +3926,7 @@ export function createMemoryStore({ dsh, getConfig, hub, log, fetchImpl, setConf
       const vmodel = (vector && typeof vector.modelStatus === 'function') ? vector.modelStatus() : null
       // vectorLocal：明确告诉面板「记忆联想现在能不能生效」。
       // 向量没就绪时它原本什么都不显示，用户只会以为「开关打开了却没反应」。
-      return { factTiers: factTierList, count: live.length, auto: live.filter((m) => m.source === 'auto').length, events: live.filter((m) => m.source === 'event').length, outdated: items.length - live.length, vector: vcount, vectorReady: vecReady, vectorMode: vecMode, vectorModel: vmodel || (vstat ? { present: vecReady, running: false, error: String(vstat.lastError || '') } : null), vectorLocal: { wanted: vecCfg.enabled !== false && vecMode === 'local', ready: vecReady, enabled: vecCfg.enabled !== false }, assoc: Math.round(assocEdges / 2), assocAt: state.assocBuiltAt || 0, tierSince: live.filter((m) => m.tierSince).length }
+      return { factTiers: factTierList, count: live.length, auto: live.filter((m) => m.source === 'auto').length, events: live.filter((m) => m.source === 'event').length, outdated: items.length - live.length, vector: vcount, vectorReady: vecReady, vectorMode: vecMode, vectorLastError: vstat?.lastError || '', vectorLastErrorAt: vstat?.lastErrorAt ?? null, vectorModel: vmodel || (vstat ? { present: vecReady, running: false, error: String(vstat.lastError || '') } : null), vectorLocal: { wanted: vecCfg.enabled !== false && vecMode === 'local', ready: vecReady, enabled: vecCfg.enabled !== false }, assoc: Math.round(assocEdges / 2), assocAt: state.assocBuiltAt || 0, tierSince: live.filter((m) => m.tierSince).length }
     },
   }
 }

@@ -34,6 +34,36 @@ window.__ModuleLoader__.load({
         .then((data) => { if (!data || data.ok !== false) bustCache(); return data })
         .catch((e) => ({ ok: false, message: '连不上插件：' + e.message }))
     const clone = (o) => JSON.parse(JSON.stringify(o))
+    // 把 publicConfig 的 *Set 标志对应的 secret 字段清空（保留「已设置」状态）。
+    // 保存回执的基线只能带脱敏后的 secret 值，否则会把明文长期留在草稿里，
+    // 下次改同段其它字段时又整段回传，覆盖别的客户端刚轮换的新密钥（#520 复审）。
+    const maskSecretFields = (value, source = null) => {
+      const walk = (node, src) => {
+        if (!node || typeof node !== 'object') return
+        for (const [k, v] of Object.entries(node)) {
+          if (v && typeof v === 'object') walk(v, src && typeof src === 'object' ? src[k] : null)
+          if (k.endsWith('Set') && typeof v === 'boolean') {
+            const base = k.slice(0, -3)
+            // 只清「本来就是这次提交的旧值」；用户在保存期间新敲的 secret 不动。
+            if (base && Object.hasOwn(node, base) && (!source || !src || node[base] === src[base])) node[base] = ''
+          }
+        }
+      }
+      walk(value, source)
+      return value
+    }
+    // 把服务端 publicConfig 的 *Set / *Hint 标志同步到本地草稿（保留「已设置」提示）。
+    const copySecretFlags = (target, source) => {
+      const walk = (node, src) => {
+        if (!node || typeof node !== 'object' || !src || typeof src !== 'object') return
+        for (const [k, v] of Object.entries(src)) {
+          if (v && typeof v === 'object') walk(node[k], v)
+          else if ((k.endsWith('Set') || k.endsWith('Hint')) && Object.hasOwn(node, k)) node[k] = v
+        }
+      }
+      walk(target, source)
+      return target
+    }
     // ---------------- 面板轻量读取层（首屏提速，2026-11-16） ----------------
     // 同 URL 在途合并：相同地址只放行一个在途请求，周期轮询重叠时复用同一个 Promise，防止连环打。
     const inflight = new Map()
@@ -3153,7 +3183,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         active.value.startsWith('ext:')
           ? h(ExtPage, { key: active.value, mod: active.value.slice(4), st, draft, setDraft, toast, reload, embedded: true })
           : h(Card, { key: active.value, title: active.label }, h(VoiceServiceFields, { id: active.value, st, draft, setDraft, toast, reload })),
-        poolId ? h(VoiceKeyPool, { key: poolId, id: poolId, draft, setDraft }) : null)
+        poolId ? h(VoiceKeyPool, { key: 'pool:' + poolId, id: poolId, draft, setDraft }) : null)
     }
 
     function VoiceServiceFields({ id, st, draft, setDraft, toast, reload }) {
@@ -3208,7 +3238,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           const localDown = b.mode === 'local' && !String(b.url || '').trim()
           return miss.length
             ? h('div', { className: 'ab-note warn', style: { marginBottom: 8 } },
-              '还差：' + miss.join('、') + '。不填的话说话会退回 Windows 语音（照常发声，只是不是 Breeze 的音色）。',
+              '还差：' + miss.join('、') + '。不填的话说话会退回 系统语音（照常发声，只是不是 Breeze 的音色）。',
               localDown ? '本地模式要先把 breeze_infer 跑起来，地址填它的 /v1 前缀（例如 http://127.0.0.1:7860）。' : '')
             : null
         })(),
@@ -3251,7 +3281,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           ].filter(Boolean)
           return miss.length
             ? h('div', { className: 'ab-note warn', style: { marginBottom: 8 } },
-              '还差：' + miss.join('、') + '。不填的话说话会退回 Windows 语音（照常发声，只是不是 MiniMax 的音色）。')
+              '还差：' + miss.join('、') + '。不填的话说话会退回 系统语音（照常发声，只是不是 MiniMax 的音色）。')
             : null
         })(),
         h(Row, { key: 'k', label: 'API Key', hint: 'MiniMax 开放平台「接口密钥」里创建；只存在本机' }, f.text('voice.minimax.apiKey', { size: 'wide', type: 'password', placeholder: draft.voice.minimax?.apiKeySet ? '已保存（不改就留空）' : 'sk-api-…' })),
@@ -3552,6 +3582,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         ]
       return h('div', { className: 'ab-grid' },
         h(Card, { title: '表情包', right: f.sw('stickers.enabled'), desc: '聊天时从表情库配图；关闭后不发表情包。' },
+          h(Row, { label: '自动补一张表情包', hint: '纯文字回复也按概率配图。关闭后只发送明确选出的表情，不影响主动索要表情；回复标签仍受下方概率开关控制。' }, f.sw('stickers.autoAppend', { title: '自动补一张表情包' })),
           h(Row, { label: draft.stickers.limitTagged ? '回复配表情的概率' : '自动配表情的概率', hint: draft.stickers.limitTagged ? (draft.stickers.keywordExemption ? '有正文且未命中关键词时按此概率；纯表情或命中关键词时保留。' : '每段回复按此概率决定是否配表情；0% 不配，100% 不限。') : '只控制自动补图，会随心情变化；模型自己选的表情仍会发送。' }, f.percent('stickers.autoChance')),
           h(Row, { label: '回复里的表情也受概率限制', hint: draft.stickers.keywordExemption && draft.stickers.limitTagged ? '纯表情直接保留；带文字的回复按下方关键词判断，可能误放或漏判。' : '会删掉没抽中的表情，但不改正文，可能“说要发图却没发”。更在意聊天连贯时请关闭；表情制作不受影响。' }, f.sw('stickers.limitTagged', { title: '回复里的表情也受概率限制' })),
           draft.stickers.limitTagged ? h(Row, { label: '纯表情或提到图片时保留（实验性）', hint: '只发表情，或正文命中“图、表情、一张、看看”等词时保留；其余按概率。关键词匹配可能误判。' }, f.sw('stickers.keywordExemption', { title: '纯表情或提到图片时保留（实验性）' })) : null,
@@ -3993,10 +4024,17 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       }
       const jAll = jr ? [...(jr.daily || []).map((d) => jLine('daily', d)), ...(jr.dreams || []).map((d) => jLine('dream', d))] : null
       // ---------- 控件：数值 = 滑块 + 文本框；时间 = 原生 time 控件 + 一键清空 ----------
-      const A = 'ext.autotelic.'
-      const aut = getPath(draft, A, {}) || {}
+      const A = 'ext.autotelic'
+      // 兼容旧版本面板 bug：设置被写进 ext.autotelic[""]，读取时把空键里的值并回父级。
+      const mergeLegacy = (v) => {
+        if (!v || typeof v !== 'object' || !v[''] || typeof v[''] !== 'object') return v || {}
+        const rest = { ...v }
+        delete rest['']
+        return { ...v[''], ...rest }
+      }
+      const aut = mergeLegacy(getPath(draft, A, {}))
       const ap = (patch) => setDraft((previous) => {
-        const cur = getPath(previous, A, {}) || {}
+        const cur = mergeLegacy(getPath(previous, A, {}))
         return setPath(previous, A, { ...cur, ...patch })
       })
       const dv = (k) => { const v = aut[k]; return v == null ? AUTOTELIC_DEFAULTS[k] : v }
@@ -4677,9 +4715,9 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             h('div', { className: 'ab-flex', style: { alignItems: 'center', gap: 8 } },
               h('input', { className: 'ab-input', style: { width: 'min(320px, 100%)' }, placeholder: 'http://127.0.0.1:8000', value: cacVal('asrUrl'), onChange: (e) => setCacVal('asrUrl', e.target.value) }),
               h(Btn, { small: true, disabled: busy === 'cfg', onClick: async () => { await saveCall({ callAsrUrl: String(cacVal('asrUrl')).trim() }, '识别地址已保存') } }, '保存'))),
-          h(Row, { label: '回答引擎（嘴）', hint: '只影响对讲里回答的声音，不改全局语音设置。系统原生 = edge 合成失败退 Windows 语音；本地 GPT-SoVITS = 用参考音频音色；语音页接管 = 豆包，你自选接管时才碰' },
+          h(Row, { label: '回答引擎（嘴）', hint: '只影响对讲里回答的声音，不改全局语音设置。系统原生 = edge 合成失败退 系统语音；本地 GPT-SoVITS = 用参考音频音色；语音页接管 = 豆包，你自选接管时才碰' },
             h(Select, { value: cacVal('engine'), width: 320, options: [
-              { value: 'native', label: 'native 系统原生（默认，edge 合成，失败退 Windows 语音）' },
+              { value: 'native', label: 'native 系统原生（默认，edge 合成，失败退 系统语音）' },
               { value: 'sovits', label: 'sovits 本地 GPT-SoVITS（参考音频音色）' },
               { value: 'voice', label: 'voice 语音页接管（豆包，自选才碰）' },
             ], onChange: (v) => saveCall({ callEngine: v }, '回答引擎已保存') })),
@@ -5259,6 +5297,9 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         h(Fold, { key: 'vec', title: '向量检索（实验性）', icon: '🧭',
           summary: stats ? '已同步 ' + (stats.vector || 0) + ' / ' + (stats.count || 0) + ' 条' : '' },
           h('div', { className: 'ab-note' }, '默认关闭。打开后可以按意思找记忆：推荐用自带的本地小模型（纯离线、不联网、不花钱）；也可以改成自己的在线服务，那时会把记忆文字和查询文字发给你填的地址。'),
+          stats?.vectorLastError && stats.vectorLastErrorAt != null
+            ? h('div', { className: 'ab-note' }, '最近失败（' + new Date(stats.vectorLastErrorAt).toLocaleString() + '）：' + stats.vectorLastError)
+            : null,
           h(Row, { label: '向量检索（实验性）', hint: '补充按意思找记忆；已同步 ' + (stats ? stats.vector || 0 : '–') + ' 条（可刷新页面查看）' }, f.sw('memory.vector.enabled')),
           h(Row, { label: '检索方式', hint: '本地模型不用联网；在线服务需要自己准备兼容 OpenAI 的接口' },
             h('div', { className: 'ab-flex', style: { gap: 8 } },
@@ -5309,7 +5350,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
                 h(Row, { label: '每批多少条', hint: '方舟等单次 input 上限小，默认 10；本地服务可以调大' }, f.num('memory.vector.batchSize', { min: 1, max: 64 })),
                 h(Row, { label: '查询超时', hint: '超过就这一轮先用关键词，不拖慢回复' }, f.num('memory.vector.queryTimeoutMs', { min: 500, max: 15000, step: 500 })),
                 h('div', { className: 'ab-flex', style: { marginTop: 6 } },
-                  h(Btn, { small: true, onClick: async () => { const r = await post('/memory/vector/test', { text: '今天想吃白米饭' }); toast(r.ok ? `向量正常：${r.dims} 维，用时 ${r.ms}ms` : r.message) } }, '测试'),
+                  h(Btn, { small: true, onClick: async () => { const r = await post('/memory/vector/test', { text: '今天想吃白米饭' }); toast(r.ok ? `向量正常：${r.dims} 维，用时 ${r.ms}ms` : r.message); await load(q) } }, '测试'),
                   h(Btn, { small: true, kind: 'ghost', onClick: async () => { toast('正在按已保存的设置重建，条数多会分批…'); const r = await post('/memory/vector/rebuild', {}); toast(r.message); setTimeout(() => load(q), 1500) } }, '重建索引')),
                 h('div', { className: 'ab-muted ab-small' }, '「测试」用已保存的设置；改完先点底部保存，再测试/重建。'),
               ]
@@ -8894,9 +8935,9 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           h('input', { className: 'ab-input', value: input, type: 'password', autoComplete: 'off', placeholder: waiting ? '粘贴完整回调地址' : '完成浏览器登录后再粘贴', onChange: (e) => setInput(e.target.value) }),
           h(Btn, { small: true, onClick: act('/image/codex/complete', { input }), disabled: busy || !waiting || !input.trim() }, '完成登录'),
           waiting ? h(Btn, { small: true, onClick: act('/image/codex/cancel'), disabled: busy }, '取消登录') : null) : null,
-        h(Row, { label: '模型', hint: '可用模型由服务端决定' }, f.select('imageGen.codex.model', [
-          { value: 'gpt-image-2', label: 'gpt-image-2' }, { value: 'gpt-image-2.5-flare', label: 'gpt-image-2.5-flare' }, { value: 'gpt-image-2.5-sunburst', label: 'gpt-image-2.5-sunburst' },
-        ], { width: 260 })),
+        // 预设只是提示，模型名允许自己填（#256）：新模型出现时不用改源码。
+        h(Row, { label: '模型', hint: '常用：gpt-image-2 / gpt-image-2.5-flare / gpt-image-2.5-sunburst；也可直接填服务端支持的自定义模型名' },
+          h('input', { className: 'ab-input', style: { width: 260 }, value: draft.imageGen?.codex?.model ?? '', onChange: (e) => setDraft(setPath(draft, 'imageGen.codex.model', e.target.value)) })),
         h(Row, { label: '质量', hint: '所选模型需支持该选项' }, f.select('imageGen.codex.quality', ['auto', 'low', 'medium', 'high', 'xhigh', 'max'].map((value) => ({ value, label: value })), { width: 180 })),
         h(Row, { label: '背景' }, f.select('imageGen.codex.background', ['auto', 'opaque', 'transparent'].map((value) => ({ value, label: value })), { width: 180 })),
         h('div', { className: 'ab-muted ab-small' }, '订阅接法通过构图提示引导，实际尺寸由服务端选择。'),
@@ -9935,17 +9976,27 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         if (r.configRevision != null) configRevRef.current = r.configRevision
         const snap = clone(r.config || draftSnapRef.current || {})
         const committed = (r.committedPaths || []).map(ptrToDots)
-        draftBaseRef.current = clone(snap)
+        // #520：dirty 基线不能直接用脱敏 snap，否则草稿里填过的 secret 永远和它不相等，
+        // 「有改动还没保存」一直显示。基线用本次完整草稿，但已提交字段以服务端归一化快照为准，
+        // 并清空 secret 原文（保留 *Set 标志），避免明文留在草稿里、后续保存覆盖新密钥。
+        let savedDraft = maskSecretFields(clone(override || draft))
+        for (const dots of committed) savedDraft = setPath(savedDraft, dots, getPath(snap, dots))
+        maskSecretFields(savedDraft)
+        copySecretFlags(savedDraft, snap)
+        draftBaseRef.current = savedDraft
+        // 用新对象触发 useMemo（它的依赖只有 draft）；保存期间用户又改的部分原样保留，
+        // 已经提交的旧 secret 也要从 current 清掉，避免下次整段回传覆盖别处轮换的新 key。
         setDraft((current) => {
-          if (!current) return clone(snap)
-          let next = current
-          for (const dots of committed) next = setPath(next, dots, getPath(snap, dots))
+          if (current === draft) return clone(savedDraft)
+          const next = clone(current)
+          maskSecretFields(next, draft)
+          copySecretFlags(next, snap)
           return next
         })
+        dirtyRef.current = false
         setSt((prev) => (prev ? { ...prev, config: clone(snap) } : prev))
         toast(r.message || '保存好了', 'ok')
-        // 按约定再读一次 /panel/config 校准快照（在途合并；在编辑的草稿不会被覆盖）
-        loadConfigDraft()
+        // 不再立即 loadConfigDraft：它内部会用脱敏快照覆盖基线，再次把 dirty 钉死。
         return true
       }
       const savingRef = useRef(false)

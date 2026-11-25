@@ -55,8 +55,8 @@ test('真实收图→合批→提示：混合照片/表情与下载失败不会�
     const index = captured.indexOf(block)
     const number = block.name.endsWith('-3') ? 3 : 2
     assert.equal(block.name, `qqref--701-${number}`)
-    assert.equal(captured[index - 1].text, `【参考图 msg:-701:${number}，发送者 QQ ${OWNER}】`)
+    assert.equal(captured[index - 1].text, `【聊天图片 msg:-701:${number}，发送者 QQ ${OWNER}】`)
     assert.deepEqual(await hub.referenceImage({ chatId: `group:${GROUP}` }, `msg:-701:${number}`), Buffer.from(block.data, 'base64'))
   }
-  assert.ok(!captured.some(c => c.type === 'text' && c.text.includes('【参考图 msg:-701:1，')), '失败的图不借用成功图的位置')
+  assert.ok(!captured.some(c => c.type === 'text' && c.text.includes('【聊天图片 msg:-701:1，')), '失败的图不借用成功图的位置')
 })

@@ -45,3 +45,8 @@ test('模型写成 [表情: 描述] 时按表情标签处理，不把描述当�
   assert.deepEqual(texts(r), ['她说'])
   assert.equal(r.items.some((i) => i.kind === 'sticker' && i.value === '无语死鱼脸'), true)
 })
+
+test('模型漏出的 output/results 信封结束标签不单独发成气泡', () => {
+  assert.deepEqual(texts(parseReply('嗯 早上球场估计空着 下午人齐了再去 </output> </results>')), ['嗯 早上球场估计空着 下午人齐了再去'])
+  assert.deepEqual(texts(parseReply('你好|||</output>|||</results>')), ['你好'])
+})

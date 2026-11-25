@@ -6,6 +6,7 @@ import { createStickerStore, stickerPath, MAX_STICKER_BYTES, PANEL_UPLOAD_MAX_BY
 import { defineTool, int, str } from '../../tools/tools.js'
 import { fetchImage, segmentBytes, formatBytes } from '../../core/net.js'
 import { resolvePainting } from '../../features/paintings.js'
+import { imageSize } from '../../chat/inbound.js'
 
 export default {
   id: 'stickers',
@@ -78,12 +79,13 @@ export default {
         description: '悄悄把聊天里刚出现的表情收进自己的表情库（喜欢才收，不喜欢就别调）。index 从 1 开始；name 是你给它起的名字。收表情是你自己的小习惯，通常不用跟对方说你收没收到。主人让你收哪张，你收哪张（「只听主人的」模式下：主人私聊里可以自己挑着收；群里这一轮只有主人说话时也能自己收，有别人在场就要等主人发话）。传 painting（画作编号，如 #1）时，收的是你自己刚画的那张图，不是聊天里的表情。',
         properties: {
           index: int('第几张表情（从 1 开始，默认 1）'),
+          latest_image: { type: 'boolean', description: '仅当对方明确要求收藏一张以普通图片发来的表情时设为 true，选最近一张图片（近方形且最长边不超过 1024 像素），与 index、painting 二选一' },
           name: str('给它起的名字（≤12 字）'),
           tags: { type: 'array', items: { type: 'string' }, description: '标签，如 开心/委屈' },
           painting: str('画作编号（如 #1）：收你自己刚画的图时填，和 index 二选一'),
         },
         required: [],
-        execute: async ({ index, name, tags, painting }) => {
+        execute: async ({ index, name, tags, painting, latest_image }) => {
           // 收自己的画：不受「只听主人的」限制（这是她自己画的，不是别人的表情）
           if (painting) {
             const p = resolvePainting(current, painting)
@@ -108,13 +110,26 @@ export default {
           if (mode === 'owner' && !hub.turnSendersAllOwner(sessionId)) {
             return { ok: false, message: '现在是「只听主人的」模式：这一轮有别人在，得主人让我收才行' }
           }
-          const seg = hub.stickerOf(current, index || 1)
+          if (latest_image && !(current.startsWith('group:') ? api.config().stickers.fromGroups : api.config().stickers.fromPrivate)) {
+            return { ok: false, message: '没有开启从这个会话收表情' }
+          }
+          const photo = latest_image ? hub.recentMedia(current).at(-1) : null
+          const seg = latest_image
+            ? (photo?.seg.type === 'image' && !photo.sticker ? photo.seg : null)
+            : hub.stickerOf(current, index || 1)
           if (!seg) return { ok: false, message: '这张表情已经拿不到了（超过 30 分钟，或者这一轮里没有这张）' }
           let buf
           try {
             buf = await segmentBytes(seg, onebot, { maxBytes: MAX_STICKER_BYTES })
           } catch (error) {
             return { ok: false, message: '这张表情下载失败了：' + error.message }
+          }
+          if (latest_image) {
+            const { width, height } = imageSize(buf)
+            const ratio = width / height
+            if (!(ratio >= 0.75 && ratio <= 4 / 3) || Math.max(width, height) > 1024) {
+              return { ok: false, message: '普通图片需要近方形且最长边不超过 1024 像素才能作为表情收藏' }
+            }
           }
           const r = await store.addFromBuffer(buf, {
             name: String(name || '').trim().slice(0, 12),

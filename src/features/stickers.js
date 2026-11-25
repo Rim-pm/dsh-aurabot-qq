@@ -97,20 +97,15 @@ export function pickEvict(items) {
 export function createStickerStore({ dsh, getConfig, onebot, log }) {
   const recent = [] // 每小时限额
 
-  /** 有些 OneBot 网关把 add_custom_face 的 file 当本地路径，不认 base64://；先试 base64，再退回刚写下的本地路径。 */
-  async function addToQQ(buf, localPath, label = '') {
-    let last = null
-    for (const file of ['base64://' + buf.toString('base64'), localPath].filter(Boolean)) {
-      try {
-        const r = await onebot.call('add_custom_face', { file })
-        return String(r?.emoji_id || '')
-      } catch (error) {
-        last = error
-        if (!/ENAMETOOLONG|base64|stat|EINVAL/i.test(String(error?.message || ''))) break
-      }
+  /** NapCat 的 add_custom_face 接收已落盘的表情文件路径。 */
+  async function addToQQ(localPath, label) {
+    try {
+      const r = await onebot.call('add_custom_face', { file: localPath })
+      return String(r?.emoji_id || '')
+    } catch (error) {
+      log.debug(`收藏到 QQ 失败（本地已留档：${label}）`, error?.message || '未知错误')
+      return ''
     }
-    log.debug('收藏到 QQ 失败（本地已留档' + (label ? '：' + label : '') + '）：', last?.message || '未知错误')
-    return ''
   }
 
   /** 面板里给起名单独挑的模型；没挑（或者只填了一半）就返回 null = 跟随聊天用的模型。 */
@@ -189,7 +184,7 @@ export function createStickerStore({ dsh, getConfig, onebot, log }) {
     recent.push(now)
     // 收藏到 QQ
     if (!getConfig().dryRun) {
-      item.emojiId = await addToQQ(buf, join(dir(), file), '自动收藏')
+      item.emojiId = await addToQQ(join(dir(), file), '自动收藏')
     }
     lib.items.push(item)
     saveLibrary(lib)
@@ -255,7 +250,7 @@ export function createStickerStore({ dsh, getConfig, onebot, log }) {
     const { width, height } = imageSize(buf)
     const item = { md5, file, name: String(name).slice(0, 12), tags, from, at: Date.now(), width, height, bytes: buf.length, emojiId: '' }
     if (toQQ && !getConfig().dryRun) {
-      item.emojiId = await addToQQ(buf, join(dir(), file), '手动收藏')
+      item.emojiId = await addToQQ(join(dir(), file), '手动收藏')
       if (item.emojiId && item.name) {
         try { await onebot.call('modify_custom_face', { emoji_id: item.emojiId, desc: item.name }) } catch (error) { log.debug('收藏备注写回失败：', error.message) }
       }

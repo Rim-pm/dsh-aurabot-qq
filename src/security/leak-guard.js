@@ -64,6 +64,12 @@ const RUNTIME_CONTEXT_STANDALONE = /^(?:Current (?:runtime context|working direc
 // 注意：matchAll 会沿用共享 /g 正则的 lastIndex，这里用源头字符串每次新建。
 const TIME_CONTEXT_HEAD_SOURCE = '^[ \\t]*(?:Time sampled while preparing turn \\d+, step \\d+:|【当前本机时间】)'
 const TIME_CONTEXT_LINE = /^(?:Time sampled while preparing turn \d+, step \d+:|Browser time zone for this request:|Elapsed since the preceding (?:model-visible message|step context):|【当前本机时间】)/
+// memsearch 插件每轮还会在上下文最前面挂一行可用性提示（[memsearch] Recall available …）。
+// 它不是提示词复读、也不在 fingerprint 来源里，模型复述时会原样当正文发出去（2026-11-23 私聊）。
+const MEMSEARCH_LINE = /^\[memsearch\]\s*Recall available\b/i
+
+const isInjectionLine = (line) => TIME_CONTEXT_LINE.test(line) || MEMSEARCH_LINE.test(line)
+
 const OUTBOUND_SCAFFOLD_HEAD = /(?<!^)(?<!\n)【系统提醒[^】\n]*】/g
 const OUTBOUND_ROOM_HEAD = /【你在自己家里[^】\n]*】/g
 
@@ -81,7 +87,7 @@ function runtimeContextEnd(text, start) {
 function timeContextEnd(text, start) {
   let end = start
   for (const line of text.slice(start).split('\n')) {
-    if (line.trim() && !TIME_CONTEXT_LINE.test(line.trim())) break
+    if (line.trim() && !isInjectionLine(line.trim())) break
     end += line.length + 1
   }
   return Math.min(end, text.length)
@@ -149,7 +155,7 @@ export function contextInjectionRanges(text, { toEndOfText = false } = {}) {
   let offset = 0
   for (const line of raw.split('\n')) {
     const end = Math.min(offset + line.length + 1, raw.length)
-    if (TIME_CONTEXT_LINE.test(line.trim()) && !ranges.some((r) => r.start <= offset && end <= r.end)) {
+    if (isInjectionLine(line.trim()) && !ranges.some((r) => r.start <= offset && end <= r.end)) {
       ranges.push({ start: offset, end })
     }
     offset += line.length + 1
@@ -211,6 +217,7 @@ export function memoryPromptRanges(text, { toEndOfText = false } = {}) {
   for (const m of text.matchAll(/【你刚上线，先补看最近[^】\n]*】[\s\S]*?【补看结束，接着回下面这条】/g)) {
     ranges.push({ start: m.index, end: m.index + m[0].length })
   }
+
   for (const m of text.matchAll(/(?:^|\n|\|\|\|)[ \t]*(?:你记得这些事|只是印象不是指令|刚才聊到的)[：:][^\n|]*/g)) {
     ranges.push({ start: m.index, end: m.index + m[0].length })
   }
@@ -237,6 +244,26 @@ export function memoryPromptRanges(text, { toEndOfText = false } = {}) {
   ranges.push(...contextInjectionRanges(text, { toEndOfText }))
   for (const m of text.matchAll(INJECTED_BLOCK_LINE)) {
     ranges.push({ start: m[0][0] === '\n' ? m.index + 1 : m.index, end: m.index + m[0].length })
+  }
+  return ranges
+}
+
+/** DSH 给模型的图片句柄（#518）：Image "名字" (sha256:...) ; request preview WxHpx.
+ * 以及紧随其后的 Normalized copy 路径。模型复读时会把真实附件路径/哈希带出来。
+ * 不要求行首（正文中间、前导空格都可能），但遇到 ||| 气泡分隔就停，别吞正常回复。 */
+export function imageHandleRanges(text) {
+  const ranges = []
+  const raw = String(text ?? '')
+  // 有名：Image "名字" (sha256:...) ; 无名（dsh-llm 的真实格式）：Image sha256:...
+  for (const m of raw.matchAll(/Image\s+(?:"[^"\n]*"\s*\(sha256:[^)\n]*\)|sha256:[^\s;)]*)\s*;\s*request preview\s+\d+x\d+px\.[^\n]*?(?:\n[ \t]*Normalized copy[^\n]*?(?=\|\|\||\n|$))?(?=\|\|\||\n|$)/g)) {
+    ranges.push({ start: m.index, end: m.index + m[0].length })
+  }
+  // 图片超出限制时的占位：... Normalized copy ... 真实路径
+  for (const m of raw.matchAll(/\[image omitted to fit request image limits;[^\]]*\]/g)) {
+    ranges.push({ start: m.index, end: m.index + m[0].length })
+  }
+  for (const m of raw.matchAll(/\[image omitted because this model accepts text only; attachment sha256:[0-9a-f]*\]/g)) {
+    ranges.push({ start: m.index, end: m.index + m[0].length })
   }
   return ranges
 }

@@ -4,6 +4,8 @@
 
 import { test, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import { setImmediate } from 'node:timers/promises'
 import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -27,11 +29,58 @@ const mkStore = (opts = {}) => createSkillStore(join(root, 'skills'), {
   log: () => {},
 })
 
+test('#523：异步提炼拒绝时记录原因、模板晋升，宿主进程继续运行', () => {
+  const moduleUrl = new URL('../src/autotelic/skills.js', import.meta.url).href
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    import assert from 'node:assert/strict'
+    import { setImmediate } from 'node:timers/promises'
+    import { createSkillStore } from ${JSON.stringify(moduleUrl)}
+    process.on('unhandledRejection', () => process.exit(1))
+    const store = createSkillStore(process.argv[1], {
+      distill: async () => { throw new Error('distill rejected') },
+      log: console.log,
+    })
+    await store.ingestReflection({ roundId: 'seed', tag: 'probe', lesson: '模板保留原文' })
+    const result = await store.recordOutcome('seed', 'done')
+    assert.deepEqual(result.promoted, ['memory→skills:probe'])
+    assert.match(store.get('probe').body, /模板保留原文/)
+    await setImmediate()
+    console.log('host survived')
+  `, root], { encoding: 'utf8', timeout: 5000 })
+  assert.equal(child.status, 0, child.error?.message || child.stderr)
+  assert.match(child.stdout, /提炼调用失败.*distill rejected/)
+  assert.match(child.stdout, /host survived/)
+})
+
+test('#523：连发晋升排队，已被第一项吸收的第二项跳过', async () => {
+  let release
+  const blocked = new Promise((resolve) => { release = resolve })
+  let calls = 0
+  const store = mkStore({ distill: async () => {
+    if (++calls > 1) throw new Error('这个后台会话的上一轮还没结束')
+    await blocked
+    return [{ title: '提炼产物' }]
+  } })
+  await store.ingestReflection({ roundId: 'seed-a', tag: 'probe' })
+  await store.ingestReflection({ roundId: 'seed-b', tag: 'probe' })
+  const first = store.ingestReflection({ roundId: 'seed-c', tag: 'probe' })
+  await setImmediate()
+  let finished = false
+  const second = store.recordOutcome('seed-b', 'done').then((result) => { finished = true; return result })
+  await setImmediate()
+  release()
+  assert.equal(finished, false)
+  assert.deepEqual((await first).promoted, ['memory→skills:probe'])
+  assert.deepEqual(await second, { ok: true, promoted: [], stale: false })
+  assert.equal(calls, 1)
+  assert.equal(store.get('probe').meta.title, '提炼产物')
+})
+
 // ---------- 三层目录契约 ----------
 
-test('目录契约：memory/skills/instinct/archive/history + index.json 一次建齐；一技能一 md + frontmatter', () => {
+test('目录契约：memory/skills/instinct/archive/history + index.json 一次建齐；一技能一 md + frontmatter', async () => {
   const s = mkStore()
-  const r = s.ingestReflection({ roundId: 'r1', tag: '裁切', lesson: '竖屏先裁后转', evidence: ['obs-1'] })
+  const r = await s.ingestReflection({ roundId: 'r1', tag: '裁切', lesson: '竖屏先裁后转', evidence: ['obs-1'] })
   assert.equal(r.ok, true)
   const base = join(root, 'skills')
   for (const d of ['memory', 'skills', 'instinct', 'archive', 'history']) assert.ok(existsSync(join(base, d)), `${d}/ 存在`)
@@ -45,23 +94,23 @@ test('目录契约：memory/skills/instinct/archive/history + index.json 一次�
 
 // ---------- ingestReflection：宽松归一化（成员 B 复盘契约字段） ----------
 
-test('ingestReflection：契约字段（roundId/tag/lesson/intentTitle/evidence）正确落 memory/；同 roundId 合并不覆盖', () => {
+test('ingestReflection：契约字段（roundId/tag/lesson/intentTitle/evidence）正确落 memory/；同 roundId 合并不覆盖', async () => {
   const s = mkStore()
-  const a = s.ingestReflection({ roundId: 'round-9', ticketId: 't-1', intentTitle: '给视频换竖屏', tag: '裁切', finalStatus: 'failed', ownerSide: false, ownerResponse: 'none', evidence: ['obs-a', 'obs-b'], lesson: '先看分辨率再裁' })
+  const a = await s.ingestReflection({ roundId: 'round-9', ticketId: 't-1', intentTitle: '给视频换竖屏', tag: '裁切', finalStatus: 'failed', ownerSide: false, ownerResponse: 'none', evidence: ['obs-a', 'obs-b'], lesson: '先看分辨率再裁' })
   assert.equal(a.ok, true)
   const doc = s.get('round-9')
   assert.equal(doc.layer, 'memory')
   assert.ok(doc.body.includes('先看分辨率再裁'))
   assert.ok(doc.body.includes('obs-a、obs-b'), 'evidence 进来历')
-  const b = s.ingestReflection({ roundId: 'round-9', lesson: '换个分辨率再试一次', tag: '裁切' })
+  const b = await s.ingestReflection({ roundId: 'round-9', lesson: '换个分辨率再试一次', tag: '裁切' })
   assert.equal(b.ok, true)
   const again = s.get('round-9')
   assert.ok(again.body.includes('先看分辨率再裁') && again.body.includes('换个分辨率再试一次'), '同 id 追加不覆盖')
 })
 
-test('ingestReflection：完全未知的字段形状也落得下来（JSON 兜底），模型塞 score 进来不落分', () => {
+test('ingestReflection：完全未知的字段形状也落得下来（JSON 兜底），模型塞 score 进来不落分', async () => {
   const s = mkStore()
-  const r = s.ingestReflection({ weirdShape: true, foo: 'bar', score: 0.99 })
+  const r = await s.ingestReflection({ weirdShape: true, foo: 'bar', score: 0.99 })
   assert.equal(r.ok, true, '宁存勿丢')
   const doc = s.get(r.id)
   assert.ok(doc.meta.score !== 0.99, '模型给的 score 不是落库分')
@@ -71,125 +120,92 @@ test('ingestReflection：完全未知的字段形状也落得下来（JSON 兜�
 
 // ---------- score 只认终态 ----------
 
-test('score 只认真实复用终态：done +0.1 / failed −0.2 / aborted 不计；便捷签名 recordOutcome(id, status, resp)', () => {
+test('score 只认真实复用终态：done +0.1 / failed −0.2 / aborted 不计；便捷签名 recordOutcome(id, status, resp)', async () => {
   const s = mkStore()
-  for (let i = 0; i < 3; i++) s.ingestReflection({ roundId: `k1-${i}`, tag: '竖屏', lesson: `第${i}条` })
+  for (let i = 0; i < 3; i++) await s.ingestReflection({ roundId: `k1-${i}`, tag: '竖屏', lesson: `第${i}条` })
   const sid = s.list('skills')[0]?.meta.id
   assert.ok(sid, '同主题 3 条已晋升为技能')
-  const r1 = s.recordOutcome(sid, 'done')
+  const r1 = await s.recordOutcome(sid, 'done')
   assert.equal(r1.ok, true)
   assert.equal(s.get(sid).meta.score, 0.6, '0.5 + 0.1')
-  s.recordOutcome(sid, 'failed')
+  await s.recordOutcome(sid, 'failed')
   assert.equal(s.get(sid).meta.score, 0.4, '−0.2')
-  s.recordOutcome(sid, 'aborted')
+  await s.recordOutcome(sid, 'aborted')
   assert.equal(s.get(sid).meta.score, 0.4, 'aborted 不计')
   assert.equal(s.get(sid).meta.uses, 2, 'aborted 也不加 uses')
-  s.recordOutcome(sid, 'done', 'ignored')
+  await s.recordOutcome(sid, 'done', 'ignored')
   assert.equal(s.get(sid).meta.score, 0.2, 'ignored 视同 failed：0.4 − 0.2（便捷签名下档位直接生效）')
 })
 
-test('touch-owner：ignored/perfunctory 视同 failed；replied 照常 done 加分', () => {
+test('touch-owner：ignored/perfunctory 视同 failed；replied 照常 done 加分', async () => {
   const s = mkStore({ distill: () => [{ title: '竖屏终法', content: '先裁后转', tags: ['竖屏'] }] })
-  for (let i = 0; i < 3; i++) s.ingestReflection({ roundId: `to-${i}`, tag: '竖屏', lesson: `第${i}` })
+  for (let i = 0; i < 3; i++) await s.ingestReflection({ roundId: `to-${i}`, tag: '竖屏', lesson: `第${i}` })
   const id = s.list('skills')[0]?.meta.id
   assert.ok(id, '预置技能层条目')
   const start = s.get(id).meta.score
-  s.recordOutcome({ skillId: id, status: 'done', touchOwner: true, ownerResponse: 'ignored' })
+  await s.recordOutcome({ skillId: id, status: 'done', touchOwner: true, ownerResponse: 'ignored' })
   assert.equal(s.get(id).meta.score, +(start - 0.2).toFixed(4), 'ignored 视同 failed')
-  s.recordOutcome({ skillId: id, status: 'done', ownerResponse: 'perfunctory' })
+  await s.recordOutcome({ skillId: id, status: 'done', ownerResponse: 'perfunctory' })
   assert.equal(s.get(id).meta.score, +(start - 0.4).toFixed(4), 'perfunctory 同档')
-  s.recordOutcome({ skillId: id, status: 'done', touchOwner: true, ownerResponse: 'replied' })
+  await s.recordOutcome({ skillId: id, status: 'done', touchOwner: true, ownerResponse: 'replied' })
   assert.equal(s.get(id).meta.score, +(start - 0.4 + 0.1).toFixed(4), 'replied 照常 done 加分')
 })
 
-test('模型自评篡改无效：任何入口传 score 都改变不了分值', () => {
+test('模型自评篡改无效：任何入口传 score 都改变不了分值', async () => {
   const s = mkStore({ distill: () => [{ title: 't', content: 'c', tags: ['k'] }] })
-  for (let i = 0; i < 3; i++) s.ingestReflection({ roundId: `m-${i}`, tag: 'k', lesson: 'l' })
+  for (let i = 0; i < 3; i++) await s.ingestReflection({ roundId: `m-${i}`, tag: 'k', lesson: 'l' })
   const id = s.list('skills')[0]?.meta.id
-  const evil = s.recordOutcome({ skillId: id, status: 'done', score: 1.0, selfAssess: '我做得很好' })
+  const evil = await s.recordOutcome({ skillId: id, status: 'done', score: 1.0, selfAssess: '我做得很好' })
   assert.equal(evil.ok, true)
   assert.equal(s.get(id).meta.score, 0.6, '混进来的 score=1.0 被丢弃，只 +0.1')
-  s.recordOutcome({ skillId: id, status: 'done', score: 5, selfScore: 5 })
+  await s.recordOutcome({ skillId: id, status: 'done', score: 5, selfScore: 5 })
   assert.equal(s.get(id).meta.score, 0.7, '第二次混分依然无效')
 })
 
 // ---------- 晋升链阈值 ----------
 
-test('记忆→技能：同主题 ≥3 条晋升；不足 3 条且无真实复用成功不晋升', () => {
+test('记忆→技能：同主题 ≥3 条晋升；不足 3 条且无真实复用成功不晋升', async () => {
   const s = mkStore()
-  s.ingestReflection({ roundId: 'p1', tag: '滤镜', lesson: 'a' })
-  s.ingestReflection({ roundId: 'p2', tag: '滤镜', lesson: 'b' })
+  await s.ingestReflection({ roundId: 'p1', tag: '滤镜', lesson: 'a' })
+  await s.ingestReflection({ roundId: 'p2', tag: '滤镜', lesson: 'b' })
   assert.equal(s.get('p1').layer, 'memory', '2 条不晋升')
-  s.ingestReflection({ roundId: 'p3', tag: '滤镜', lesson: 'c' })
+  await s.ingestReflection({ roundId: 'p3', tag: '滤镜', lesson: 'c' })
   assert.equal(s.get('p1').layer, 'skills', '第 3 条到位即晋升')
   const doc = s.list('skills')[0]
   assert.match(readFileSync(doc.file, 'utf8'), /sourceSkill: p1/, 'frontmatter 记 sourceSkill 溯源')
   // 另一主题只 1 条 + failed 终态：不晋升
-  s.ingestReflection({ roundId: 'q1', tag: '调色', lesson: 'z' })
-  const r = s.recordOutcome({ skillId: 'q1', status: 'failed' })
+  await s.ingestReflection({ roundId: 'q1', tag: '调色', lesson: 'z' })
+  const r = await s.recordOutcome({ skillId: 'q1', status: 'failed' })
   assert.equal(s.get('q1').layer, 'memory', 'failed 不算真实复用成功，不晋升')
   assert.equal(r.ok, true)
   // done（真实复用成功）：单条也晋升
-  s.recordOutcome({ skillId: 'q1', status: 'done' })
+  await s.recordOutcome({ skillId: 'q1', status: 'done' })
   assert.equal(s.get('q1').layer, 'skills', '真实复用成功单条即晋升')
 })
 
-test('记忆→技能：提炼调用走注入点 distill（一次 LLM 调用的口子）；不给 distill 走模板兜底不炸', () => {
+test('记忆→技能：提炼调用走注入点 distill（一次 LLM 调用的口子）；不给 distill 走模板兜底不炸', async () => {
   let calls = 0
   const s = mkStore({ distill: (entries) => { calls++; assert.ok(entries.length >= 3); return [{ title: '提炼后的方法', content: '合并三条记忆的办法', tags: ['滤镜'] }] } })
-  for (let i = 0; i < 3; i++) s.ingestReflection({ roundId: `d-${i}`, tag: '滤镜', lesson: `第${i}条` })
+  for (let i = 0; i < 3; i++) await s.ingestReflection({ roundId: `d-${i}`, tag: '滤镜', lesson: `第${i}条` })
   assert.equal(calls, 1, '一次提炼调用')
   const doc = s.list('skills').find((d) => d.meta.title === '提炼后的方法')
   assert.ok(doc, '提炼产物落了技能层')
   const s2 = mkStore() // 无 distill
-  for (let i = 0; i < 3; i++) s2.ingestReflection({ roundId: `e-${i}`, tag: '兜底', lesson: `第${i}条` })
+  for (let i = 0; i < 3; i++) await s2.ingestReflection({ roundId: `e-${i}`, tag: '兜底', lesson: `第${i}条` })
   assert.ok(s2.list('skills').length >= 1, '模板兜底照样晋升')
 })
 
-test('记忆→技能：异步 distill（真机走 hub.runSystemTurn）先落模板兜底，结果回来再补正文', async () => {
-  let release
-  const gate = new Promise((resolve) => { release = resolve })
-  const s = mkStore({ distill: async () => { await gate; return [{ title: '异步提炼法', content: '等 LLM 回来的正文' }] } })
-  for (let i = 0; i < 3; i++) s.ingestReflection({ roundId: `a-${i}`, tag: '异步', lesson: `第${i}条` })
-  const id = s.list('skills')[0]?.meta.id
-  assert.ok(id, 'Promise 不能被当数组用，模板兜底先落盘')
-  assert.equal(s.get(id).meta.layer, 'skills')
-  assert.match(readFileSync(s.get(id).file, 'utf8'), /异步/, '兜底正文来自记忆片段')
-  release()
-  await new Promise((resolve) => setImmediate(resolve))
-  await new Promise((resolve) => setImmediate(resolve))
-  const doc = s.get(id)
-  assert.ok(doc.body.includes('等 LLM 回来的正文'), '异步结果补写了正文')
-  assert.equal(doc.meta.score, 0.5, '补写不动 score')
-})
-
-test('记忆→技能：异步 distill 拒绝不许冒成未处理拒绝（否则 dsh-app-boot 会 fatal exit）', async () => {
-  const seen = []
-  const onRejection = (error) => seen.push(error)
-  process.on('unhandledRejection', onRejection)
-  try {
-    const s = mkStore({ distill: async () => { throw new Error('这个后台会话的上一轮还没结束') } })
-    for (let i = 0; i < 3; i++) s.ingestReflection({ roundId: `r-${i}`, tag: '拒绝', lesson: `第${i}条` })
-    const id = s.list('skills')[0]?.meta.id
-    assert.ok(id, '拒绝也要靠模板兜底完成晋升')
-    await new Promise((resolve) => setImmediate(resolve))
-    await new Promise((resolve) => setImmediate(resolve))
-    assert.equal(seen.length, 0, '没有未处理拒绝')
-    assert.equal(s.get(id).layer, 'skills')
-  } finally { process.off('unhandledRejection', onRejection) }
-})
-
-test('技能→本能：uses≥5 且 score≥0.8 自动晋升 instinct/ + 写人格卡附加段（写前快照，写坏只影响附加段）', () => {
+test('技能→本能：uses≥5 且 score≥0.8 自动晋升 instinct/ + 写人格卡附加段（写前快照，写坏只影响附加段）', async () => {
   const personaFile = join(root, 'personas', 'dafeiyu.md')
   mkdirSync(join(root, 'personas'), { recursive: true })
   writeFileSync(personaFile, '---\nname: 大肥鱼\n---\n\n我是大肥鱼。\n', 'utf8')
   const s = mkStore({ personaFile, distill: () => [{ title: '竖屏终法', content: '先裁后转', tags: ['竖屏'] }] })
-  for (let i = 0; i < 3; i++) s.ingestReflection({ roundId: `i-${i}`, tag: '竖屏', lesson: `第${i}` })
+  for (let i = 0; i < 3; i++) await s.ingestReflection({ roundId: `i-${i}`, tag: '竖屏', lesson: `第${i}` })
   const id = s.list('skills')[0]?.meta.id
   // score 0.5 → 5 次 done = 1.0，uses=5：第 5 次 done 时触发本能晋升
-  for (let i = 0; i < 4; i++) s.recordOutcome(id, 'done')
+  for (let i = 0; i < 4; i++) await s.recordOutcome(id, 'done')
   assert.equal(s.get(id).layer, 'skills', '4 次还差一步')
-  const r = s.recordOutcome(id, 'done')
+  const r = await s.recordOutcome(id, 'done')
   assert.equal(s.get(id).layer, 'instinct', '第 5 次晋升本能层')
   const raw = readFileSync(s.get(id).file, 'utf8')
   assert.match(raw, /promotedAt: \d+/, 'frontmatter 记 promotedAt')
@@ -212,11 +228,11 @@ test('技能→本能：uses≥5 且 score≥0.8 自动晋升 instinct/ + 写人
 
 // ---------- 快照与回滚 ----------
 
-test('每次晋升/修订前快照进 history/<ISO>；rollback 铺回原位；弃 .bak（目录里没有 .bak 文件）', () => {
+test('每次晋升/修订前快照进 history/<ISO>；rollback 铺回原位；弃 .bak（目录里没有 .bak 文件）', async () => {
   const s = mkStore({ distill: () => [{ title: 'T', content: 'C', tags: ['x'] }] })
-  for (let i = 0; i < 3; i++) s.ingestReflection({ roundId: `s-${i}`, tag: 'x', lesson: `第${i}` })
+  for (let i = 0; i < 3; i++) await s.ingestReflection({ roundId: `s-${i}`, tag: 'x', lesson: `第${i}` })
   const id = s.list('skills')[0]?.meta.id
-  s.recordOutcome(id, 'done')
+  await s.recordOutcome(id, 'done')
   const before = readFileSync(s.get(id).file, 'utf8')
   s.revise(id, { content: '新内容' })
   const after = readFileSync(s.get(id).file, 'utf8')
@@ -237,12 +253,12 @@ test('每次晋升/修订前快照进 history/<ISO>；rollback 铺回原位；�
 
 // ---------- stale 与归档 ----------
 
-test('score<0.3 且 uses≥3 标 stale；suggestStale 给复盘建议；archive 归档不删除保历史', () => {
+test('score<0.3 且 uses≥3 标 stale；suggestStale 给复盘建议；archive 归档不删除保历史', async () => {
   const s = mkStore({ distill: () => [{ title: '怪招', content: 'c', tags: ['y'] }] })
-  for (let i = 0; i < 3; i++) s.ingestReflection({ roundId: `st-${i}`, tag: 'y', lesson: `第${i}` })
+  for (let i = 0; i < 3; i++) await s.ingestReflection({ roundId: `st-${i}`, tag: 'y', lesson: `第${i}` })
   const id = s.list('skills')[0]?.meta.id
   assert.ok(id)
-  for (let i = 0; i < 3; i++) s.recordOutcome(id, 'failed') // 0.5→0.3→0.1→−0.1，uses=3
+  for (let i = 0; i < 3; i++) await s.recordOutcome(id, 'failed') // 0.5→0.3→0.1→−0.1，uses=3
   const doc = s.get(id)
   assert.equal(doc.meta.stale, true, '自动标 stale')
   assert.deepEqual(s.suggestStale().map((x) => x.id), [id])
@@ -256,13 +272,13 @@ test('score<0.3 且 uses≥3 标 stale；suggestStale 给复盘建议；archive 
 
 // ---------- 方法解析三档 ----------
 
-test('resolveMethod：kind 精确 > match 关键词 > 探索模式返回 null', () => {
+test('resolveMethod：kind 精确 > match 关键词 > 探索模式返回 null', async () => {
   const s = mkStore({
     distill: (entries) => [{ title: entries[0]?.title || '方法', content: '正文里有像素二字', tags: [entries[0]?.kind || 'x'] }],
   })
-  s.ingestReflection({ roundId: 'rm-1', tag: '像素画', intentTitle: '像素画法', lesson: '放大不糊要用邻近采样', evidence: ['o1'] })
-  s.ingestReflection({ roundId: 'rm-2', tag: '像素画', lesson: '先描格子' })
-  s.ingestReflection({ roundId: 'rm-3', tag: '像素画', lesson: '颜色表提前定' })
+  await s.ingestReflection({ roundId: 'rm-1', tag: '像素画', intentTitle: '像素画法', lesson: '放大不糊要用邻近采样', evidence: ['o1'] })
+  await s.ingestReflection({ roundId: 'rm-2', tag: '像素画', lesson: '先描格子' })
+  await s.ingestReflection({ roundId: 'rm-3', tag: '像素画', lesson: '颜色表提前定' })
   const px = s.list('skills').find((d) => d.meta.kind === '像素画')
   assert.ok(px, '像素画技能在库')
   // 1) kind 精确

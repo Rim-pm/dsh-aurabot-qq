@@ -98,3 +98,12 @@ test('普通方括号（[图片] 之类）不受影响', () => {
   assert.deepEqual(texts(parseReply('[图片] 这张好看')), ['[图片] 这张好看'])
   assert.deepEqual(texts(parseReply('[动画表情] 笑死')), ['[动画表情] 笑死'])
 })
+
+test('贴两张已有图片与只给来源网页走不同的回复类型', () => {
+  const a = 'https://example.org/scene.jpg?size=2&v=4', b = 'https://example.org/cover.png'
+  assert.deepEqual(parseReply(`![街景](${a})\n![封面](${b})`).items, [
+    { kind: 'image', value: a }, { kind: 'image', value: b },
+  ])
+  const page = 'https://example.org/gallery'
+  assert.deepEqual(parseReply(page).items, [{ kind: 'text', value: page }])
+})

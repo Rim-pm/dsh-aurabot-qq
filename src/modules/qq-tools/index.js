@@ -134,7 +134,7 @@ export default {
       })]
       tools.push(defineTool({
         name: 'qq_send_card',
-        description: '向当前聊天发送分享、音乐、位置、联系人、骰子或猜拳。音乐的 music_type、联系人的 contact_type 对应卡片里的 type。',
+        description: '向当前聊天发送网页分享卡片、音乐、位置、联系人、骰子或猜拳。对方要的是图片时，在回复里用 ![说明](图片直链) 贴图；只有来源网页就发网页链接。音乐的 music_type、联系人的 contact_type 对应卡片里的 type。',
         properties: {
           type: str('share / music / location / contact / dice / rps'),
           url: str('分享或自定义音乐的链接'), title: str('分享、音乐或位置的标题'),
@@ -152,7 +152,8 @@ export default {
             const cfg = api.config()
             return { ok: false, message: !cfg.enabled ? '总开关关着，没发' : cfg.dryRun ? '试运行，只记了日志，没真发' : '卡片没发出去' }
           }
-          return { ok: true, message: '卡片发出去了' }
+          return { ok: true, message: card.segment.type === 'share' && card.segment.data.image
+            ? '已发送网页分享卡片，封面没有作为单独的图片发送。' : '卡片发出去了' }
         },
       }))
       // 跨天搜聊天流水：只读。qq_chat_history 只能翻当前聊天最近 50 条，
