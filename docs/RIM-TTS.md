@@ -1,7 +1,15 @@
 # 接 RimTTS 当 Rim 的声音
 
+> **【已弃用 / DEPRECATED】** RimTTS 仓库准备清理，这个引擎暂时保留、不推荐继续使用。
+> 功能本身没坏：面板仍选 `engine=rimtts` 且目录在，就照旧能说话；清理 RimTTS 仓库后本引擎会
+> **静默降级成发文字**（`installed()` 返回 false，不报错、不崩）。彻底移除前的完整改动点见文末
+> 「弃用与移除清单」。
+
 面板「语音」页的引擎里多了一项 **RimTTS（Rim 的声音）**：用 RimTTS 项目（同机另一个仓库）训练好的
 GPT-SoVITS 权重，把她要说的话念成琳的声音发语音条。
+
+本引擎依赖的是**整个 RimTTS 仓库**（`tools/GPT-SoVITS` 的 venv + `api_v2.py` + 权重 + `pipeline/refs_pool.json`），
+不是它编译出来的 `RimTTSReader.exe`；RimBot 不 import 任何 RimTTS 代码，只 `spawn` 那个 python 并调 HTTP。
 
 这个模型很大，所以默认**不常驻**：要说话时才把推理服务拉起来，说完空闲一会儿就关掉，把内存和显存还回去。
 冷启动的代价是真的（几十秒），代码里用三种办法把它藏起来，见下面「冷启动怎么藏」。
@@ -132,3 +140,28 @@ process.exit(0)
 - 把 `bert_base_path` 换小模型（中文 BERT 占启动时间的大头），音色基本不受影响。
 - 常驻一个**不加载模型**的壳，收到请求再 `os.execl` 重启自己（省掉 Python + torch 的 import，约 5–8 秒）。
 - 高频句子（「晚安」「在呢」）走磁盘缓存，命中就不起服务——RimTTS 自己的 `ttsclient.py` 就是这么做的。
+
+## 弃用与移除清单
+
+当前状态：**已标注弃用，代码未删，功能可用**。清理 RimTTS 仓库不会让 RimBot 崩，只会让语音条
+静默降级成文字（`installed()` false → `rimttsSynth` 抛「还没配置好」→ `noFallback=true` 继续抛 →
+`hub.js` 的 `sendVoice` 捕获后改发文字）。
+
+只弃用、不删代码：**零改动**，面板把引擎切成 `edge` / `auto` 即可，`src/voice/rimtts.js` 变成死代码。
+
+彻底移除时涉及这些位置（约 9 处）：
+
+| 文件 | 改动 |
+|---|---|
+| `src/voice/rimtts.js` | 整个删除（约 356 行） |
+| `src/voice/tts.js` | 删 import 与 `local` 映射里的 `rimtts`（约 :13、:559） |
+| `src/modules/voice/index.js` | 删 import、`/voice/rimtts` 路由、`prewarm`/`hot`（约 :11、:53-65） |
+| `src/chat/hub.js` | 删两处 `engine === 'rimtts'` 特判（约 :2236、:3817） |
+| `src/core/config.js` | 删默认块（约 :136-150）、引擎白名单里的 `rimtts`、整段归一化（约 :1081-1093） |
+| `client/client.js` | 删 `RimTtsStatus`、`VoiceServiceFields` 的 rimtts 分支、引擎选项、`VOICE_SERVICES` 条目 |
+| `test/voice-rimtts.test.js` | 整个删除 |
+| `test/panel-stage2.test.js` | **改掉那条强制要求面板保留 rimtts 的断言**（约 :254-272），否则测试会挂 |
+| `package.json`、`RIMBOT.md`、本文件 | 从 `files` 清单与文档里移除 |
+
+注意 `test/panel-stage2.test.js` 那条断言是 fork 专属的「别把 rimtts 从引擎列表丢掉」，删代码时必须
+同步改，不能只删 `src/voice/rimtts.js`。

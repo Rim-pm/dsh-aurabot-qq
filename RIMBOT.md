@@ -111,7 +111,7 @@ git merge upstream/release/1.3.0     # 换成当时最新的 release/1.3.x
 # 冲突重点：package.json、src/core/config.js、client/client.js、
 #          src/chat/hub.js、src/persona/personas.js、
 #          extensions/bili-observer/bili/api.js
-# 本地要保住：RimTTS、抖音/B站链接转存扩展、琳的人格卡（personas/）、
+# 本地要保住：RimTTS（已弃用，待清理）、抖音/B站链接转存扩展、琳的人格卡（personas/）、
 #            B 站「只观察不写」的闸门（见下）
 npm test                              # 2521 条；e2e / hub-lifecycle 个别用例并发下会抖，单跑能过
 ```

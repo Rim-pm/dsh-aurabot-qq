@@ -1,5 +1,12 @@
 // RimTTS：用 RimTTS 项目（GPT-SoVITS api_v2 + Rim 的微调权重）念她的话。
 //
+// 【已弃用 / DEPRECATED】RimTTS 项目准备清理，这一引擎保留代码但不再作为推荐路线：
+//   · 功能没坏，只要面板里仍选 engine=rimtts 且目录在，就照旧能说话；
+//   · 清理 RimTTS 仓库后本文件会静默降级（installed() 为 false → 这条改发文字），不报错；
+//   · 彻底移除前先看 docs/RIM-TTS.md「弃用」一节列的全部改动点（含 panel-stage2 断言）。
+// 依赖的是整个 RimTTS 仓库（tools/GPT-SoVITS 的 venv + api_v2.py + 权重 + pipeline/refs_pool.json），
+// 不是它编译出来的 RimTTSReader.exe；不 import 任何 RimTTS 代码，只 spawn 那个 python 并调 HTTP。
+//
 // 这个模型很大，所以默认**不常驻**：
 //   要说话 → 服务没在跑就先拉起来 → 等就绪（可选预热）→ 合成 → 空闲 idleSeconds 秒后关掉，把内存/显存还回去。
 // 实测（RTX 4060 Ti / turbo 配置）：冷启动约 37 秒，起来后占约 4.3 GB 内存 + 2.2 GB 显存，
@@ -55,7 +62,8 @@ function pyOf(cfg) {
   return WIN ? join(gsvOf(cfg), '.venv', 'Scripts', 'python.exe') : join(gsvOf(cfg), '.venv', 'bin', 'python')
 }
 
-/** 面板里填的目录能不能用：根目录、venv、配置文件三个都在才算。 */
+/** 面板里填的目录能不能用：根目录、venv、配置文件三个都在才算。
+ *  @deprecated 随 RimTTS 引擎一起弃用；RimTTS 仓库清理后这里恒为 false。 */
 export function installed(cfg = {}) {
   if (!rootOf(cfg)) return false
   if (!existsSync(pyOf(cfg))) return false
@@ -139,7 +147,8 @@ function killTree(proc) {
   } catch (error) {}
 }
 
-/** 关掉我们自己起的服务。别人起的（child === null）不动。 */
+/** 关掉我们自己起的服务。别人起的（child === null）不动。
+ *  @deprecated 随 RimTTS 引擎一起弃用。 */
 export function stop() {
   if (stopping) return stopping
   stopping = (async () => {
@@ -281,14 +290,16 @@ async function requestTts(cfg, text, ref, lang) {
   return buf
 }
 
-/** 服务现在热着吗（同步判断，给「冷了就改发文字」用）。 */
+/** 服务现在热着吗（同步判断，给「冷了就改发文字」用）。
+ *  @deprecated 随 RimTTS 引擎一起弃用。 */
 export function hot() {
   if (child && child.exitCode === null) return true
   // 不是我们起的服务（比如划词朗读在跑）：刚确认过健康就算热
   return Date.now() - lastHealthyAt < 60_000
 }
 
-/** 提前把服务叫起来，和模型思考并行。失败了不吵，等真要说话时再报错。 */
+/** 提前把服务叫起来，和模型思考并行。失败了不吵，等真要说话时再报错。
+ *  @deprecated 随 RimTTS 引擎一起弃用。 */
 export function prewarm(cfg = {}, log) {
   if (!cfg.prewarm || !installed(cfg)) return
   if (child && child.exitCode === null) return // 已经在跑（或正在起）
@@ -297,6 +308,7 @@ export function prewarm(cfg = {}, log) {
 
 /**
  * 合成一句话，返回音频文件路径。
+ * @deprecated 随 RimTTS 引擎一起弃用；tts.js 里仍挂在 local 映射上，切换引擎后不再被调用。
  * @param {string} text
  * @param {object} cfg  voice.rimtts 那一段
  * @returns {Promise<string>}
@@ -329,7 +341,8 @@ export function rimttsSynth(text, cfg = {}, log) {
   return p
 }
 
-/** 面板「语音」页看状态用。 */
+/** 面板「语音」页看状态用。
+ *  @deprecated 随 RimTTS 引擎一起弃用。 */
 export function status(cfg = {}) {
   return {
     configured: installed(cfg),

@@ -8,6 +8,8 @@ import { fishBalances, fishPrimary } from '../../voice/fish.js'
 import { runCloud } from '../../voice/tts.js'
 import { VOLCANO_VOICES } from '../../voice/volcano-voices.js'
 import { breezeBalance, breezeClaim, breezeSession, autoClaimOnce, breezeVoices } from '../../voice/breeze.js'
+// RimTTS 引擎已弃用（见 src/voice/rimtts.js 头部与 docs/RIM-TTS.md）。下面四件事都只在
+// voice.engine === 'rimtts' 时才真正起作用；切成别的引擎后它们不会触发，代码保留待彻底移除。
 import { status as rimttsStatus, stop as rimttsStop, hot as rimttsHot, prewarm as rimttsPrewarm } from '../../voice/rimtts.js'
 import { createSongVoice } from '../../voice/rvc.js'
 import { toMono16k } from '../../voice/wav.js'
@@ -48,6 +50,7 @@ export default {
     }
 
     // RimTTS（大模型按需起）：趁模型还在想怎么回，先把推理服务拉起来，冷启动的 37 秒就能藏掉大半。
+    // 已弃用：engine !== 'rimtts' 时 prewarm/hot 都退化成空操作，route 只服务面板状态条。
     const rimCfg = () => api.config().voice.rimtts || {}
     const prewarm = () => rimttsPrewarm(rimCfg(), api.log)
     // 服务热着吗：别的引擎（edge / windows / 在线）本来就是秒出，一律算热

@@ -2860,7 +2860,8 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       )
     }
 
-    /** RimTTS 是按需起的：这里显示模型现在在不在、上次冷启动多久，还能手动关掉把内存还回去。 */
+    /** RimTTS 是按需起的：这里显示模型现在在不在、上次冷启动多久，还能手动关掉把内存还回去。
+     *  已弃用：RimTTS 仓库准备清理，这块面板只保留给还在用旧配置的人，不再推荐。 */
     function RimTtsStatus({ toast }) {
       const [s, setS] = useState(null)
       const load = () => get('/voice/rimtts').then(setS).catch(() => setS({ ok: false, configured: false }))
@@ -3105,6 +3106,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         h('div', { className: 'ab-muted ab-small', style: { marginTop: 8 } }, '常用的声音来源可以置顶，最多四个。'))
     }
 
+    // rimtts 已弃用：仍列在服务表里，好让旧配置的引擎名还能显示中文；「已弃用」标在引擎选项上。
     const VOICE_SERVICES = { 'fish-free': 'Fish Audio', breeze: 'Breeze', edge: '微软在线语音', volcano: '豆包语音', minimax: 'MiniMax', cosyvoice: 'CosyVoice', gptsovits: 'GPT-SoVITS', rimtts: 'RimTTS', http: '自定义 HTTP' }
 
     function FishBalance() {
@@ -3275,6 +3277,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           ? h(Row, { key: 'b', label: '请求体', hint: '{text} 换成要念的话（自动转义），{reqid} 换成每次不同的随机串' }, f.area('voice.http.body', { size: 'wide', rows: 6, placeholder: '{"app":{"appid":"你的appid","token":"随便填","cluster":"volcano_tts"},"user":{"uid":"aurabot"},"audio":{"voice_type":"zh_female_wanwanxiaohe_moon_bigtts","encoding":"mp3"},"request":{"reqid":"{reqid}","text":"{text}"}}' }))
           : null,
       ]
+      // RimTTS 已弃用（见 docs/RIM-TTS.md）：保留配置项，清理 RimTTS 仓库后这里会显示「没找到 RimTTS」。
       if (id === 'rimtts') return [
         h(Row, { key: 'r', label: 'RimTTS 目录', hint: 'RimTTS 项目的根目录（里面有 tools/GPT-SoVITS 和 pipeline/refs_pool.json）' }, f.text('voice.rimtts.root', { size: 'wide', placeholder: 'D:\\RimTTS' })),
         h(Row, { key: 'c', label: '配置文件', hint: '相对 tools/GPT-SoVITS。turbo 最快；v5dev 音质更好但慢一倍' }, f.text('voice.rimtts.configYaml', { size: 'wide' })),
@@ -3300,7 +3303,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         { value: 'edge', label: '微软 edge-tts', desc: st.voice.edgeInstalled ? '在线，音色自然（已装好）' : '在线，音色自然（还没装）' },
         { value: 'cosyvoice', label: '本地 CosyVoice', desc: '自己部署的 CosyVoice 服务，可克隆音色' },
         { value: 'gptsovits', label: '本地 GPT-SoVITS', desc: '用自己准备的录音定音色' },
-        { value: 'rimtts', label: 'RimTTS（Rim 的声音）', desc: 'RimTTS 项目训练好的 Rim 音色；模型大，说话时才起、说完就关' },
+        { value: 'rimtts', label: 'RimTTS（Rim 的声音）· 已弃用', desc: 'RimTTS 项目训练好的 Rim 音色；模型大，说话时才起、说完就关。已弃用：RimTTS 仓库准备清理，仍可用但不推荐，建议改用 edge / 豆包 / MiniMax' },
         { value: 'volcano', label: '豆包语音（火山）', desc: '只填 API Key，选个音色就行' },
         { value: 'fish-free', label: 'Fish Audio', desc: 'S2.1 Pro Free，可选音色' },
         { value: 'breeze', label: 'Breeze 语音', desc: 'BreezeBlue 云端或自建，填 Key + 音色 id' },

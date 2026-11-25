@@ -133,6 +133,7 @@ export const DEFAULTS = {
     gptsovits: { url: 'http://127.0.0.1:9880', refAudio: '', promptText: '', promptLang: 'zh', textLang: 'zh' },
     // RimTTS：用 RimTTS 项目（GPT-SoVITS api_v2 + 微调权重）念。模型很大（约 4.3 GB 内存 + 2.2 GB 显存），
     // 所以默认按需起、空闲关：说话前才把 api_v2 拉起来（冷启动约 37 秒），说完 idleSeconds 秒后关掉。
+    // 【已弃用】RimTTS 仓库准备清理；这里保留默认值与归一化，旧配置仍可用，只是不再推荐。
     rimtts: {
       root: '', // RimTTS 项目根目录（里面有 tools/GPT-SoVITS 和 pipeline/refs_pool.json）
       configYaml: 'GPT_SoVITS/configs/tts_infer_rim_turbo.yaml', // 相对 tools/GPT-SoVITS
@@ -1076,6 +1077,7 @@ export function normalize(raw) {
   if (c.voice.keyPools) c.voice.keyPools = normalizePools(c.voice.keyPools)
   c.voice.fishApiKey = String(c.voice.fishApiKey || '').trim()
   c.voice.fishReferenceId = String(c.voice.fishReferenceId || '').trim()
+  // rimtts 已弃用：引擎名仍在白名单里，好让旧配置原样加载；彻底移除时连同下面整段归一化一起删。
   if (!['auto', 'edge', 'windows', 'cosyvoice', 'gptsovits', 'http', 'volcano', 'breeze', 'minimax', 'fish-free', 'rimtts'].includes(c.voice.engine)) c.voice.engine = 'auto'
   c.voice.rimtts.root = String(c.voice.rimtts.root || '').trim().slice(0, 400)
   c.voice.rimtts.configYaml = String(c.voice.rimtts.configYaml || '').trim().slice(0, 200) || 'GPT_SoVITS/configs/tts_infer_rim_turbo.yaml'

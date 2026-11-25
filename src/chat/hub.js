@@ -2231,6 +2231,7 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
       const all = joinSpoken(texts.map((t) => t.value))
       // 只有「按需起」的引擎（RimTTS）才需要问一句热不热；别的引擎本来就是秒出，
       // 这里连函数都不调，免得给每次回复多添几毫秒。
+      // RimTTS 已弃用：engine 不是 rimtts 时恒为 true，这段特判随引擎一起退场。
       const ready = cfg.voice.engine === 'rimtts' ? tts.hot?.() !== false : true
       if (all.length <= cfg.voice.autoMaxChars && ready && Math.random() < cfg.voice.autoChance * mood().voice) items = [{ kind: 'voice', value: all }]
     }
@@ -3811,6 +3812,7 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
     if (opts.wantVoice) st.wantVoice = true
     // 对方明确要语音：趁她还在想怎么说，先把 TTS 服务叫起来。
     // RimTTS 这种按需起的大模型冷启动要 30-40 秒，正好和这一轮的思考并行，藏掉大半等待。
+    // RimTTS 已弃用：engine 不是 rimtts 时这里不会触发。
     if (opts.wantVoice) {
       const v = getConfig().voice
       if (v.enabled && v.engine === 'rimtts') tts.prewarm?.()
