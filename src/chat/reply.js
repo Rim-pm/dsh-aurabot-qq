@@ -895,18 +895,26 @@ export function parseReply(text, options) {
 
 const MAX_BUBBLES = 5
 
-/** 文字气泡最多 5 条，多出来的并进最后一条（防止刷屏）。 */
+/** 优先合并靠后的相邻文字，尽量收在 5 条内。媒体和新的引用各自保留位置。 */
 function capBubbles(items) {
-  const texts = items.filter((i) => i.kind === 'text')
-  if (texts.length <= MAX_BUBBLES) return items
-  const keep = new Set(texts.slice(0, MAX_BUBBLES - 1))
-  const tail = texts.slice(MAX_BUBBLES - 1)
-  const merged = { kind: 'text', value: tail.map((t) => t.value).join('\n') }
+  let excess = items.filter(item => item.kind === 'text').length - MAX_BUBBLES
+  if (excess <= 0) return items
+
+  // 从后往前挑可以合并的边界，纯文字仍然先保留前四条。
+  const joinPrevious = new Set()
+  for (let i = items.length - 1; i > 0 && excess > 0; i--) {
+    if (items[i].kind === 'text' && !items[i].replyTo && items[i - 1].kind === 'text') {
+      joinPrevious.add(i)
+      excess--
+    }
+  }
   const out = []
-  let placed = false
-  for (const it of items) {
-    if (it.kind !== 'text' || keep.has(it)) out.push(it)
-    else if (!placed) { out.push(merged); placed = true }
+  for (let i = 0; i < items.length; i++) {
+    const first = items[i]
+    if (!joinPrevious.has(i + 1)) { out.push(first); continue }
+    const lines = [first.value]
+    while (joinPrevious.has(i + 1)) lines.push(items[++i].value)
+    out.push({ ...first, value: lines.join('\n') })
   }
   return out
 }
