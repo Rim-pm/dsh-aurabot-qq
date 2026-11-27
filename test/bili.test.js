@@ -57,7 +57,7 @@ test('解析：Cookie 只取有用的、认出视频号和短链、QQ 分享卡�
   assert.equal(api.findVideoId('没有链接'), null)
   const { cardText } = await import('../src/chat/inbound.js')
   const card = JSON.stringify({ meta: { detail_1: { title: '哔哩哔哩', desc: '猫猫做饭', qqdocurl: 'https://b23.tv/xyz?share=1' } } })
-  assert.equal(cardText(card), '[分享卡片（哔哩哔哩）：猫猫做饭 https://b23.tv/xyz]')
+  assert.equal(cardText(card), '[分享卡片（哔哩哔哩）：猫猫做饭 https://b23.tv/xyz?share=1]')
   assert.equal(cardText('不是 json'), '[卡片消息]')
 })
 
