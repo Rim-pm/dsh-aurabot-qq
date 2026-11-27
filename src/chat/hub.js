@@ -2666,10 +2666,7 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
       text = await expandForwards(msg, text)
       if (disposed) return
       msg.forwardExpanded = true
-      if (msg.kind === 'group') {
-        const last = (groupBuf.get(msg.groupId) || []).findLast?.((x) => x.uid === msg.userId)
-        if (last) { last.text = text; last.forwardExpanded = true }
-      }
+      if (groupEntry) { groupEntry.text = text; groupEntry.forwardExpanded = true }
     }
     const voiceText = cfg.voice.asr && msg.records.length
       ? (groupEntry?.voicePromise ? await groupEntry.voicePromise : await transcribe(msg))
@@ -2681,8 +2678,7 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
     }
     if (voiceText && msg.kind === 'group') {
       // 群消息的文字在 groupBuf 里，语音转出来的字补进去，拼提示词时才看得到
-      const last = (groupBuf.get(msg.groupId) || []).findLast?.((x) => x.uid === msg.userId)
-      if (last) last.text = text
+      if (groupEntry) groupEntry.text = text
     }
     // 引用消息：私聊现在就把被引用的内容取出来拼进正文；群聊留给 groupPrompt 懒加载（没交给她就白取）
     const quoted = msg.kind === 'private' && msg.replyId ? await quotedInfo(msg.replyId, msg) : null

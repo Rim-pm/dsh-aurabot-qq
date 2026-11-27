@@ -198,7 +198,7 @@ export function cardText(raw) {
     }
     const m = meta.detail_1 || meta.news || meta.music || Object.values(meta)[0] || {}
     const title = String(m.desc || m.title || j.prompt || '').trim()
-    const url = String(m.qqdocurl || m.jumpUrl || m.url || '').split('?')[0]
+    const url = String(m.qqdocurl || m.jumpUrl || m.url || '').trim()
     const from = String(m.title && m.desc ? m.title : m.tag || '').trim()
     if (!title && !url) return '[卡片消息]'
     return `[分享卡片${from ? '（' + from + '）' : ''}：${title}${url ? ' ' + url : ''}]`
