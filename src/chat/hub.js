@@ -139,6 +139,23 @@ function chatImageRefs(segs, cap = 4) {
   return out
 }
 
+/**
+ * 本号自己发出的群消息，要不要补进群聊上下文。
+ * 只收纯文字：图片 / 表情没有正文，补进去只是噪音；她自己刚发出去的那条（sentIds 里有）也不重复记。
+ * @returns 群聊上下文的条目，或 null（不补）
+ */
+export function selfEchoEntry(msg, { sentIds, now = Date.now() } = {}) {
+  if (!msg || msg.kind !== 'group') return null
+  const text = String(msg.text || '').trim()
+  if (!text) return null
+  const mid = String(msg.messageId || '')
+  if (mid && mid !== '0' && sentIds && sentIds.has(mid)) return null
+  return {
+    t: now, uid: msg.userId, nick: '你（本号）', text, at: false, mid, direct: false,
+    replyId: msg.replyId, images: [], stickers: [], voicePromise: null, voiceText: '', self: true,
+  }
+}
+
 export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, buildTools, contextProviders, onActivity, memoryScore, onMemoryCommand, onCommand, isMuted, dislikes, random = Math.random, moodEffects, localApi, hooks, availableModels, toolsGeneration, capabilitiesOf, askModel }) {
   const archives = new Map()
   let forgottenRules = null
@@ -2712,7 +2729,18 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
     selfId = String(event.self_id || selfId || getConfig().botQQ)
     const cfg = getConfig()
     const msg = parseMessageEvent(event, selfId, { faceName: faces.nameOf })
-    if (msg.userId === selfId) return
+    if (msg.userId === selfId) {
+      // 网关上报本号自己发的消息（reportSelfMessage）时：只补进群聊上下文，让她知道
+      // 主人可能用别的客户端代发过这句话。不触发回复，也不重复记她自己刚发出去的那条。
+      const entry = selfEchoEntry(msg, { sentIds })
+      if (entry) {
+        const buf = groupBuf.get(msg.groupId) || []
+        buf.push(entry)
+        while (buf.length > 40) buf.shift()
+        groupBuf.set(msg.groupId, buf)
+      }
+      return
+    }
     if (ignoredGroupMember(cfg, msg)) return
     const now = Date.now()
     const wasCleared = () => isBeforeMemoryReset(msg.chatId, msg.userId, now)
@@ -3198,7 +3226,8 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
     groupRefs.set(chat.groupId, refs)
     const query = fresh.map((x) => x.text).filter(Boolean).join('\n')
     // 按每个人最后一次发言的先后排列，供记忆挑选最近的说话人。
-    const speakers = [...new Set(fresh.map((x) => String(x.uid || '')).filter(Boolean).reverse())].reverse()
+    // 本号代发的消息不是「说话人」，挑最近说话人时要跳过
+    const speakers = [...new Set(fresh.filter((x) => !x.self).map((x) => String(x.uid || '')).filter(Boolean).reverse())].reverse()
     const hint = mode === 'interject' ? '（没人叫你。只有你对这个话题真有话说、能自然接上时才插一句：接着话题说，别突然开新话题；接不上就只回 [沉默]）'
       : mode === 'engaged' ? engagedHint(groupEngagedRun.get(chat.groupId) || 0)
       : '（有人在叫你，看完这一段再回；不是主人又不想理，就只回 [沉默]）'
