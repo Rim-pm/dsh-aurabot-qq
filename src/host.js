@@ -319,6 +319,9 @@ export function apply(ctx) {
           if (approvalRelay?.handleReply(`private:${ev.user_id}`, ev.user_id, text)) return
         }
         hub.onMessage(ev).catch((error) => log.error('处理消息出错：', error.message))
+      } else if (ev.message_type === 'group') {
+        // 网关上报的本号群消息（reportSelfMessage）：交给中枢补进群聊上下文，不触发回复
+        hub.onMessage(ev).catch((error) => log.error('处理消息出错：', error.message))
       }
     } else if (ev.post_type === 'notice' && ev.notice_type === 'bot_offline') {
       log.warn(`QQ 账号离线${ev.tag ? '（' + String(ev.tag).slice(0, 100) + '）' : ''}${ev.message ? '：' + String(ev.message).slice(0, 300) : ''}`)
