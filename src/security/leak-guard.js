@@ -70,7 +70,9 @@ const MEMSEARCH_LINE = /^\[memsearch\]\s*Recall available\b/i
 
 const isInjectionLine = (line) => TIME_CONTEXT_LINE.test(line) || MEMSEARCH_LINE.test(line)
 
-const OUTBOUND_SCAFFOLD_HEAD = /(?<!^)(?<!\n)【系统提醒[^】\n]*】/g
+// 模型抄这块时有时会连前面的引导词一起抄（「user【系统提醒…】」），前缀一起吃掉，
+// 否则剥完还剩一个孤零零的 user。用 lookbehind 防止误伤 superuser 这类单词。
+const OUTBOUND_SCAFFOLD_HEAD = /(?:(?<![A-Za-z0-9_])user[ \t]*)?(?<!^)(?<!\n)【系统提醒[^】\n]*】/g
 const OUTBOUND_ROOM_HEAD = /【你在自己家里[^】\n]*】/g
 
 function runtimeContextEnd(text, start) {

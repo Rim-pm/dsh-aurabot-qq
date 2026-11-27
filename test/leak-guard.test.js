@@ -228,6 +228,20 @@ test('系统提醒/房间注入块被模型续写时不发到 QQ', () => {
   assert.equal(cleanOutboundText(text), '我先说一句')
 })
 
+test('系统提醒块前面带 user 前缀时也整段清掉', () => {
+  // 2026-11-27 线上：模型先写一句正文，再抄「user【系统提醒…】」整段；
+  // 原来只从【系统提醒 起剥，正文尾巴会剩一个孤零零的 user。
+  const text = [
+    '杨哥 一点一刻了 吃完饭回图书馆了吧 [表情：摊手无奈的猫耳娘] user【系统提醒，不是主人说的话】你已经 187 分钟没和主人私聊了。',
+    '【当前本机时间】2026-11-27 星期五 下午 16:21（以此判断时段，不以图片为准）。',
+    'Current runtime context. This snapshot supersedes earlier runtime-context snapshots.',
+    'Current working directory: "C:\\dsh\\home\\wechat\\aurabot-qq".',
+  ].join('\n')
+  assert.equal(cleanOutboundText(text, { ownerPrivate: true }), '杨哥 一点一刻了 吃完饭回图书馆了吧 [表情：摊手无奈的猫耳娘]')
+  // 没有 user 前缀的老行为不变（块头直接在正文里）
+  assert.equal(cleanOutboundText('先说一句 【系统提醒，不是主人说的话】别连发', { ownerPrivate: true }), '先说一句')
+})
+
 // memsearch 插件每轮在上下文最前面挂一行可用性提示，模型复述时会当正文发出去。
 const MEMSEARCH =
   '[memsearch] Recall available if needed. Use the memory-recall skill when the question could benefit from past sessions, decisions, or work in this project.'
