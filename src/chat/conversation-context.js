@@ -118,7 +118,9 @@ export function createConversationArchive({ directory, namespace = 'default', no
     const key = keyFor(chatId)
     if (cache.has(key)) return cache.get(key)
     const journal = join(directory, key + '.jsonl'), checkpoint = join(directory, key + '.json')
-    const value = { journal, checkpoint, messages: [], revision: 0 }
+    const exclusions = join(directory, key + '.excluded.json')
+    const excluded = new Set(existsSync(exclusions) ? JSON.parse(readFileSync(exclusions, 'utf8')) : [])
+    const value = { journal, checkpoint, exclusions, excluded, messages: [], revision: 0 }
     // Recover from the journal, including a turn appended before a checkpoint
     // write was interrupted. Reject malformed committed lines rather than reset.
     if (existsSync(journal)) {
@@ -134,11 +136,11 @@ export function createConversationArchive({ directory, namespace = 'default', no
     }
     cache.set(key, value); return value
   }
-  function append(chatId, { role, text, id = randomUUID(), speakerId = '', at = now(), contextAt = at }) {
+  function append(chatId, { role, text, id = randomUUID(), speakerId = '', at = now(), contextAt = at, contextId }) {
     if (!['user', 'assistant'].includes(role)) throw new Error('Invalid conversation role')
     const value = state(chatId), body = String(text || '').trim()
     if (!body || value.messages.some(m => m.id === id)) return false
-    const message = { id, role, text: body, speakerId: String(speakerId), at: Number(at) || now(), contextAt: Number(contextAt) || Number(at) || now() }
+    const message = { ...(contextId ? { contextId } : {}), id, role, text: body, speakerId: String(speakerId), at: Number(at) || now(), contextAt: Number(contextAt) || Number(at) || now() }
     mkdirSync(directory, { recursive: true })
     appendFileSync(value.journal, JSON.stringify(message) + '\n', { encoding: 'utf8', mode: 0o600 })
     value.messages.push(message); value.revision++
@@ -148,7 +150,10 @@ export function createConversationArchive({ directory, namespace = 'default', no
     renameSync(temp, value.checkpoint)
     return true
   }
-  const available = chatId => state(chatId).messages.filter(m => visible(chatId, m))
+  const available = chatId => {
+    const value = state(chatId)
+    return value.messages.filter(m => !value.excluded.has(m.contextId) && visible(chatId, m))
+  }
   function recent(chatId, limit = 32) {
     const count = Math.max(0, Math.min(256, Math.trunc(Number(limit) || 0)))
     return count ? available(chatId).slice(-count).map(m => ({ ...m })) : []
@@ -192,7 +197,7 @@ export function createConversationArchive({ directory, namespace = 'default', no
     for (let i = entry.consumed; i < value.messages.length; i++) {
       const m = value.messages[i]
       entry.consumed = i + 1
-      if (!visible(chatId, m)) continue
+      if (value.excluded.has(m.contextId) || !visible(chatId, m)) continue
       const size = JSON.stringify(m).length + JSON.stringify(m.id).length + 2
       const block = entry.block
       if (block.length && (m.at - block.at(-1).at > 30 * 60_000 || (m.role === 'user' && block.length >= 8) || entry.serializedSize + size > recordBudget)) emit()
@@ -231,5 +236,16 @@ export function createConversationArchive({ directory, namespace = 'default', no
     const hits = retrieve(queriesFor(query, recentMessages), docs, { limit: 6 })
     return packEvidence(hits, render, maxCharacters)
   }
-  return { append, recent, recall, episodes }
+  function excludeContext(chatId, contextId) {
+    const value = state(chatId)
+    if (value.excluded.has(contextId)) return
+    const next = new Set(value.excluded).add(contextId)
+    mkdirSync(directory, { recursive: true })
+    const temp = value.exclusions + '.' + process.pid + '.tmp'
+    writeFileSync(temp, JSON.stringify([...next]), { encoding: 'utf8', mode: 0o600 })
+    renameSync(temp, value.exclusions)
+    value.excluded = next
+    for (const key of episodeCache.keys()) if (key.startsWith(chatId + '|')) episodeCache.delete(key)
+  }
+  return { append, recent, recall, episodes, excludeContext }
 }

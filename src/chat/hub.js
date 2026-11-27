@@ -2198,8 +2198,9 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
       if (src && src.kind === 'user') st.directOwner = true
       const direct = textOf(event.data && event.data.message)
       if (direct) {
-        if (st.lastText) st.prevText = st.lastText
+        if (st.lastText) { st.prevText = st.lastText; st.prevInputMessageId = st.lastInputMessageId }
         st.lastText = direct.slice(-600)
+        st.lastInputMessageId = event.data?.id
         st.speakers = [String(getConfig().ownerQQ)]
         st.senders = new Set([String(getConfig().ownerQQ)])
       }
@@ -3187,7 +3188,7 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
   /** 群聊这一段的提示词：之前的几句当背景，上次交给她之后群里新说的话全部列出来，让她看完整段再回。 */
   async function groupPrompt(chat, mode, imageRoom = 0, refOffset = 0) {
     const name = await groupName(chat.groupId)
-    const buf = groupBuf.get(chat.groupId) || []
+    const buf = (groupBuf.get(chat.groupId) || []).filter(x => !x.inputRejected)
     // 时间戳可能同一毫秒：直接取上一轮之后的消息，避免紧接着到达的消息丢失。
     const fresh = buf.filter((x) => !x.fed).slice(-20)
     const older = buf.filter((x) => x.fed).slice(-8)
@@ -3267,7 +3268,7 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
     }
     const archiveMessages = fresh.filter(x => x.text).map(x => ({ role: 'user', text: x.text,
       speakerId: String(x.uid || ''), at: x.t, id: x.mid && x.mid !== '0' ? 'qq:' + chat.groupId + ':' + x.mid : randomUUID() }))
-    return { text: text + mediaNote, query, speakers, replyRefs: refs, autoReply: pickAutoReply(fresh), directRequester: pickDirectRequester(fresh), images: [...quotedImages, ...extraImages], archiveMessages, freshCount: fresh.length }
+    return { contextEntryIds: [...older, ...fresh].map(x => x.contextEntryId ||= randomUUID()), text: text + mediaNote, query, speakers, replyRefs: refs, autoReply: pickAutoReply(fresh), directRequester: pickDirectRequester(fresh), images: [...quotedImages, ...extraImages], archiveMessages, freshCount: fresh.length }
   }
 
   /** 群聊这一段里别人发的图：按时间顺序最多取 2 张交给识图模型，拼成一句话。 */
@@ -3402,6 +3403,7 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
     if (p.chat.kind === 'group') {
       p.retryContent = content
       p.retryArchiveMessages = p.archiveMessages
+      p.retryContextEntryIds = p.contextEntryIds
       p.retryQuery = p.query
       p.retrySpeakers = p.speakers
       p.retryRefs = groupRefs.get(p.chat.groupId) || {}
@@ -3481,6 +3483,7 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
       if (p.retryRefs) groupRefs.set(p.chat.groupId, { ...p.retryRefs, ...groupRefs.get(p.chat.groupId) })
       const retainedIds = new Set((p.retryArchiveMessages || []).map((message) => message.id))
       content = p.retryContent ? [...p.retryContent, ...(gp.freshCount ? freshContent : [])] : freshContent
+      p.contextEntryIds = [...new Set([...(p.retryContextEntryIds || []), ...gp.contextEntryIds])]
       p.query = [p.retryQuery, gp.query].filter(Boolean).join('\n')
       p.speakers = [...new Set([...(p.retrySpeakers || []), ...gp.speakers])]
       p.autoReply = gp.autoReply
@@ -3499,7 +3502,7 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
       const [first, ...rest] = [...p.senders]
       // 私聊：检索记忆时去掉「【私聊】某某(QQ)：」这个头
       const query = p.query ?? p.texts.map((t) => t.replace(/^【私聊】[^：]*：/, '')).join('\n')
-      await pushToSession(p.chat, content, first, { wantVoice: p.wantVoice, extraSenders: rest, queryText: query, speakers: p.speakers, replyRefs: p.replyRefs, autoReply: p.autoReply, turnToken, archiveMessages: p.archiveMessages, directRequester: p.directRequester })
+      await pushToSession(p.chat, content, first, { wantVoice: p.wantVoice, extraSenders: rest, queryText: query, speakers: p.speakers, replyRefs: p.replyRefs, autoReply: p.autoReply, turnToken, archiveMessages: p.archiveMessages, contextEntryIds: p.contextEntryIds, directRequester: p.directRequester })
     } catch (error) {
       if (isSessionBackoff(error)) {
         retainSessionMessages(chatId, p, content)
@@ -3635,6 +3638,7 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
     // Capture the persona before awaiting extension hooks; queued turns may use a different one.
     const archiveNamespace = String(getConfig().persona?.current || 'default')
     const archiveContextAt = Date.now()
+    const archiveContextId = randomUUID()
     let recentMessages = [], recalledConversation = ''
     if (chat.kind !== 'system' && getConfig().conversationContext?.enabled === true) {
       try {
@@ -3692,12 +3696,12 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
     if (chat.kind !== 'system' && getConfig().conversationContext?.enabled === true) {
       try {
         const messages = opts.archiveMessages || [{ role: 'user', text: userText, speakerId: senderId || '' }]
-        for (const message of messages) conversationArchive(archiveNamespace).append(chat.chatId, message)
+        for (const message of messages) conversationArchive(archiveNamespace).append(chat.chatId, {...message, contextId:archiveContextId})
       } catch (error) { log.warn('对话记忆保存失败：', error.message) }
     }
     // 告诉同一会话里的其他插件是谁在说（#145）：说话的全是主人才标 owner，混着别人或不知道是谁都是 guest。
     // chat 标私聊还是群聊：群里主人说话也是 owner，但回复全群都看得到，要不要放私事由插件自己判断
-    const message = { id: randomUUID(), role: 'user', content: admitted, source: { kind: SOURCE_KIND, speaker: { role: requestSource.role, chat: chat.kind } } }
+    const message = { id: randomUUID(), role: 'user', content: admitted, source: { kind: SOURCE_KIND, speaker: { role: requestSource.role, chat: chat.kind }, contextEntryIds: opts.contextEntryIds || [], archiveNamespace, archiveContextId } }
     // 所有异步准备完成后，按实际投递路径登记轮次状态；中间不能再 await，
     // 否则上一轮可能先结束，把待登记的回执接走或清掉（#90）。
     // 空闲 agent 的 steer 不会开启新一轮，必须改用 followup。
@@ -3728,7 +3732,7 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
       else st.directRequester = opts.directRequester || null
     }
     // 上一句也留着：这一句太短（「嗯嗯」「然后呢」）时一起拿去想起相关的事
-    if (st.lastText) st.prevText = st.lastText
+    if (st.lastText) { st.prevText = st.lastText; st.prevInputMessageId = st.lastInputMessageId }
     st.lastText = userText.slice(-600)
     st.speakers = opts.speakers || (senderId ? [String(senderId), ...(opts.extraSenders || []).map(String)] : [])
     if (opts.wantVoice) st.wantVoice = true
@@ -3752,6 +3756,7 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
         try { onTurnEnd(result) } catch (error) { log.debug('本轮结束回执出错：', error.message) }
       }
     }
+    st.lastInputMessageId = message.id
     turnState.set(key, st)
     outputSources.set(chat.chatId, sources)
     if (steer) {
@@ -4173,6 +4178,28 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
     return mounted.has(sessionKey(sessionId))
   }
 
+  /** Stop re-injecting the rejected batch; later messages remain in the buffer. */
+  function discardRejectedInputs(sessionId, events) {
+    const chatId = chatOfSession(sessionId)
+    if (!chatId) return
+    const ids = new Set(events.flatMap(e => e.data?.source?.contextEntryIds || []).map(String))
+    if (chatId.startsWith('group:')) {
+      for (const row of groupBuf.get(chatId.slice(6)) || []) {
+        if (ids.has(row.contextEntryId)) row.inputRejected = true
+      }
+    }
+    const st = turnState.get(sessionKey(sessionId))
+    const messageIds = new Set(events.map(e => e.data?.id).filter(Boolean))
+    if (st && messageIds.has(st.lastInputMessageId)) st.lastText = ''
+    if (st && messageIds.has(st.prevInputMessageId)) st.prevText = ''
+    for (const e of events) {
+      const src = e.data?.source
+      if (src?.archiveNamespace && typeof src.archiveContextId === 'string') {
+        conversationArchive(src.archiveNamespace).excludeContext(chatId, src.archiveContextId)
+      }
+    }
+  }
+
   /** 只让一个聊天重新开始：归档它的会话，下一条消息开新会话。 */
   function resetChat(chatId, { memoryResetAt: cutoff = 0 } = {}) {
     const reg = dsh.workspaceRegistry || dsh.get('workspaceRegistry')
@@ -4527,6 +4554,7 @@ export function createHub({ dsh, getConfig, log, onebot, outbox, stickers, tts, 
     turnHasOwner,
     turnSenders,
     resetChat,
+    discardRejectedInputs,
     resetPersonChat,
     memoryResetAt,
     filterHistory,

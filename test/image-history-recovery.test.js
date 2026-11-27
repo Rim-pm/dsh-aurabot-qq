@@ -37,12 +37,12 @@ function fixture(events = [user(0, [text, image(true), image()]), rejection()], 
         if (delay) await delay
         return { events, [Symbol.dispose]: () => { released++ } }
       } }),
-      on: (name, fn) => { listeners.set(name, fn); return () => listeners.delete(name) },
+      on: (name, fn) => { const list=listeners.get(name)||[];list.push(fn);listeners.set(name,list);return ()=>listeners.set(name,list.filter(x=>x!==fn)) },
     },
   }
   return { api, session, appended, messages, logs, events,
     counts: () => ({ released, flushed }),
-    emit: event => { publishing = true; listeners.get('session/event')?.(session, event); publishing = false },
+    emit: event => { publishing = true; listeners.get('session/event')?.forEach(fn=>fn(session,event)); publishing = false },
     stop: () => disposers.forEach(fn => fn()),
   }
 }
@@ -67,8 +67,8 @@ test('legacy gateway rejection restores an idle failed session while preserving 
   assert.deepEqual(f.appended, [{ targets: [{ seq: 0, imageIndexes: [0] }] }])
   assert.equal(JSON.stringify(f.events), original)
   assert.equal(f.messages.get(0).content[0].text, text.text)
-  assert.deepEqual(service.status(), { recovered: 1, omitted: 1, pending: 0 })
-  assert.deepEqual(f.counts(), { released: 1, flushed: 1 })
+  assert.deepEqual(service.status(), { recovered: 1, omitted: 1, pending: 0, withdrawn: 0 })
+  assert.deepEqual(f.counts(), { released: 2, flushed: 1 })
   f.stop()
 })
 
@@ -86,7 +86,7 @@ test('live gateway rejection also accepts reason.failure and excludes later imag
   assert.equal(f.messages.get(7).content[0].offloaded, undefined)
   f.emit(error); await settle()
   assert.equal(f.appended.length, 1)
-  assert.deepEqual(service.status(), { recovered: 1, omitted: 1, pending: 0 })
+  assert.deepEqual(service.status(), { recovered: 1, omitted: 1, pending: 0, withdrawn: 0 })
   f.stop()
 })
 
@@ -106,8 +106,8 @@ test('gateway rejection without retained images is a no-op', async () => {
     const f = fixture([user(0, content), rejection(3, gatewayMessage)])
     const service = definition.setup(f.api); await settle()
     assert.equal(f.appended.length, 0)
-    assert.deepEqual(service.status(), { recovered: 0, omitted: 0, pending: 0 })
-    assert.deepEqual(f.counts(), { released: 1, flushed: 0 })
+    assert.deepEqual(service.status(), { recovered: 0, omitted: 0, pending: 0, withdrawn: 0 })
+    assert.deepEqual(f.counts(), { released: 2, flushed: 0 })
     f.stop()
   }
 })
@@ -124,8 +124,8 @@ test('startup restores a previously stuck session without resetting history or s
   assert.deepEqual(f.appended, [{ targets: [{ seq: 0, imageIndexes: [1] }] }])
   assert.equal(JSON.stringify(f.events), original)
   assert.equal(f.messages.get(0).content[0].text, text.text)
-  assert.deepEqual(f.counts(), { released: 1, flushed: 1 })
-  assert.deepEqual(service.status(), { recovered: 1, omitted: 1, pending: 0 })
+  assert.deepEqual(f.counts(), { released: 2, flushed: 1 })
+  assert.deepEqual(service.status(), { recovered: 1, omitted: 1, pending: 0, withdrawn: 0 })
   f.stop()
 })
 
@@ -167,6 +167,6 @@ test('other DSH sessions and ordinary errors are not changed', async () => {
 test('recovery failures release leases and pending state without erasing history', async () => {
   const f = fixture(); f.session.append = () => { throw Error('projection unavailable') }
   const service = definition.setup(f.api); await settle()
-  assert.equal(f.counts().released, 1); assert.equal(service.status().pending, 0)
+  assert.equal(f.counts().released, 2); assert.equal(service.status().pending, 0)
   assert.equal(f.messages.get(0).content[2].offloaded, undefined); assert.equal(f.logs.length, 1); f.stop()
 })
