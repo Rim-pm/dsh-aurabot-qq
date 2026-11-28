@@ -12,7 +12,7 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { tmpdir, networkInterfaces } from 'node:os'
 import { join } from 'node:path'
 import { createFakeDsh } from './helpers/fake-dsh.js'
 
@@ -124,4 +124,33 @@ test('面板闸：panelRemoteAccess 打开后放行远端（配置必须可持�
   setCfg({ security: { ...api.getConfig().security, panelRemoteAccess: false } })
   const back = await fake.call('/panel/pet/behavior/status', null, {}, '203.0.113.7')
   assert.equal(back.status, 403, '关掉后立刻恢复拦截')
+})
+
+test('面板闸：本机网卡地址也算本机（--host 100.x 时本机面板不该被自己 403）', async (t) => {
+  // 用 dsh web --host <本机网卡 IP> 起服务、从本机打开面板时，TCP 源地址就是那张网卡的地址，
+  // 不是 127.0.0.1。只认回环会把本机面板误判成远端。
+  const lan = Object.values(networkInterfaces()).flat()
+    .filter((x) => x && !x.internal && x.family === 'IPv4' && x.address !== '127.0.0.1')
+    .map((x) => x.address)[0]
+  if (!lan) return t.skip('本机没有非回环 IPv4 网卡，跳过')
+
+  const self = await fake.call('/panel/pet/behavior/status', null, { host: lan + ':5099' }, lan)
+  assert.equal(self.status, 200, `本机网卡地址 ${lan} 打开面板算本机`)
+
+  // 同一个地址作为 Host 也要过 Host 闸（防 DNS rebinding 的白名单同样认本机网卡）
+  const viaHost = await fake.call('/state', null, { host: lan + ':5099' }, '127.0.0.1')
+  assert.equal(viaHost.status, 200, 'Host 是本机网卡地址时算同源')
+
+  // 别的机器从自己的地址连进来仍然不是本机
+  const far = await fake.call('/panel/pet/behavior/status', null, {}, '203.0.113.7')
+  assert.equal(far.status, 403, '非本机地址仍然被拦')
+
+  // 本机网卡地址的 Origin 也算同源（不然从该入口保存配置会被 CSRF 403）
+  const save = await fake.call('/save', { ownerName: '主人' }, {
+    host: lan + ':5099',
+    origin: 'http://' + lan + ':5099',
+    'sec-fetch-site': 'same-origin',
+    'content-type': 'application/json',
+  }, lan)
+  assert.equal(save.status, 200, '本机网卡地址的 Origin 算同源')
 })
