@@ -15,6 +15,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import net from 'node:net'
+import { networkInterfaces } from 'node:os'
 import { isDeepStrictEqual } from 'node:util'
 import { randomUUID } from 'node:crypto'
 import { loadConfig, saveConfig, commitConfig, configRevision, publicConfig, mergeFromPanel, ownerAuthorizationRevision } from './core/config.js'
@@ -623,36 +624,83 @@ export function apply(ctx) {
   // 【issue #8】模块前缀路由（/memories、/sticker/delete…）以前只有显式 access: 'panel' 才过闸，
   // 结果远端无密钥就能读写；现在改成默认按管理面拦，只有模块显式声明 access: 'open'
   //（自带 token / 签名，如桌宠的 x-pet-token）才允许跨机。见 moduleRouteBlocked。
-  const isLoopbackAddr = (ip) => {
-    const s = String(ip || '')
-    return s === '::1' || s === '127.0.0.1' || s === '::ffff:127.0.0.1' || /^127\./.test(s) || s.startsWith('::ffff:127.')
+  const normAddr = (ip) => String(ip || '').trim().replace(/^\[|\]$/g, '')
+  /** IPv4 / IPv6 归一化成可比较形式：IPv6 展开成完整 8 组（`::1` 与 `0:0:0:0:0:0:0:1` 视为同一地址）；
+   *  IPv4-mapped（`::ffff:100.82.99.68` / `::ffff:6452:6344`）折回点分 IPv4——双栈 socket 的
+   *  remoteAddress 常是这种写法，不折回就和网卡表里的 `100.82.99.68` 对不上。 */
+  const canonIp = (ip) => {
+    let s = normAddr(ip).split('%')[0].toLowerCase()
+    if (!s) return ''
+    const kind = net.isIP(s)
+    if (kind === 4) return s
+    if (kind !== 6) return s
+    // 点分 IPv4 尾巴（::ffff:127.0.0.1）先换成两组十六进制，统一按 8 组展开
+    const dotted = s.match(/^(.*:)(\d+\.\d+\.\d+\.\d+)$/)
+    if (dotted) {
+      const [a, b, c, d] = dotted[2].split('.').map(Number)
+      s = dotted[1] + (((a << 8) | b).toString(16)) + ':' + (((c << 8) | d).toString(16))
+    }
+    const [head, tail] = s.split('::')
+    const h = head ? head.split(':') : []
+    const t = tail === undefined ? [] : (tail ? tail.split(':') : [])
+    const groups = tail === undefined ? h : [...h, ...Array(Math.max(0, 8 - h.length - t.length)).fill('0'), ...t]
+    if (groups.length !== 8) return s
+    const nums = groups.map((g) => parseInt(g || '0', 16))
+    if (nums.slice(0, 5).every((x) => x === 0) && nums[5] === 0xffff) {
+      return `${nums[6] >> 8}.${nums[6] & 255}.${nums[7] >> 8}.${nums[7] & 255}`
+    }
+    return nums.join(':')
   }
-  const normAddr = (ip) => String(ip || '').trim().replace(/^::ffff:/i, '').replace(/^\[|\]$/g, '')
+  /** 回环地址判定（先归一化，`::1` / `0:0:0:0:0:0:0:1` / `::ffff:127.0.0.1` 都算）。 */
+  const isLoopbackAddr = (ip) => {
+    const s = canonIp(ip)
+    return s === '0:0:0:0:0:0:0:1' || /^127\./.test(s)
+  }
+  /** 本机网卡地址集合（缓存 10 秒：Windows 上扫一遍约 3ms，不能每个请求都做）。 */
+  let selfAddrs = { at: 0, set: new Set() }
+  const selfAddrSet = () => {
+    if (Date.now() - selfAddrs.at < 10_000) return selfAddrs.set
+    const set = new Set()
+    try {
+      for (const list of Object.values(networkInterfaces())) {
+        for (const item of list || []) if (item && item.address) set.add(canonIp(item.address))
+      }
+    } catch (error) {}
+    selfAddrs = { at: Date.now(), set }
+    return set
+  }
+  /** 是不是本机自己：回环，或本机任一张网卡的地址。
+   *  从本机 IP（如 Tailscale 的 100.x）打开面板时，TCP 源地址就是这张网卡的地址，不是 127.0.0.1；
+   *  只认回环会把它误判成远端，面板直接 403。外部主机没法伪造 TCP 源地址（三次握手要收到回包），
+   *  所以把本机网卡地址也算本机不会削弱对外拦截：别的机器连进来时源地址是它自己的地址。 */
+  const isSelfAddr = (ip) => isLoopbackAddr(ip) || selfAddrSet().has(canonIp(ip))
   /** 可信反代地址列表（security.trustedProxy，逗号分隔；留空 = 从不相信任何转发头）。 */
-  const trustedProxies = () => String(getConfig().security?.trustedProxy || '').split(',').map(normAddr).filter(Boolean)
-  /** 请求是否来自本机回环。
+  const trustedProxies = () => String(getConfig().security?.trustedProxy || '').split(',').map(canonIp).filter(Boolean)
+  /** 请求是否来自本机（回环，或本机自己的网卡地址）。
    *  【首审 P1-2 修法】**socket 地址才是唯一可信来源**，X-Forwarded-For 是客户端自己能写的头。
    *  旧实现「有 XFF 就只认最后一跳、不看 socket」→ 直连暴露时客户端自带
    *  `X-Forwarded-For: 127.0.0.1` 就能 200 绕过（含 client-package 令牌下载）。
    *  新口径：
-   *    ① socket 非回环 → 一律按 socket 判，转发头完全不看；
-   *    ② socket 是回环且来源命中 trustedProxy → 才采信 XFF 的**最后一跳**（反代追加的真实来源）；
-   *    ③ 其余（本机直连 / 进程内直调）→ 算本机。 */
+   *   ① socket 不是本机地址 → 一律按 socket 判，转发头完全不看；
+   *   ② socket 是回环且来源命中 trustedProxy → 才采信 XFF 的**最后一跳**（反代追加的真实来源）；
+   *   ③ 其余（本机直连 / 进程内直调）→ 算本机。
+   *  【本机网卡】「本机」不只回环：用 `dsh web --host 100.x` 起服务、从本机那张网卡打开面板时，
+   *  TCP 源地址就是该网卡地址。只看回环会把本机面板自己 403 掉（面板显示「权限受限」）。
+   *  外部主机无法伪造 TCP 源地址（要收到回包），所以把本机网卡地址算本机不影响对外拦截。 */
   const requestIsLocal = (req) => {
-    const sock = normAddr(req?.socket?.remoteAddress || req?.connection?.remoteAddress || '')
+    const sock = canonIp(req?.socket?.remoteAddress || req?.connection?.remoteAddress || '')
     // 没有 socket 信息 = 进程内直调（测试 / 内部转发），按本机处理。
     // 真实 HTTP 请求一定有 remoteAddress，所以这里不会削弱对外拦截。
     if (!sock) return true
-    if (!isLoopbackAddr(sock)) return false // ① 直连：只信 socket
     const list = trustedProxies()
-    if (list.length && list.includes(sock)) { // ② 可信反代：看最后一跳
-      const hops = String(req?.headers?.['x-forwarded-for'] || '').split(',').map((x) => normAddr(x)).filter(Boolean)
-      if (hops.length) return isLoopbackAddr(hops[hops.length - 1])
+    if (list.length && isSelfAddr(sock) && list.includes(sock)) { // ① 可信反代：看最后一跳
+      const hops = String(req?.headers?.['x-forwarded-for'] || '').split(',').map(canonIp).filter(Boolean)
+      if (hops.length) return isSelfAddr(hops[hops.length - 1])
       // 【复审 2·P1-1】反代场景却没带 XFF：反代没配好（没追加转发头）。按回环放行等于
       // 「反代后的所有用户都被当成本机」——这是 fail-open。兜成 fail-closed：拒绝。
       return false
     }
-    return isLoopbackAddr(sock) // ③ 本机直连
+    return isSelfAddr(sock) // ② 本机直连（回环或本机网卡地址）
   }
   const panelNeedsLocal = () => getConfig().security?.panelRemoteAccess !== true
   /** 管理面白名单：这些前缀之外的一律不算管理接口（客户端直连用的模块接口与素材不拦）。 */
@@ -688,11 +736,11 @@ export function apply(ctx) {
     .split(/[\s,，;；]+/)
     .map((item) => normalizeHost(stripHostPort(item)))
     .filter(Boolean)
-  /** Origin 主机名是否算「同源」：回环 / localhost / 任一已配置的面板对外域名。 */
+  /** Origin 主机名是否算「同源」：回环 / localhost / 本机网卡地址 / 任一已配置的面板对外域名。 */
   const originAllowed = (hostname) => {
     const h = normalizeHost(hostname)
     if (!h) return false
-    if (h === 'localhost' || h.endsWith('.localhost') || isLoopbackAddr(h)) return true
+    if (h === 'localhost' || h.endsWith('.localhost') || isSelfAddr(h)) return true
     return panelPublicHosts().includes(h)
   }
   /**
@@ -700,10 +748,10 @@ export function apply(ctx) {
    * 攻击：恶意页面把 evil.example 的 DNS rebind 到 127.0.0.1，然后 `fetch('http://evil.example:port/state')`
    * ——socket 是本机回环（本机闸放行）、方法是 GET（不过 CSRF）→ 管理面被「同源可读」：
    * /state、/logs、/bridge/token（返回 bearer）、client-package（含令牌）全部外泄。
-   * 修法：管理面请求的 Host 头必须在白名单内（回环 / localhost / publicHostname 列表任一项）。
+   * 修法：管理面请求的 Host 头必须在白名单内（回环 / localhost / 本机网卡地址 / publicHostname 列表任一项）。
    * Host 头虽是请求方可控的，但浏览器同源策略保证「页面 JS 发出的请求 Host = 页面所在的源」——
    * rebinding 页面发出的 Host 就是 evil.example 本身，进不了白名单；同源面板请求 Host 必然是
-   * 127.0.0.1 / localhost / publicHostname 列表里任一项。非浏览器客户端（curl/脚本）不受浏览器防护，
+   * 127.0.0.1 / localhost / 本机网卡地址 / publicHostname 列表里任一项。非浏览器客户端（curl/脚本）不受浏览器防护，
    * 但它们也不是 rebinding 载体，且有各自的鉴权层。
    */
   const hostAllowedForAdmin = (hostRaw) => {
@@ -712,7 +760,7 @@ export function apply(ctx) {
     const h = normalizeHost(stripHostPort(hostRaw))
     if (!h) return false
     if (h === 'localhost' || h.endsWith('.localhost')) return true
-    if (isLoopbackAddr(h)) return true
+    if (isSelfAddr(h)) return true
     return panelPublicHosts().includes(h)
   }
   /** Host 校验 + 失败响应。只用于管理面（模块路由的 Host 另有 Host 闸策略）。 */

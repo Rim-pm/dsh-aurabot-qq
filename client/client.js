@@ -9526,7 +9526,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             })),
           (draft.security && draft.security.panelRemoteAccess) === true
             ? h('div', { className: 'ab-note warn' }, '已允许远端管理。请确认反向代理上已经加了认证，否则等于把管理权交给任何扫到你端口的人。')
-            : h('div', { className: 'ab-note' }, '只允许本机访问。直接连公网或经反代进来都会被 403 挡下。'),
+            : h('div', { className: 'ab-note' }, '只允许本机访问（回环地址，以及本机各张网卡自己的地址——用 --host 指定本机 IP 时也能打开面板）。其它机器直接连公网或经反代进来都会被 403 挡下，只能走 /aurabot/api/open/* 接口。'),
           h(Row, { label: '可信反向代理地址', hint: '放在反代后面才需要填。填反代自己的地址（127.0.0.1 = 本机 nginx，172.17.0.1 = 容器网关），多个用逗号分隔' },
             h('input', {
               className: 'ab-input',
