@@ -615,8 +615,10 @@ export function apply(ctx) {
   // 反代层再加一道认证——README 写明这是硬要求）。
   // 【首审 P1-1】闸的覆盖范围不能只有 /panel/*：/state（能读到全部配置与密钥）、/save（能改配置）、
   // /logs、/modules*（能装代码）、/bridge/token（直接返回联动密钥）、/snowluma/*（能改机器人密码）
-  // 这些**都是管理面**，必须一起纳入。只有客户端直连用的 /ext/<模块>/* 与 /asset/* 不受此闸限制
-  //（它们各自有 token 校验）。
+  // 这些**都是管理面**，必须一起纳入。
+  // 【issue #8】模块前缀路由（/memories、/sticker/delete…）以前只有显式 access: 'panel' 才过闸，
+  // 结果远端无密钥就能读写；现在改成默认按管理面拦，只有模块显式声明 access: 'open'
+  //（自带 token / 签名，如桌宠的 x-pet-token）才允许跨机。见 moduleRouteBlocked。
   const isLoopbackAddr = (ip) => {
     const s = String(ip || '')
     return s === '::1' || s === '127.0.0.1' || s === '::ffff:127.0.0.1' || /^127\./.test(s) || s.startsWith('::ffff:127.')
@@ -748,6 +750,18 @@ export function apply(ctx) {
     }
     return false
   }
+  /** 模块前缀路由的访问闸（issue #8）。
+   *  以前只有显式 `access: 'panel'` 的路由才过闸，而全仓库只有 memory 一条这么写——
+   *  其余模块路由（/memories、/memory/graph、/sticker/delete…）远端无密钥就能读写。
+   *  现在改成默认拒绝：
+   *    · `access: 'open'` —— 模块自己验凭据（如桌宠的 x-pet-token + Host 闸），跨机是正当用法，
+   *      宿主只留上面的 CSRF 闸，不再叠加管理面 Host 白名单（否则远端 publicBaseUrl 会被 403）。
+   *    · 其余（不写 / 'panel' / 未注册路径）—— 一律按管理面处理，过面板闸（force，绕过
+   *      /ext、/asset 白名单）与 Host 闸。 */
+  const moduleRouteBlocked = (path, req, res) => {
+    if (mods.routeAccess(path) === 'open') return false
+    return panelBlocked(req, res, true) || adminHostBlocked(req, res)
+  }
   /** 面板闸：面板写/读接口统一过它（见上方 panelBlocked 说明）。
    *  opts.skipHostCheck：给 /open/* 这类「非浏览器、自带密钥鉴权」的接口用——
    *  它们没有浏览器同源概念，跨机调用是正常用法，Host 允许名单不该拦。 */
@@ -772,7 +786,7 @@ export function apply(ctx) {
       // 模块路由有自己的 Host 闸与鉴权，但同样缺跨站防护；桌宠 native 客户端不带 Origin，
       // 不受影响；桌面面板的 fetch 是同源，也不受影响。
       if (csrfBlocked(req, res)) return undefined
-      if (mods.routeAccess(path) === 'panel' && (panelBlocked(req, res, true) || adminHostBlocked(req, res))) return undefined
+      if (moduleRouteBlocked(path, req, res)) return undefined
       return mods.handle(path, req, res)
     }),
   }), 'aurabot: 模块接口')

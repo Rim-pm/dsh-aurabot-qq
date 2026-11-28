@@ -78,11 +78,18 @@ test('面板闸：覆盖所有管理面，不只是 /panel/*（P1-1 回归）', 
   }
 })
 
-test('面板闸：/ext 与 /asset 不受限制（客户端跨机直连的正当通道）', async () => {
-  // /ext/<模块>/* 走模块路由，自带各自的 token 校验，不该被面板闸拦
-  const ext = await fake.call('/ext/pet/status', null, {}, '203.0.113.7')
-  assert.notEqual(ext.status, 403, '/ext 不该被面板闸 403（它是令牌鉴权的通道）')
-  assert.ok(!/只允许本机/.test(String(ext.raw() || '')), '/ext 的拒绝理由不能是面板闸')
+test('模块前缀路由默认只许本机（issue #8 回归）', async () => {
+  // 以前只有显式 access: 'panel' 的模块路由才过闸，其余远端无密钥就能读写
+  // /memories、/memory/graph、/sticker/delete 这些。现在没声明 access 的一律按管理面处理。
+  for (const p of ['/memories', '/memory/graph/state', '/stickers', '/song/status']) {
+    const far = await fake.call(p, null, {}, '203.0.113.7')
+    assert.equal(far.status, 403, `${p} 没声明 access，远端来源必须拒绝`)
+    assert.match(String(far.raw() || ''), /只允许本机|panelRemoteAccess/, '拒绝理由要是面板闸')
+    const rebind = await fake.call(p, null, { host: 'evil.example' }, '127.0.0.1')
+    assert.equal(rebind.status, 403, `${p} 必须挡 DNS rebinding 的异常 Host`)
+    const local = await fake.call(p)
+    assert.equal(local.status, 200, `${p} 本机照常放行`)
+  }
 })
 
 test('面板闸：可信反代的最后一跳才算真实来源（P1-1 回归）', async () => {

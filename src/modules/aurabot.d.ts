@@ -270,8 +270,10 @@ export interface Api {
   command(c: Command): Off
   every(ms: number, fn: () => any, label?: string): Off
   later(ms: number, fn: () => any): Off
-  /** access: panel 使模块管理路由复用宿主回环/可信代理、Host 与 CSRF 闸。 */
-  route(path: string, handler: (req: any, res: any) => any, options?: { access?: 'panel' }): Off
+  /** 路由访问级别（默认只许本机）。
+   *  - 不写 / 'panel'：按管理面处理，宿主走本机闸 + Host 闸 + CSRF 闸；
+   *  - 'open'：模块自己验凭据（token/签名），允许跨机直连，宿主只留 CSRF 闸。 */
+  route(path: string, handler: (req: any, res: any) => any, options?: { access?: 'panel' | 'open' }): Off
   onDispose(fn: () => void): Off
 
   // ---- 别的模块和插件内部 ----

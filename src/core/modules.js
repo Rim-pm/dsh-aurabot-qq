@@ -31,6 +31,11 @@ const DOC = 'API.md'
 const TYPES = 'aurabot.d.ts'
 // 从内置搬到社区库的模块：接口路径不变，面板页照常能用
 const STABLE_ROUTES = new Set(['pet', 'douyin', 'heybox', 'group-admin'])
+// 自带凭据校验、且明确支持跨机远端直连的模块：路由默认按 access: 'open' 登记（宿主只留 CSRF 闸）。
+// 其余模块路由一律按管理面（只许本机）处理——见 issue #8：以前不写 access 就完全不设防，
+// 远端无密钥就能读写 /memories、/sticker/delete。桌宠是唯一例外：它有 x-pet-token + Host 闸，
+// 远端客户端（host.json 里的 publicBaseUrl）是文档写明的正当用法。
+const OPEN_MODULES = new Set(['pet'])
 
 export const userDir = () => dataDir('modules')
 
@@ -671,11 +676,19 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
       },
       route: (path, handler, options = {}) => {
         if (!active()) return () => {}
-        if (options.access != null && options.access !== 'panel') throw new Error('路由 access 只支持 panel')
+        // access 口径（issue #8）：
+        //   不写        —— 管理面，宿主按「只许本机」拦（面板接口本来就是本机用的）；
+        //   'open'      —— 模块自己验凭据（token / 签名），允许跨机直连，宿主只留 CSRF 闸；
+        //   'panel'     —— 显式管理面（与不写等价，保留给语义清晰的老代码）。
+        // 默认拒绝是刻意的：以前不写就完全不设防，远端无密钥就能读写 /memories、/sticker/delete。
+        if (options.access != null && options.access !== 'panel' && options.access !== 'open') throw new Error("路由 access 只支持 'panel' / 'open'")
         const full = '/aurabot/api' + prefix + (String(path).startsWith('/') ? path : '/' + path)
         const cur = routes.get(full)
         if (cur && cur.id !== id && live.has(cur.id)) throw new Error(`接口 ${full} 已经被模块「${cur.id}」占了`)
-        const route = { id, handler: guard(`接口 ${path}`, handler), access: options.access || null }
+        // 老模块（含社区库里的 pet 1.1.x）没有写 access，但它们的路由本来就自带 token/Host 校验；
+        // 按模块整体放行，免得升级宿主后桌宠远端客户端直接 403。OPEN_MODULES 只放已知的这几个。
+        const access = options.access || (OPEN_MODULES.has(id) ? 'open' : null)
+        const route = { id, handler: guard(`接口 ${path}`, handler), access }
         routes.set(full, route)
         return track(() => { if (routes.get(full) === route) routes.delete(full) })
       },

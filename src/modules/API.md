@@ -147,7 +147,7 @@ export default {
 | `api.command({ name, aliases, desc, delegatable, run(arg, msg) })` | 主人可在 QQ 私聊或白名单群里发送命令。默认仅主人可用。只有显式设置 `delegatable: true` 的命令，主人才能授权给私聊白名单中的 QQ 用户。此时 `run` 会收到实际发送者的消息，模块应自行限制命令的操作范围。返回的文字回到发命令的聊天。名字可以是中文，中文命令后面可以不加空格；`arg` 已去掉首尾空格。和内置命令同名时模块命令优先；但中文命令「后面直接跟内容」这种写法按**最长匹配**判定，所以模块的单字命令（如 `/记`）不会吃掉更长的内置命令（如 `/记住 xxx`、`/翻唱 xxx`） |
 | `api.every(毫秒, fn, 名字?)` | 定时任务（名字用在出错日志里） |
 | `api.later(毫秒, fn)` | 过一会儿做一次 |
-| `api.route('/路径', async (req, res) => 返回值, options?)` | 加一个网页接口：地址是 `/aurabot/api/ext/<id>/路径`；返回对象就当 JSON 回；要自己回（比如图片）就用 `api.core.http.send(res, 200, buf, 'image/png')`。1.3.0 起管理接口可传 `{ access: 'panel' }`，复用宿主回环/可信代理、Host 与 CSRF 闸；不传时保持现有行为，由模块验证客户端凭据 |
+| `api.route('/路径', async (req, res) => 返回值, options?)` | 加一个网页接口：地址是 `/aurabot/api/ext/<id>/路径`；返回对象就当 JSON 回；要自己回（比如图片）就用 `api.core.http.send(res, 200, buf, 'image/png')`。**访问级别默认只许本机**（走宿主本机闸 + Host 闸 + CSRF 闸，和面板管理接口一样）；只有 `{ access: 'open' }` 才允许跨机直连，这时必须由模块自己验证客户端凭据（token / 签名），宿主只保留 CSRF 闸。`{ access: 'panel' }` 与不写等价，留作显式标注 |
 | `api.onDispose(fn)` | 模块停下时要做的收尾 |
 
 进入 `onDispose` 或导出的 `dispose` 时，`api.setConfig` 和 `api.saveSettings` 已停止写入。模块在停用时若要恢复它临时改过的配置，可以在同步收尾里调用 `api.core.setConfig({ ...要恢复的字段 })`。先用 `api.config()` 核对当时的值，免得盖掉用户后来的修改。异步收尾可写自己的 `api.dataDir()`。
