@@ -196,9 +196,13 @@ export default {
       // 读文件：别人发来的内容不可信，只有主人开口才读
       tools.push(defineTool({
         name: 'qq_read_file',
-        description: '读这个聊天里别人发来的文本文件（txt、md、json、日志、代码等，2MB 以内）。只有主人让你看的时候才用。name 填文件名，不填就读最新的一个。',
+        description: '读取当前聊天的文本文件，或查看以文件形式发送的 JPG、PNG 图片（2MB 以内）。只有主人让你看的时候才用。name 填文件名，不填就读最新的一个。',
         properties: { name: str('可选：文件名，不填就读最新的') },
         required: [],
+        render: (_args, value) => {
+          const text = { type: 'text', text: (value.ok ? '' : '✗ ') + value.message }
+          return value.ok && value.image?.attachment ? [text, value.image] : [text]
+        },
         execute: async ({ name }) => {
           if (level !== 'full' && !hub.turnSendersAllOwner?.(sessionId)) return { ok: false, message: '只有主人让看时才能读文件' }
           const list = hub.recentFiles(chat.chatId)
@@ -206,7 +210,7 @@ export default {
           const want = String(name || '').trim()
           const file = want ? list.findLast((f) => f.name === want) || list.findLast((f) => f.name.includes(want)) : list.at(-1)
           if (!file) return { ok: false, message: `没找到「${want}」，最近的文件有：${list.map((f) => f.name).join('、')}` }
-          return readQqFile({ onebot, chat, file })
+          return readQqFile({ onebot, chat, file, dsh: api.dsh, canPreview: () => hub.canSeeImages(chat) })
         },
       }))
       // 发文件/发图：主人私聊（full）和群聊都挂；群里只有「这一轮说话的人全是主人」才放行（#169）。

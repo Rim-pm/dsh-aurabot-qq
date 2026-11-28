@@ -2526,7 +2526,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
 
     function GroupOverrides({ draft, setDraft, setSection }) {
       const overrides = draft.group.overrides || {}
-      const groupIds = [...new Set([...draft.allow.groups, ...(draft.group.moduleOnlyGroups || []), ...Object.keys(overrides), ...(draft.memory.passiveGroups || [])])]
+      const groupIds = [...new Set([...draft.allow.groups, ...(draft.group.moduleOnlyGroups || []), ...Object.keys(overrides), ...Object.keys(draft.memory.groupExtraction || {}), ...(draft.memory.passiveGroups || [])])]
       const [newGid, setNewGid] = useState('')
       const [selected, setSelected] = useState('')
       const selectedId = groupIds.includes(selected) ? selected : groupIds[0]
@@ -2580,6 +2580,12 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
                       setDraft(setPath(draft, 'memory.passiveGroups', on ? [...new Set([...ids, gid])] : ids.filter(x => x !== gid)))
                     } })) : null),
                 mode !== 'chat' ? h('div', { className: 'ab-note' }, mode === 'modules' ? '群消息只交给模块；是否回应仍看各模块的开关、权限和时段。AI 聊天设置暂不生效。' : '群消息不触发模块或 AI。' + (!draft.enabled ? '总开关已关闭，旁听暂不记录。' : draft.debug ? '调试模式不记录记忆。' : !draft.memory.enabled ? '记忆已关闭，旁听暂不记录。' : '开启旁听只记新文字，不回复；记忆整理可能产生费用。')) : h('p', { className: 'ab-muted ab-small' }, '被 @、引用或叫名字时按规则回复，仍受总开关、暂停和次数限制。'),
+                h(Row, { label: '长期记忆整理', hint: '相关对话包括主人发言、与她的互动和紧邻前文。群聊上下文不变。' }, h(Select, { ariaLabel: '群 ' + gid + ' 长期记忆整理', value: draft.memory.groupExtraction?.[gid] || 'related',
+                  options: [{ value: 'related', label: '只整理相关对话（默认）' }, { value: 'all', label: '整理全部对话' }, { value: 'auto', label: '按群消息量自动切换' }], onChange: value => {
+                    const modes = { ...draft.memory.groupExtraction }; if (value === 'related') delete modes[gid]; else modes[gid] = value
+                    setDraft(setPath(draft, 'memory.groupExtraction', modes))
+                  } })),
+                draft.memory.groupExtraction?.[gid] === 'auto' && h('p', { className: 'ab-muted ab-small' }, '当日近一小时超过 80 行，只整理相关对话；降至 40 行及以下恢复全部。'),
                 h('details', { key: gid + ':' + mode, open: mode === 'chat' ? true : undefined },
                   h('summary', { style: { cursor: 'pointer', margin: '12px 0' } }, mode === 'chat' ? 'AI 聊天设置' : 'AI 聊天设置（开启 AI 聊天后生效）'),
                 ...[['proactiveEnabled', '没人叫时主动插话'], ['engagedEnabled', '聊起来后继续回应']].map(([key, label]) =>
@@ -2659,7 +2665,14 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           h('div', { className: 'ab-grp-row' },
             h(Row, { label: '连发合并', hint: '人常常一口气发好几句。打开后ta会等对方说完再一起回，而不是一句一回。' }, f.sw('merge.enabled')),
             h(Row, { label: '合并转发', hint: '群里有人发合并转发时，她手上只有一个占位符，内容看不见。打开后消息一进来就展开存进上下文，代价是每条转发多调一次接口。' }, f.sw('forward.expandEarly')),
-            h(Row, { label: '每段都发', hint: '一轮里她分几段说，就发几条。关着只发最后一段。默认关' }, f.sw('chat.everyStep')),
+            h(Row, { label: '每段都发', hint: '一轮里她分几段说，就发几条。自动 = 纯对话轮分条，这一轮调过工具（干活）就并成一条发' },
+              f.select('chat.everyStep', [
+                { value: false, label: '只发最后一段' },
+                { value: 'auto', label: '自动（推荐）' },
+                { value: true, label: '每段都发' },
+              ])),
+            h(Row, { label: '近似去重阈值', hint: '分条时，若这一段和上一段字面重合超过这个比例，就按「同一件事说两遍」处理：后一段顶掉前一段，只发一条。0.45 是实测的中间线（真重复 0.49 / 真补充 0.03）；设 1 等于关掉' },
+              f.num('chat.dupSimilarity', { min: 0, max: 1, step: 0.05 })),
           )),
 
         // ===== 折叠区：其余所有组/设置项 =====
@@ -2847,15 +2860,32 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const noReasoning = Boolean(curModel && curModel.reasoning === null)
       // 视觉能力：自动时把 DSH 的声明显示出来，主人一眼能看出会不会降级
       const autoVision = curModel ? curModel.vision : undefined
-      const visionHint = draft.model.vision === 'on'
-        ? '强制当「能看图」；模型其实看不了的话，带图的那一轮会报错'
-        : draft.model.vision === 'off'
-          ? '强制当「看不懂」：收到图片只给一行文字提示，不会把图塞给模型'
-          : autoVision === true
-            ? '自动：DSH 说这个模型支持看图'
-            : autoVision === false
-              ? '自动：DSH 说这个模型看不了图，会自动降级成文字提示'
-              : '自动：DSH 没声明，默认照发；真看不了就手动选「不支持」'
+      // 识图模型：配了它以后，收到的图片先交给它看，聊天模型只收文字描述
+      const vm = draft.model.visionModel || { provider: '', model: '' }
+      const vmVal = vm.provider && vm.model ? vm.provider + '::' + vm.model : ''
+      const vmOptions = [{ value: '', label: '跟随聊天模型', desc: '聊天模型自己能看图就直接收图' }]
+        .concat((list || []).filter((m) => m.vision !== false).map((m) => ({ value: key(m), label: m.name + (m.vision === true ? '（能看图）' : ''), desc: m.provider, group: m.provider })))
+      if (vmVal && !vmOptions.some((o) => o.value === vmVal)) {
+        const hit = (list || []).find((m) => key(m) === vmVal)
+        vmOptions.push({ value: vmVal, label: vm.model, desc: hit ? hit.provider + '（DSH 说它看不了图）' : '（DSH 里没找到这个模型）' })
+      }
+      const visionHint = vmVal
+        ? '设了识图模型：图片先交给它看，再把描述当文字交给她；和聊天模型选同一个时仍然直接看图'
+        : draft.model.vision === 'on'
+          ? '强制当「能看图」；模型其实看不了的话，带图的那一轮会报错'
+          : draft.model.vision === 'off'
+            ? '强制当「看不懂」：收到图片只给一行文字提示，不会把图塞给模型'
+            : autoVision === true
+              ? '自动：DSH 说这个模型支持看图'
+              : autoVision === false
+                ? '自动：DSH 说这个模型看不了图，会自动降级成文字提示'
+                : '自动：DSH 没声明，默认照发；真看不了就手动选「不支持」'
+      // 识图模型有自己的思考强度：和上面聊天的「思考强度」分开设，互不影响
+      const vmCur = vmVal && list ? list.find((m) => key(m) === vmVal) : null
+      const vmNoReasoning = Boolean(vmCur && vmCur.reasoning === null)
+      const vmHint = vmVal
+        ? '图片先交给它看，描述再交给聊天模型（聊天模型本身看不了图也没关系）；识图用下面的「识图思考强度」，和聊天的互不影响'
+        : '默认跟着聊天模型；也可以单独选一个识图模型，让她用便宜的快模型聊天、图片交给会看图的模型'
       const test = async (m) => {
         setPing({ ...ping, [key(m)]: '测速中…' })
         const r = await post('/model/ping', { provider: m.provider, model: m.model })
@@ -2864,6 +2894,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       return h('div', { className: 'ab-grid' },
         h(Card, { title: '聊天用的模型', desc: '新建的 QQ 会话按这里的设置来；已有会话也可以在 DSH 里点开单独切换。聊天对速度很敏感，可以先点「测速」挑个快的。' },
           h(Row, { label: '思考强度', hint: noReasoning ? '这个模型不支持思考强度，会自动忽略' : '聊天建议「低」，回得快' }, h(Seg, { value: draft.model.reasoningEffort || 'low', disabled: noReasoning, onChange: (v) => setDraft(setPath(draft, 'model.reasoningEffort', v)), options: [{ value: 'low', label: '低' }, { value: 'high', label: '高' }, { value: 'max', label: '最高' }] })),
+          vmVal ? h(Row, { label: '识图思考强度', hint: vmNoReasoning ? '这个模型不支持思考强度，会自动忽略' : '只影响识图，和上面聊天的「思考强度」互不影响；模型不支持会自动省略' }, h(Seg, { value: draft.model.visionReasoningEffort || 'low', disabled: vmNoReasoning, onChange: (v) => setDraft(setPath(draft, 'model.visionReasoningEffort', v)), options: [{ value: 'low', label: '低' }, { value: 'high', label: '高' }, { value: 'max', label: '最高' }] })) : null,
           h(Row, { label: '视觉能力', hint: visionHint }, h(Seg, {
             value: draft.model.vision || 'auto',
             onChange: (v) => setDraft(setPath(draft, 'model.vision', v)),
@@ -2877,13 +2908,21 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             }),
             cur ? h(Btn, { small: true, onClick: () => test({ provider: draft.model.provider, model: draft.model.model }) }, '测速') : null,
             cur && ping[cur] ? h('span', { className: 'ab-muted ab-small' }, ping[cur]) : null),
+          h(Row, { label: '识图模型', hint: vmHint }, h(Select, {
+            value: vmVal, width: 280,
+            options: vmOptions,
+            onChange: (v) => {
+              const [p, ...m] = v.split('::')
+              setDraft(setPath(setPath(draft, 'model.visionModel.provider', v ? p : ''), 'model.visionModel.model', v ? m.join('::') : ''))
+            },
+          })),
         ),
         h(ChatModels, { draft, setDraft, list }),
         h(CostCard, { draft, setDraft }),
         h(Card, { title: '可用的模型', desc: '点「测速」会真的问一次模型（花一点点额度），看它回一句话要多久。' },
           list === null ? h(Empty, { icon: '⏳', text: '加载中…' }) : list.length === 0 ? h(Empty, { text: 'DSH 没有列出模型' }) :
             h('table', { className: 'ab-table' }, h('tbody', null, list.map((m) => h('tr', { key: key(m) },
-              h('td', null, m.name), h('td', { className: 'ab-muted' }, m.provider),
+              h('td', null, m.name, m.vision === true ? h('span', { className: 'ab-muted ab-small' }, ' · 能看图') : m.vision === false ? h('span', { className: 'ab-muted ab-small' }, ' · 纯文本') : null), h('td', { className: 'ab-muted' }, m.provider),
               h('td', null, ping[key(m)] || ''),
               h('td', { style: { textAlign: 'right' } }, h(Btn, { small: true, kind: 'ghost', onClick: () => test(m) }, '测速'), h(Btn, { small: true, kind: 'ghost', onClick: () => { setDraft(setPath(setPath(draft, 'model.provider', m.provider), 'model.model', m.model)); toast('选好了，记得保存') } }, '用这个')))))),
         ),
@@ -5146,6 +5185,36 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             : h(StarMap, { toast }))
     }
 
+    function MemoryBacklog() {
+      const [data, setData] = useState(null), [error, setError] = useState(''), [all, setAll] = useState(false)
+      async function refresh() {
+        setError('')
+        const r = await get('/memory/backlog')
+        if (!r.ok || !Array.isArray(r.chats)) { setError(r.message || '读取失败，请重试'); return }
+        setData(r)
+      }
+      const num = n => n.toLocaleString('zh-CN')
+      function label(c) {
+        const id = c.id.replace(/^(?:group|private):/, ''), name = c.name
+        if (name === c.id || name === id) return (c.id.startsWith('group:') ? '群 ' : c.id.startsWith('private:') ? '私聊 ' : '') + id
+        return h(Fragment, null, name, !name.endsWith(id) && h('small', { className: 'ab-muted' }, ' · ' + id))
+      }
+      return h('section', { 'aria-label': '整理进度', style: { margin: '12px 0' } },
+        h('div', { className: 'ab-flex' }, h('strong', null, '整理进度'), h('div', { className: 'ab-spacer' }),
+          h(Btn, { small: true, onClick: refresh }, data ? '刷新进度' : '查看待整理流水')),
+        !data && !error && h('div', { className: 'ab-muted ab-small' }, '只看进度，不会启动整理。'),
+        error && h('p', { role: 'alert' }, error),
+        data && h('div', { style: { marginTop: 8 } },
+          h('b', null, data.pending ? '待整理 ' + num(data.pending) + ' 行' : '没有待整理流水'),
+          h('span', { className: 'ab-muted ab-small' }, ' · 今日已用 ' + num(data.used) + ' / ' + num(data.limit) + ' 批'),
+          data.total > 0 && h('progress', { max: data.total, value: data.total - data.pending, 'aria-label': '纳入整理的流水已处理比例', style: { width: '100%', display: 'block', margin: '6px 0' } }),
+          h('div', { className: 'ab-small ab-muted' }, '纳入整理的流水已处理 ' + num(data.total - data.pending) + ' / ' + num(data.total) + ' 行' + (data.outOfScope ? ' · 不纳入整理 ' + num(data.outOfScope) + ' 行' : '') + (data.oldest ? ' · 最早待整理 ' + data.oldest : '') + ' · ' + new Date(data.at).toLocaleTimeString() + ' 更新'),
+          (all ? data.chats : data.chats.slice(0, 5)).map(c => h('div', { key: c.id, style: { display: 'flex', gap: 8, justifyContent: 'space-between', marginTop: 7 } },
+            h('span', { style: { minWidth: 0, overflowWrap: 'anywhere' } }, label(c)),
+            h('b', { style: { whiteSpace: 'nowrap' } }, num(c.pending) + ' 行'))),
+          data.chats.length > 5 && h(Btn, { small: true, onClick: () => setAll(!all) }, all ? '收起会话' : '查看全部 ' + data.chats.length + ' 个会话')))
+    }
+
     function MemoryPage({ st, draft, setDraft, toast }) {
       const f = useField(draft, setDraft)
       const [mem, setMem] = useState(null)
@@ -5197,6 +5266,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             h('div', { className: 'ab-card ab-stat' }, h('div', { className: 'n' }, stats ? stats.count : '–'), h('div', { className: 'l' }, '条长期记忆')),
             h('div', { className: 'ab-card ab-stat' }, h('div', { className: 'n' }, stats ? stats.auto : '–'), h('div', { className: 'l' }, '条来自每日整理' + (stats && stats.outdated ? '（另有 ' + stats.outdated + ' 条已过时）' : ''))),
             h('div', { className: 'ab-card ab-stat' }, h('div', { className: 'n', style: { fontSize: 16, paddingTop: 6 } }, last ? new Date(last.at).toLocaleString() : '还没整理过'), h('div', { className: 'l' }, '上次整理'))),
+          h(MemoryBacklog, { key: st.persona?.current || 'current' }),
           h('div', { className: 'ab-grp-row' },
             h(Row, { label: '每天自动整理两次', hint: '把临时记忆（聊天流水）提炼成长期记忆、相处经验和说话方式；第二次只处理新聊天，过了一天的流水整理完清空；各会话自己的上下文不受影响' },
               f.sw('memory.dailyConsolidate'), h('span', { className: 'ab-muted' }, '每天'),
@@ -7830,9 +7900,15 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         const r = await post(path, body)
         toast(r.message || okMsg, r.ok === false ? 'err' : 'ok')
         if (r.list) setModules(r.list)
+        if (r.modules) setModules(r.modules)
         if (r.prompt && r.ok) copy(r.prompt, toast)
         reload()
         return r
+      }
+      const remove = async (path, action) => {
+        if (!confirm(`${action}「${m.name}」？` + (m.builtin ? '删掉后会用回内置版本。' : ''))) return
+        const purge = confirm('把它的数据和设置也清掉吗？确定=一起清掉；取消=留着')
+        await act(path, { id: m.id, purge }, action === '卸载' ? '卸载好了' : m.builtin ? '副本删掉了，现在用内置的' : '删掉了')
       }
       const what = [m.tools.length ? '工具：' + m.tools.join('、') : '', m.commands.length ? '命令：' + m.commands.map((c) => '/' + c).join(' ') : ''].filter(Boolean).join('　')
       const errs = (m.error ? [{ label: '加载', message: m.error }] : []).concat(m.errors || [])
@@ -7850,7 +7926,9 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
             m.builtin && !m.hasUser ? h(Btn, { small: true, onClick: () => act('/modules/fork', { id: m.id }, '复制好了'), title: '把这个内置模块的源码复制到 modules/' + m.id + '/，改了就替换内置的' }, '复制一份来改') : null,
             m.hasUser ? h(Btn, { small: true, onClick: () => post('/modules/open?id=' + encodeURIComponent(m.id)).then((r) => toast(r.message)) }, '打开文件夹') : null,
             m.hasUser ? h(Btn, { small: true, onClick: () => get('/modules/prompt?id=' + encodeURIComponent(m.id)).then((r) => copy(r.prompt, toast, '复制好了，粘给 DSH，把【】里那句换成你想要的')) }, '复制给 DSH 的话') : null,
-            m.hasUser && !m.safeSkipped ? h(Btn, { small: true, onClick: () => act('/modules/reload', { id: m.id }, '重新加载好了') }, '重新加载') : null)),
+            m.hasUser && !m.safeSkipped ? h(Btn, { small: true, onClick: () => act('/modules/reload', { id: m.id }, '重新加载好了') }, '重新加载') : null,
+            m.hasUser && m.community ? h(Btn, { small: true, kind: 'danger', onClick: () => remove('/modules/community/remove', '卸载'), title: '从市场卸载，源码和本地改动会归档到 modules/.trash' }, '卸载') : null,
+            m.hasUser && !m.community ? h(Btn, { small: true, kind: 'danger', onClick: () => remove('/modules/remove', m.builtin ? '删除副本' : '删除'), title: m.builtin ? '删掉你复制 / 改的版本，之后用回内置模块' : '删掉 modules/' + m.id + ' 和它的缓存' }, m.builtin ? '删除副本' : '删除') : null)),
         h('div', { className: 'side' },
           h(Switch, { on: m.enabled, onChange: (v) => setMod({ enabled: v }), title: m.enabled ? '关掉这个模块' : '打开这个模块' }),
           m.builtin && m.hasUser ? h('label', { className: 'ab-small ab-muted', style: { display: 'flex', alignItems: 'center', gap: 6 } }, '用内置的', h(Switch, { on: m.useBuiltin, onChange: (v) => setMod({ useBuiltin: v }) })) : null))
@@ -8023,7 +8101,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const progText = (word) => (prog ? stageText() : word + '中…')
       const STAGE_BAR = { index: 10, install: 90, start: 95 }
       const progBar = prog ? h('div', { className: 'ab-card', style: { marginBottom: 12 } },
-        h('div', { className: 'ab-flex', style: { justifyContent: 'space-between' } }, h('b', null, '正在安装「' + (prog.name || prog.id) + '」'), h('span', { className: 'ab-muted ab-small' }, stageText())),
+        h('div', { className: 'ab-flex', style: { justifyContent: 'space-between' } }, h('b', null, (prog.batch ? '正在一键更新 ' + prog.batch.index + '/' + prog.batch.total + '：' : '正在安装「') + (prog.name || prog.id) + (prog.batch ? '' : '」')), h('span', { className: 'ab-muted ab-small' }, stageText())),
         h('div', { style: { height: 6, borderRadius: 3, background: 'var(--ab-foam-2)', marginTop: 8, overflow: 'hidden' } },
           h('div', { style: { height: '100%', width: (STAGE_BAR[prog.stage] || Math.max(12, 10 + percent * 0.8)) + '%', background: 'var(--ab-sea)', transition: 'width .3s' } }))) : null
       const done = async (r) => {
@@ -8048,6 +8126,18 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       const list = (data && data.list) || []
       const stats = (data && data.downloads) || {}
       const counts = { all: list.length, installed: list.filter((m) => m.installed).length, update: list.filter((m) => m.update).length }
+      // 一键更新：把「可更新」的模块一次更新完。后端整批只占一个锁，单个失败不影响后面的。
+      const updateAll = async () => {
+        const n = counts.update
+        if (!n) return toast('没有可更新的模块', 'ok')
+        if (!confirm('把 ' + n + ' 个可更新的模块一起更新？\n\n批量更新期间别关 DSH；某一个失败不会影响其它的，结果会告诉你哪几个没成功。')) return
+        setBusy('update-all')
+        try {
+          const r = await post('/modules/community/update-all', {})
+          await done(r)
+          if (r.failed && r.failed.length) toast('没更新成功：' + r.failed.map((x) => x.name || x.id).join('、'), 'err')
+        } catch (e) { toast(e.message, 'err') } finally { setBusy('') }
+      }
       const word = q.trim().toLowerCase()
       const cats = [...new Set(list.map((m) => m.category).filter(Boolean))]
       // 安装量只能从 GitHub 读，读不到时热度排序不可用；最新发布/最近更新不受影响
@@ -8103,7 +8193,9 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
           h('div', { className: 'ab-flex', style: { marginTop: 8 } },
             h(Btn, { small: true, disabled: busy === 'reg', onClick: () => saveReg() }, busy === 'reg' ? '保存中…' : '保存地址'),
             h(Btn, { small: true, disabled: busy === 'reg' || regPreset === 'github', onClick: () => { setRegMode('github'); setRegUrl(regDef || ''); saveReg(regDef || '') } }, '恢复默认 GitHub 源'))),
-        h(Card, { title: '模块市场', desc: '给ta装更多本事。模块由社区提供、维护者审核后上架；它们和插件在同一进程运行，能接触账号配置，装之前看清下面列的能力。下载次数来自模块库 GitHub Releases（更新也算一次），只是热度参考。', right: h(Btn, { small: true, kind: 'ghost', onClick: () => load(true) }, '刷新') },
+        h(Card, { title: '模块市场', desc: '给ta装更多本事。模块由社区提供、维护者审核后上架；它们和插件在同一进程运行，能接触账号配置，装之前看清下面列的能力。下载次数来自模块库 GitHub Releases（更新也算一次），只是热度参考。', right: h('div', { className: 'ab-flex' },
+            counts.update ? h(Btn, { small: true, kind: 'primary', disabled: Boolean(busy), onClick: updateAll }, busy === 'update-all' ? progText('更新') : '一键更新 ' + counts.update) : null,
+            h(Btn, { small: true, kind: 'ghost', onClick: () => load(true) }, '刷新')) },
           h('div', { className: 'ab-flex' },
             h('input', { className: 'ab-input', placeholder: '搜模块', value: q, onChange: (e) => setQ(e.target.value) }),
             chip('all', '全部'), chip('installed', '已安装'), chip('update', '可更新'),
@@ -9932,6 +10024,8 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         if (changed(rest.group, baseline.group)) { body.group = rest.group; expected.group = baseline.group }
         if (changed(rest.memory, baseline.memory)) {
           const mem = clone(rest.memory || {})
+          if (changed(mem.groupExtraction, baseline.memory?.groupExtraction)) expected.groupExtraction = baseline.memory?.groupExtraction || {}
+          else delete mem.groupExtraction
           if (changed(mem.passiveGroups, baseline.memory?.passiveGroups)) expected.passiveGroups = baseline.memory?.passiveGroups
           else delete mem.passiveGroups
           if (Object.keys(mem).length) body.memory = mem
@@ -10126,7 +10220,7 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
         const base = draftBaseRef.current || cfg
         if (id.startsWith('ext:')) { const k = id.slice(4); return JSON.stringify((draft.ext || {})[k]) !== JSON.stringify((base.ext || {})[k]) }
         // 「聊天」页的旁听名单存于 memory，也需要显示未保存标记。
-        if (id === 'group' && (JSON.stringify(draft.memory?.passiveGroups) !== JSON.stringify(base.memory?.passiveGroups) || JSON.stringify(draft.allow?.groups) !== JSON.stringify(base.allow?.groups))) return true
+        if (id === 'group' && (JSON.stringify(draft.memory?.groupExtraction) !== JSON.stringify(base.memory?.groupExtraction) || JSON.stringify(draft.memory?.passiveGroups) !== JSON.stringify(base.memory?.passiveGroups) || JSON.stringify(draft.allow?.groups) !== JSON.stringify(base.allow?.groups))) return true
         // 「生图」页也管着 dsh-image 模块的设置。
         if (id === 'imagegen' && JSON.stringify((draft.ext || {})['dsh-image']) !== JSON.stringify((base.ext || {})['dsh-image'])) return true
         return (TAB_KEYS[id] || []).some((k) => JSON.stringify(draft[k]) !== JSON.stringify(base[k]))
@@ -10171,9 +10265,40 @@ body[data-ds-dark-theme] .ab-root,.ab-root.ab-dark{--ab-shadow:0 1px 2px rgba(0,
       )
     }
 
+    function ReplyDraftStatus({ sessionId, turn }) {
+      const start = turn?.start?.seq, end = turn?.end?.seq
+      const [result, setResult] = useState(null)
+      const identity = JSON.stringify([sessionId, start, end])
+      useEffect(() => {
+        let alive = true
+        setResult(null)
+        if (!sessionId || start == null || end == null) return
+        get('/reply-status?sessionId=' + encodeURIComponent(sessionId) + '&startSeq=' + start + '&endSeq=' + end)
+          .then(r => { if (alive && r.ok && r.status) setResult({ identity, value: r.status }) })
+        return () => { alive = false }
+      }, [identity])
+      if (result?.identity !== identity) return null
+      const status = result.value
+      const reasons = {
+        edited: '已采用精简后的回复', 'below-threshold': '篇幅较短，无需精简',
+        timeout: '精简等待超时，保留原稿', cancelled: '精简被取消，保留原稿',
+        'editor-failed': '精简服务出错，保留原稿', incomplete: '未取得完整精简结果',
+        'not-shorter': '精简结果没有更短', empty: '精简结果为空', 'empty-delivery': '精简结果没有可发送内容',
+        'voice-lost': '精简结果未保留语音', 'media-changed': '精简结果改变了附件',
+        'reply-target-changed': '精简结果改变了引用对象', 'mention-target-changed': '精简结果改变了提醒对象',
+        'no-model': '没有可用的精简模型', 'not-edited': '本条未经过精简', 'not-applied': '精简结果未用于本条回复',
+      }
+      return h('details', { className: 'ab-reply-status', style: { marginTop: 6, fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' } },
+        h('summary', { style: { cursor: 'pointer' } }, status.state === 'edited' ? '精简稿' : '原稿'),
+        h('div', { style: { marginTop: 4 } }, reasons[status.reason] || '本条保留原稿', ' · ',
+          status.before === status.after ? status.after + ' 字符' : status.before + ' → ' + status.after + ' 字符',
+          Number.isFinite(status.elapsedMs) ? ' · ' + (status.elapsedMs / 1000).toFixed(1) + ' 秒' : ''))
+    }
+
     function apply(ctx) {
       const slots = ctx.get('slots')
       if (slots === undefined) return
+      slots.inject('conversation.chat.turnTail', () => slots.register({ name: 'conversation.chat.turnTail', id: 'aurabot-reply-status', order: 11, select: props => props }, ReplyDraftStatus))
       // 写法同 DSH 自带的「自动化任务」（order 10）和「插件」（order 0）：排在它们后面
       slots.inject('main', () => slots.register({ name: 'main', key: PANEL_ID }, AurabotPage))
       slots.inject('sidebar.panellist', () => slots.register({ name: 'sidebar.panellist', id: PANEL_ID, order: 20, label: () => 'Aurabot' }, WhaleIcon))

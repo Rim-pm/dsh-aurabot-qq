@@ -8,7 +8,8 @@
 //
 // 接口说明给写模块的人看：src/modules/API.md（每次启动复制到数据目录 modules/ 里）。
 
-import { existsSync, readdirSync, statSync, mkdirSync, copyFileSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
+import { existsSync, readdirSync, statSync, lstatSync, mkdirSync, copyFileSync, readFileSync, writeFileSync, renameSync, rmSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { join, dirname, relative, resolve, sep, isAbsolute } from 'node:path'
 import { pathToFileURL, fileURLToPath } from 'node:url'
 import { dataDir } from './store.js'
@@ -1280,6 +1281,38 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
     return { ok: true, dir, message: `复制好了：${dir}。改完保存，几秒内就会换成你的版本` }
   }
 
+  /** 删除用户模块：先停掉，再把源码和本地改动归档到 modules/.trash；默认保留数据和设置，purge 才清掉。 */
+  async function removeModule(id, { purge = false } = {}) {
+    if (typeof id !== 'string' || !ID_RE.test(id)) return { ok: false, message: 'id 不对' }
+    const dir = join(userDir(), id)
+    if (!inside(userDir(), dir)) return { ok: false, message: 'id 不对' }
+    if (!existsSync(dir)) return { ok: false, message: `modules/${id} 不存在` }
+    if (!lstatSync(dir).isDirectory()) return { ok: false, message: `modules/${id} 不是文件夹` }
+    const trash = join(userDir(), '.trash')
+    mkdirSync(trash, { recursive: true })
+    if (!lstatSync(trash).isDirectory()) return { ok: false, message: 'modules/.trash 不是文件夹，没法归档' }
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+    const folder = `${id}-${stamp}-${randomUUID().slice(0, 8)}`
+    const archive = `modules/.trash/${folder}`
+    stop(id)
+    try {
+      renameSync(dir, join(trash, folder))
+      log.info(`面板删除模块「${id}」，源码归档到 ${archive}`)
+      if (purge) {
+        rmSync(dataDir('modules-data', id), { recursive: true, force: true })
+        const cfg = getConfig()
+        const { [id]: _ext, ...ext } = cfg.ext || {}
+        const { [id]: _mod, ...modules } = cfg.modules || {}
+        setConfig({ ...cfg, ext, modules })
+      }
+    } finally {
+      await sync()
+    }
+    const dataStatus = purge ? '数据和设置已清除' : '数据和设置已保留'
+    const fallback = builtinDefs.has(id) ? '内置版本会继续运行。' : ''
+    return { ok: true, archive, message: `删掉了，源码和本地改动已移到 ${archive}。${dataStatus}。${fallback}` }
+  }
+
   /** 接口说明和类型提示放进 modules/（插件的东西，每次启动都覆盖成当前版本）。 */
   function installDocs() {
     try {
@@ -1305,7 +1338,7 @@ export function createModules({ ctx, core, getConfig, setConfig, logger, version
   const publicHandle = { use: exportsOf, has: (id) => live.has(id), list: () => status().map(({ id, name, running }) => ({ id, name, running })), emit }
 
   return {
-    boot, sync, reload, stop, dispose, status, create, fork, promptFor, panelSource,
+    boot, sync, reload, stop, dispose, status, create, fork, remove: removeModule, promptFor, panelSource,
     use: exportsOf, has: (id) => live.has(id), running: (id) => live.get(id)?.source || null, generation: () => generation,
     capabilitiesOf,
     // 面板首屏提速：导航摘要（纯内存）与导航版本号（安装/启停/失败/重载时递增）

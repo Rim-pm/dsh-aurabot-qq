@@ -151,7 +151,7 @@ test('解析位置和联系人卡片，只提取核对到的字段，分享卡�
   assert.equal(cardText({ app: 'com.tencent.map', meta: { Location: { address: '北门' } } }), '[位置：北门]')
   assert.equal(cardText({ app: 'com.tencent.contact.lua', meta: { contact: { type: 'qq', id: '12345', name: '未核对' } } }), '[联系人：12345]')
   assert.equal(cardText({ app: 'com.tencent.contact.lua', meta: { contact: {} } }), '[联系人]')
-  assert.equal(cardText(JSON.stringify({ meta: { news: { title: '标题', jumpUrl: 'https://example.com/?x=1' } } })), '[分享卡片：标题 https://example.com/]')
+  assert.equal(cardText(JSON.stringify({ meta: { news: { title: '标题', jumpUrl: 'https://example.com/?x=1' } } })), '[分享卡片：标题 https://example.com/?x=1]')
   assert.equal(cardText('坏 JSON'), '[卡片消息]')
 })
 

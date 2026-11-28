@@ -157,15 +157,24 @@ const REF_IN_BAD_TAG = new RegExp(`<reply\\s*[:：]\\s*(?:${CONTEXT_REF})\\s*>`,
 
 /** 洗掉模型漏出来的内部标记与消息编号：行首连标点一起清，行中行尾留个空格；洗完是空的就当「这次不说话」。 */
 export function stripModelArtifacts(text) {
-  return String(text || '')
+  const cleaned = String(text || '')
     .replace(SPECIAL_TOKEN, '')
     .replace(REF_IN_BAD_TAG, '')
     .split('\n')
     .map((line) => line.replace(REF_AT_HEAD, '').replace(REF_INLINE, ''))
     .join('\n')
-    .replace(/[ \t]{2,}/g, ' ')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim()
+  // 收空格只在代码块外面做：代码里的缩进是内容（YAML、Python），
+  // 一律把连续空格压成一个会把 4 空格缩进压成 1 个，发出去就不是原来那段代码了（#599）。
+  const code = codeRanges(cleaned)
+  const squeeze = (chunk) => chunk.replace(/[ \t]{2,}/g, ' ').replace(/\n{3,}/g, '\n\n')
+  if (!code.length) return squeeze(cleaned).trim()
+  let out = ''
+  let last = 0
+  for (const range of code) {
+    out += squeeze(cleaned.slice(last, range.start)) + cleaned.slice(range.start, range.end)
+    last = range.end
+  }
+  return (out + squeeze(cleaned.slice(last))).trim()
 }
 
 const SILENCE_MARK_SOURCE = '\\[沉默\\]|［沉默］|\\(沉默\\)|（沉默）'

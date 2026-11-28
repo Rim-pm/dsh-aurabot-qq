@@ -26,6 +26,7 @@ test('模块路由默认只许本机；access: open 才放跨机；重载可撤�
     rmSync(dir, { recursive: true, force: true })
   })
   const app = (await import('../src/host.js')).apply(fake.ctx); await app.ready
+  assert.equal((await fake.call('/modules/community/update-all')).status, 405)
   const path = '/ext/route-probe/manage'
   assert.equal((await fake.call(path)).status, 200)
   assert.equal((await fake.call(path, undefined, {}, '127.0.0.1')).json().managed, true)

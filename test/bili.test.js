@@ -58,7 +58,7 @@ test('解析：Cookie 只取有用的、认出视频号和短链、QQ 分享卡�
   assert.equal(api.findVideoId('没有链接'), null)
   const { cardText } = await import('../src/chat/inbound.js')
   const card = JSON.stringify({ meta: { detail_1: { title: '哔哩哔哩', desc: '猫猫做饭', qqdocurl: 'https://b23.tv/xyz?share=1' } } })
-  assert.equal(cardText(card), '[分享卡片（哔哩哔哩）：猫猫做饭 https://b23.tv/xyz]')
+  assert.equal(cardText(card), '[分享卡片（哔哩哔哩）：猫猫做饭 https://b23.tv/xyz?share=1]')
   assert.equal(cardText('不是 json'), '[卡片消息]')
 })
 
@@ -121,7 +121,8 @@ test('刷一轮：看视频、分享给主人、记成她的经历', async () =>
   assert.equal(r.watched, 2)
   assert.equal(sent.length, 1)
   assert.equal(sent[0].chatId, 'private:10000001')
-  assert.match(sent[0].text, /会做饭！\nhttps:\/\/www\.bilibili\.com\/video\/BV1/)
+  // #334：私聊分享改成 QQ 里点得开的网页播放器链接
+  assert.match(sent[0].text, /会做饭！\nhttps:\/\/www\.bilibili\.com\/blackboard\/webplayer\/mbplayer\.html\?bvid=BV1[^&]*&p=1&autoplay=true$/)
   const seen = eventRecords.filter((e) => e.kind === 'seen')
   assert.equal(seen.length, 2)
   assert.equal(seen[0].meta.title, '米饭大赛')

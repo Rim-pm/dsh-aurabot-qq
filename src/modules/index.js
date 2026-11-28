@@ -18,5 +18,8 @@ import profile from './profile/index.js'
 import contacts from './contacts/index.js'
 import video from './video/index.js'
 import imageRecovery from './image-recovery/index.js'
+import inputRejectionNotice from './input-rejection-notice/index.js'
 
-export const BUILTINS = [stickers, voice, mood, memory, qqTools, qqApi, imagegen, diary, qzoneSocial, purpose, autotelic, song, profile, contacts, video, imageRecovery]
+// 本 fork 不内置 bili（B 站降级成 extensions/bili-observer 观察扩展）；上游新加的
+// input-rejection-notice 与 B 站无关，照收。
+export const BUILTINS = [stickers, voice, mood, memory, qqTools, qqApi, imagegen, diary, qzoneSocial, purpose, autotelic, song, profile, contacts, video, imageRecovery, inputRejectionNotice]

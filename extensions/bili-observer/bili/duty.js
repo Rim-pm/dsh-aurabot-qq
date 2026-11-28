@@ -22,7 +22,11 @@ const { inHourWindow } = __lib('core/time-window.js')
 const PAUSE_CODES = { '-101': 'B 站没登录或 Cookie 过期了', '-111': 'Cookie 里的 bili_jct 不对', '-352': '被 B 站风控了', '-509': '写得太频繁', '12015': 'B 站要求验证码' }
 
 const dayKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-const link = (bvid) => `https://www.bilibili.com/video/${bvid}`
+export const link = (bvid) => `https://www.bilibili.com/video/${bvid}`
+// QQ 里点得开的是网页播放器：点开直接播；video/ 普通链接常被拦去外部浏览器或要重新登录（#334）。
+// 记忆/流水里仍存 link() 的正式地址，便于回溯与去重。
+export const playerLink = (bvid, p = 1) =>
+  `https://www.bilibili.com/blackboard/webplayer/mbplayer.html?bvid=${bvid}&p=${p}&autoplay=true`
 
 /** 从模型输出里取 JSON（对象或数组），取不到返回 fallback。 */
 export function pickJson(out, fallback) {
@@ -444,7 +448,7 @@ export function createBili({ getConfig, hub, memory, log, dsh, api: injected, vi
         if (await favOne(v, tier, s)) { faved++; seenState = markSeen(seenState, v.bvid, 'faved') }
         const share = cleanOutboundText(d.share, { warn: (message) => log.warn(`B 站分享：${message}`) }).trim()
         if (tier === 'worth' && share && !isSilence(share) && c.shareToOwner && getConfig().ownerQQ) {
-          await hub.sendText(`private:${getConfig().ownerQQ}`, `${share}\n${link(v.bvid)}`)
+          await hub.sendText(`private:${getConfig().ownerQQ}`, `${share}\n${playerLink(v.bvid)}`)
           shared++
           record(s, { kind: 'share', title: v.title, bvid: v.bvid, text: share })
         }

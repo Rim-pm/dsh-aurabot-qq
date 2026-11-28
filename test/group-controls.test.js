@@ -139,8 +139,8 @@ test('同一群在白名单和旁听名单时沿用原逻辑，不重复写入�
 })
 
 
-test('旁听流水进入现有记忆整理并保留群作用域，不开聊天会话', async t => {
-  const s = setup(t, { model: { provider: 'test', model: 'test' }, memory: { enabled: true, passiveGroups: [G], gistEnabled: false } })
+test('完整整理模式：旁听流水进入现有记忆整理并保留群作用域，不开聊天会话', async t => {
+  const s = setup(t, { model: { provider: 'test', model: 'test' }, memory: { enabled: true, passiveGroups: [G], groupExtraction: { [G]: 'all' }, gistEnabled: false } })
   await s.hub.onMessage(s.event('本群约好了周六下午去公园野餐'))
   const transcripts = []
   const dsh = { get: () => null, llm: { async *stream({ system, messages }) {

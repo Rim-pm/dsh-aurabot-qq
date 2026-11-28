@@ -70,7 +70,9 @@ const MEMSEARCH_LINE = /^\[memsearch\]\s*Recall available\b/i
 
 const isInjectionLine = (line) => TIME_CONTEXT_LINE.test(line) || MEMSEARCH_LINE.test(line)
 
-const OUTBOUND_SCAFFOLD_HEAD = /(?<!^)(?<!\n)【系统提醒[^】\n]*】/g
+// 模型抄上下文时会把前缀的 user 一起抄进来，这里连它一起吃掉；
+// 但后面还得剩一个中文字符才动手，lookbehind 也防止误伤 superuser 这类单词。
+const OUTBOUND_SCAFFOLD_HEAD = /(?:(?<![A-Za-z0-9_])user[ \t]*)?(?<!^)(?<!\n)【系统提醒[^】\n]*】/g
 const OUTBOUND_ROOM_HEAD = /【你在自己家里[^】\n]*】/g
 
 function runtimeContextEnd(text, start) {

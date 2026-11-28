@@ -5,6 +5,24 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createConversationArchive, queriesFor, retrieve, packEvidence, recentWithin } from '../src/chat/conversation-context.js'
 
+test('rejected input is excluded from recall across restarts without losing later or other chats', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'aurabot-rejected-'))
+  let archive = createConversationArchive({ directory })
+  for (const chat of ['group:a','group:b']) {
+    archive.append(chat, { role:'user', id:'old', text:'Coffee旧约定' })
+    archive.append(chat, { role:'user', id:'bad', contextId:'rejected', at:42, text:'Coffee失败输入' })
+    archive.append(chat, { role:'user', id:'new', contextId:'later', at:42, text:'Coffee新消息' })
+  }
+  assert.match(archive.recall('group:a','Coffee',{recentMessages:[]}).text,/失败输入/)
+  archive.excludeContext('group:a','rejected')
+  archive.excludeContext('group:a','rejected')
+  assert.doesNotMatch(archive.recall('group:a','Coffee',{recentMessages:[]}).text,/失败输入/)
+  archive = createConversationArchive({ directory })
+  assert.deepEqual(archive.recent('group:a').map(x => x.id), ['old','new'])
+  assert.deepEqual(archive.recent('group:b').map(x => x.id), ['old','bad','new'])
+  assert.doesNotMatch(archive.recall('group:a','Coffee',{recentMessages:[]}).text,/失败输入/)
+})
+
 test('省略说法可以借助多轮用户线索，明确转题不会带入旧主题', () => {
   const recent = [{ role: 'user', text: 'Coffee温控怎么调' }, { role: 'assistant', text: '试试低一点的水温' }, { role: 'user', text: '嗯' }]
   assert.ok(queriesFor('那后来呢', recent).some(q => q.includes('Coffee')))

@@ -55,3 +55,24 @@ test('schedule 透出真实 outcome，status 返回 running', () => {
   assert.match(read('../src/autotelic/schedule.js'), /result\.outcome/)
   assert.match(read('../src/modules/autotelic/index.js'), /running:\s*!!schedule\.view\(\)\.inFlight/)
 })
+
+test('窗口条目超过旧去重上限时，第二轮不重复写', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'autotelic-dedup-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const now = Date.now()
+  const ownerQQ = '1240819805'
+  // 3000 条 > 旧默认 seenLimit 2000：旧实现第二轮会把整窗再写一遍。
+  const rows = Array.from({ length: 3000 }, (_, i) => ({
+    t: now - 3000 + i, chatId: `group:${7000 + (i % 5)}`, who: `u${i % 50}`, uid: String(i % 50),
+    text: `第 ${i} 条群聊内容`,
+  }))
+  const hub = { chatLogDays: () => ['2026-11-23'], chatLogOf: () => rows }
+  const observe = createObserve({
+    file: join(dir, 'observations.jsonl'),
+    hooks: { write: (f, s) => appendFileSync(f, s, 'utf8'), schedule: () => () => {} },
+  })
+  const collector = createChatCollector({ hub, identity: { owner: () => ownerQQ }, observe, now: () => now })
+  assert.equal(collector.collect().written, 3000)
+  assert.equal(collector.collect().written, 0, '第二轮不该重复写')
+  assert.equal(collector.collect().written, 0, '第三轮也不该')
+})

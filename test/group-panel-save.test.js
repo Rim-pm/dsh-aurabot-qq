@@ -109,3 +109,12 @@ test('模式同时改白名单和 AI 限制；旧草稿不能覆盖另一个入�
     assert.equal(r.code, 'invalid_group_ids'); assert.deepEqual(snapshot(), before)
   }
 })
+
+test('同一群记忆范围被另一面板更改：旧草稿不能覆盖，恢复默认可删空映射', async () => {
+  const before = snapshot().memory.groupExtraction
+  const send = (m, base) => save({ memory: { groupExtraction: m }, _groupSettingsBase: { groupExtraction: base } })
+  assert.notEqual((await send({ [G]: 'all' }, before)).ok, false)
+  assert.equal((await send({ [G]: 'auto' }, before)).code, 'group_settings_conflict')
+  assert.notEqual((await send({}, { [G]: 'all' })).ok, false)
+  assert.deepEqual(snapshot().memory.groupExtraction, {})
+})

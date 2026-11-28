@@ -8,12 +8,23 @@ const source = readFileSync(new URL('../client/client.js', import.meta.url), 'ut
 const G = '30000003', H = '40000004', P = '50000005'
 function panel() {
   let loader, cursor = 0, slots = [], draft = normalize({ allow: { groups: [G, H] }, group: { overrides: { [G]: { proactiveEnabled: false } } }, memory: { passiveGroups: [P] } })
-  const React = { Component: class {}, createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
-    useState: init => { const i = cursor++; if (!(i in slots)) slots[i] = typeof init === 'function' ? init() : init; return [slots[i], v => { slots[i] = typeof v === 'function' ? v(slots[i]) : v }] },
+  // React 的状态属于组件实例；两个分区不能共用一个线性 hooks 数组。
+  const frames = new Map(); let frame = 'root', child = 0
+  function inFrame(key, fn) {
+    const old = [frame, child, slots, cursor]; frame = key; child = 0; cursor = 0
+    if (!frames.has(key)) frames.set(key, [])
+    slots = frames.get(key)
+    try { return fn() } finally { [frame, child, slots, cursor] = old }
+  }
+  const React = { Component: class {}, createElement(type, props, ...children) {
+    const key = frame + '/' + (props?.key ?? child++) + ':' + (type?.name || type)
+    return { type: typeof type === 'function' ? p => inFrame(key, () => type(p)) : type, props: props || {}, children }
+  },
+    useState: init => { const i = cursor++, cell = slots; if (!(i in cell)) cell[i] = typeof init === 'function' ? init() : init; return [cell[i], v => { cell[i] = typeof v === 'function' ? v(cell[i]) : v }] },
     useRef: v => ({ current: v }), useEffect: () => {}, useMemo: fn => (typeof fn === 'function' ? fn() : fn), useCallback: fn => fn, Fragment: 'fragment' }
   new Script(source.replace('exports.AurabotPage = AurabotPage', 'exports.GroupOverrides = GroupOverrides; exports.Group = Group; exports.AurabotPage = AurabotPage')).runInNewContext({ window: { __ModuleLoader__: { load: v => { loader = v } } } })
   const { GroupOverrides, Group } = loader.factory(() => React)
-  return { get draft() { return draft }, render(component = GroupOverrides) { cursor = 0; return component({ draft, setDraft: v => { draft = JSON.parse(JSON.stringify(v)) }, setSection() {}, st: { modules: [] }, go() {} }) }, Group }
+  return { get draft() { return draft }, render(component = GroupOverrides) { return inFrame(component.name, () => component({ draft, setDraft: v => { draft = JSON.parse(JSON.stringify(v)) }, setSection() {}, st: { modules: [] }, go() {} })) }, Group }
 }
 function nodes(root) {
   // 融合：Group 重整后 Seg/Select/Switch 是函数组件，先把整棵树按 React 语义展开，再收集节点。

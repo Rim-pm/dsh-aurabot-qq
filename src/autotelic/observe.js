@@ -238,8 +238,11 @@ export function createEmotionBridge({ fetchEmotions = null, observe }) {
  * 只看主人私聊 + 群聊（她的独立会话不进观察——自言自语不该自我强化，同旧 runtime 口径）。
  * @param {{hub:object, identity:object, observe:object, now?:()=>number}} o
  */
-export function createChatCollector({ hub, identity, observe, now = () => Date.now(), days = 2, seenLimit = 2000 }) {
-  const seen = [] // 采集去重（聊天流水按天滚动，同条目两天窗口重叠会出现两次）
+export function createChatCollector({ hub, identity, observe, now = () => Date.now(), days = 2, seenLimit = 60_000 }) {
+  // 采集去重（聊天流水按天滚动，同条目两天窗口重叠会出现两次）。
+  // 上限要盖住「两天窗口 × 群密度」的全部条目：每 60 秒重扫整窗，一旦窗口条目超过上限，
+  // 先写进去的 key 会被挤出去，第二轮就把整窗再写一遍（实测 4656 条的窗口三轮写了 13968 条）。
+  const seen = []
   const seenSet = new Set()
   function markSeen(key) {
     if (seenSet.has(key)) return false

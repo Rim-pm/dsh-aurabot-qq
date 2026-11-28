@@ -37,6 +37,7 @@ function setup(t, patch = {}) {
   })
   // normalize 会把空数组当成「没配」回退到 04:00/16:00；这里必须清掉，
   // 否则 CI 在下午跑 tick 时会先走 consolidate，而不是本用例要测的 extractIdle。
+  cfg.memory.groupExtraction = { '999': 'all', '2': 'all' } // 完整流水的公平调度
   cfg.memory.consolidateTimes = []
   const hub = {
     chatLogDays: () => [...logs.keys()].sort(),
@@ -118,4 +119,13 @@ test('#31 总预算仍由 extractDailyBatches 控制，旧配置默认值不变'
   await mem.tick()
   assert.equal(extractCalls(s).length, 3, '日预算用完后下一分钟不再调模型')
   assert.equal(normalize({}).memory.extractDailyBatches, 24)
+})
+
+test('空闲提炼只给选入的行占预算，其余原文不进模型、群活跃时间仍按整群判断', async t => {
+  const s = setup(t); s.cfg.memory.groupExtraction = {}; s.cfg.memory.extractMinLines = 1
+  const at = Date.now() - 3 * 3600000, day = dayKey()
+  const rows = [row('group:999', A, '环境流水', at), { ...row('group:999', A, '直接互动', at + 180000), interaction: [A] }, row('group:999', A, '现在仍在聊天', Date.now())]
+  s.logs.set(day, rows); const m = s.make(); await m.tick(); assert.equal(extractCalls(s).length, 0)
+  rows[2].t = at + 240000; await m.tick(); const calls = extractCalls(s); assert.equal(calls.length, 1); assert.match(calls[0].text, /直接互动/); assert.doesNotMatch(calls[0].text, /环境流水|现在仍在聊天/)
+  assert.equal((await m.backlog()).pending, 0); assert.equal((await m.backlog()).outOfScope, 2); assert.equal(s.state().extractBatches.count, 1)
 })

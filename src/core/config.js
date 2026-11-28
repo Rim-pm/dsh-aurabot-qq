@@ -14,6 +14,9 @@ import { cleanExamples } from './examples.js'
 import { DEFAULT_TIER_DAYS } from '../features/memory-rules.js'
 import { defaultEmotions, normalizeEmotions } from '../features/mood-emotions.js'
 
+// 识图模型的思考强度只认这三档（和面板「思考强度」的选项一致）
+const VISION_EFFORTS = ['low', 'high', 'max']
+
 export const DEFAULTS = {
   enabled: false, // 总开关：关着一句都不发
   dryRun: true, // 试运行：只记日志不真发
@@ -74,7 +77,9 @@ export const DEFAULTS = {
     httpToken: '',
     wsToken: '',
   },
-  model: { provider: '', model: '', reasoningEffort: 'low', vision: 'auto' }, // 留空 = 跟随 DSH 默认；vision: auto/on/off
+  // 留空 = 跟随 DSH 默认；vision: auto/on/off（聊天模型自己能不能收图片）；
+  // visionModel: 单独选的识图模型 —— 配了它以后图片先交给它看，聊天模型只收文字描述
+  model: { provider: '', model: '', reasoningEffort: 'low', vision: 'auto', visionModel: { provider: '', model: '' }, visionReasoningEffort: 'low' },
   // 按聊天选模型（主人在面板「模型」页设）：私聊 QQ 号 > 群号 > 所有私聊 / 所有群默认 > 上面的全局模型；没写的一级退到下一级
   chatEfforts: {}, // QQ 聊天单独选择的思考档位
   chatModels: { privateDefault: { provider: '', model: '', reasoningEffort: '' }, groupDefault: { provider: '', model: '', reasoningEffort: '' }, privates: {}, groups: {} },
@@ -405,6 +410,7 @@ export const DEFAULTS = {
   wrapUp: { enabled: true, waitSec: 300, maxWaitSec: 1800, closeSec: 43200, replyDelaySec: 1, recap: true, questionGuard: true, proactiveMute: true },
   memory: {
     adaptStyle: true, // 允许从旧记忆注入说话方式/相处建议；关闭不删除记忆
+    groupExtraction: {}, // 群长期记忆：未单独设置时只整理相关对话
     passiveGroups: [], // 非白名单群：仅记录文字供记忆整理，不开放聊天；留空不旁听
     enabled: true, recallCount: 6, recallMinRelevance: 0, recallMode: 'always', recallTriggers: ['上次', '上回', '之前', '以前', '那天', '那次', '还记得', '记不记得', '说过', '提过', '答应', '约好', '那时候'],
     dailyConsolidate: true, consolidateTimes: ['04:00', '16:00'], keepChatlogDays: 7, keepChatlogSet: false, mergeGroups: false, compress: true, compressAfterDays: 14, instantCommands: true, groupMemory: true, searchRrf: true,
@@ -592,6 +598,13 @@ export function normalize(raw) {
   if (c.workspaceDir && !/^([a-zA-Z]:[\\/]|\/)/.test(c.workspaceDir)) c.workspaceDir = ''
   // 视觉能力：auto = 问 DSH 的模型元数据；on / off = 主人手动声明（覆盖元数据）
   c.model.vision = c.model.vision === 'on' || c.model.vision === 'off' ? c.model.vision : 'auto'
+  // 识图模型：{ provider, model } 两个都填了才算；坏数据 / 只填一半一律当没配
+  const vm = isObj(c.model.visionModel) ? c.model.visionModel : {}
+  const vmProvider = typeof vm.provider === 'string' ? vm.provider.trim().slice(0, 120) : ''
+  const vmModel = typeof vm.model === 'string' ? vm.model.trim().slice(0, 200) : ''
+  c.model.visionModel = vmProvider && vmModel ? { provider: vmProvider, model: vmModel } : { provider: '', model: '' }
+  // 识图模型的思考强度和聊天模型分开设：只认「低 / 高 / 最高」三档，坏数据一律回到默认「低」
+  c.model.visionReasoningEffort = VISION_EFFORTS.includes(c.model.visionReasoningEffort) ? c.model.visionReasoningEffort : 'low'
   c.setupDone = bool(c.setupDone, false)
   c.ownerLevel = LEVELS.includes(c.ownerLevel) ? c.ownerLevel : 'full'
   c.longTasks = bool(c.longTasks, true)
@@ -942,7 +955,13 @@ export function normalize(raw) {
   c.chat = c.chat || {}
   c.chat.seedHistory = bool(c.chat.seedHistory, false)
   c.chat.seedHistoryCount = num(c.chat.seedHistoryCount, 20, 1, BIG)
-  c.chat.everyStep = bool(c.chat.everyStep, false)
+  // 'auto' = 按本轮有无工具调用来决定（纯对话轮分条发、带工具的轮只发最后一段）
+  c.chat.everyStep = c.chat.everyStep === 'auto' ? 'auto' : bool(c.chat.everyStep, false)
+  // 近似去重阈值：面板给的是 0–1，配置被手改出界（负数 / >1）时会让「相似度 ≥ 阈值」恒真或恒假，这里收一下。
+  const dupRaw = c.chat.dupSimilarity
+  c.chat.dupSimilarity = dupRaw === undefined || dupRaw === null || dupRaw === ''
+    ? 0.45
+    : (Number.isFinite(Number(dupRaw)) ? Math.min(1, Math.max(0, Number(dupRaw))) : 0.45)
   c.chat.rescueFromThinking = bool(c.chat.rescueFromThinking, false)
   c.chat.thinkingGuard = { enabled: bool(c.chat.thinkingGuard?.enabled, true) }
   c.chat.replyMarker = { enabled: bool(c.chat.replyMarker?.enabled, false) }
@@ -983,6 +1002,7 @@ export function normalize(raw) {
   if (!isObj(c.memory.tierDays)) c.memory.tierDays = {}
   for (const k of Object.keys(DEFAULT_TIER_DAYS)) c.memory.tierDays[k] = Math.round(num(c.memory.tierDays[k], DEFAULT_TIER_DAYS[k], 0, BIG))
   // 老版本的 0 是当时的默认值，不是谁选的：升级后改成留 7 天，以后面板里再选 0 才算数
+  c.memory.groupExtraction = Object.fromEntries(Object.entries(c.memory.groupExtraction || {}).filter(([id, v]) => /^\d+$/.test(id) && (v === 'all' || v === 'auto')))
   c.memory.passiveGroups = qqList(c.memory.passiveGroups)
   const keepUnset = raw?.memory?.keepChatlogDays === 0 && !raw.memory.keepChatlogSet
   c.memory.keepChatlogDays = keepUnset ? 7 : num(c.memory.keepChatlogDays, 7, -1, 3650)
@@ -1457,9 +1477,10 @@ export function mergeFromPanel(current, incoming) {
   next.bridge.token = current.bridge?.token || ''
   // B 站：只改了其中一个值时，另一个保留；整串粘进来的会在 normalize 里拆开
   if (incoming?.bili && (incoming.bili.sessdata || incoming.bili.biliJct)) next.bili.cookie = ''
-  // B 站订阅列表没有可编辑的表单字段（面板上是「添加 / 取消订阅」按钮，直接走接口）：保存时保留当前值，
-  // 否则面板里那份旧草稿会把刚订阅的号又抹掉
+  // B 站订阅列表没有可编辑的表单字段，订阅是「添加 / 取消」按钮或直接走接口，保存时沿用当前值，
+  // 免得面板那份旧草稿把刚定的订阅抹掉
   next.bili.subs = current.bili?.subs || []
+  if (incoming?.memory?.groupExtraction) next.memory.groupExtraction = incoming.memory.groupExtraction
   if (incoming?.group?.overrides) next.group.overrides = incoming.group.overrides
   // 按聊天选模型：两张表整张替换（deepMerge 会让删掉的条目又回来）
   if (incoming?.chatModels?.privates) next.chatModels.privates = incoming.chatModels.privates

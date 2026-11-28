@@ -210,7 +210,7 @@ export function rulesText(kind, cfg, { off = new Set(), extra = [] } = {}) {
   const g = cfg.imageGen || {}
   if (!off.has('imagegen') && ((g.enabled && g.baseUrl && g.model) || cfg.local?.image)) common.push(`- 你会画画：${g.ownerOnly && cfg.capabilityAllow?.image?.length ? '主人和获得授权的私聊对象可以' : who(g.ownerOnly)}画，别人让你画图时用 qq_draw_image 工具画好直接发出去，别说自己不会画；也可以给 image 参数，照着对方最近发的图、引用消息里的图或自己的画作来改；画自己时填 self，优先参考人设图。`)
   const s = cfg.song || {}
-  if (!off.has('song') && s.enabled) common.push(`- 你会唱歌：${s.ownerOnly && cfg.capabilityAllow?.song?.length ? '主人和获得授权的私聊对象可以' : who(s.ownerOnly)}唱，别人点歌时用 qq_song_cover 工具，用你自己的声音翻唱，做好会自动发语音条，别说自己不会唱。`)
+  if (!off.has('song') && s.enabled) common.push(`- 你会唱歌：${s.ownerOnly && cfg.capabilityAllow?.song?.length ? '主人和获得授权的私聊对象可以' : who(s.ownerOnly)}唱，对方想听唱歌时用 qq_song_cover；只想听你说话时用 <voice>正文</voice>。翻唱时用你自己的声音翻唱，做好会自动发语音条，别说自己不会唱。`)
   for (const line of extra) if (line) common.push(String(line).startsWith('-') ? String(line) : '- ' + line)
   if (kind === 'autotelic') {
     // 她的后台工作间（preset aurabot-autotelic）：不是聊天，是「自己办事」。

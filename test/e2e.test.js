@@ -53,7 +53,7 @@ async function brain({ preset, text, images, callTool }) {
   if (/【私聊/.test(text) && text.includes('表情改名测试')) { const m = text.match(/把「(.+?)」/); const r = await callTool('qq_edit_sticker', { sticker: m[1], new_name: '改过的名字', tags: ['开心'] }); return r.message }
   if (/【私聊/.test(text) && text.includes('表情删除测试')) { const r = await callTool('qq_edit_sticker', { sticker: '改过的名字', delete: true }); return r.message }
   if (/【私聊/.test(text) && text.includes('翻聊天记录')) { const r = await callTool('qq_chat_history', { count: 5 }); return r.message.split('\n')[0] }
-  if (text.includes('查看QQ资料测试')) { const r = await callTool('qq_get_profile', {}); return r?.ok ? '资料查到了' : r ? r.message : '没这个工具' }
+  if (/^【(?:私聊|群聊)/.test(text) && text.includes('查看QQ资料测试')) { const r = await callTool('qq_get_profile', {}); return r?.ok ? '资料查到了' : r ? r.message : '没这个工具' }
   if (text.includes('改昵称测试')) { const r = await callTool('qq_set_nickname', { name: '小鲸鱼' }); return r ? r.message : '没这个工具' }
   if (text.includes('改签名测试')) { const r = await callTool('qq_set_signature', { text: '今天也要开心' }); return r ? r.message : '没这个工具' }
   if (text.includes('刚才那张换头像测试')) { const r = await callTool('qq_set_avatar', { image: 'last' }); return r ? r.message : '没这个工具' }
@@ -755,15 +755,16 @@ test('空间日记：手动写一篇（仅自己可见），配今天画的图�
   const r = result.json()
   assert.equal(r.ok, true, r.message)
   assert.equal(r.images, 1, '今天画了图，日记应该配一张')
-  const q = mock.sent('send_qzone_msg')[qzoneBefore]
-  assert.equal(q.params.ugc_right, 64)
-  assert.match(q.params.content, /白米饭/)
-  assert.equal(q.params.images.length, 1, '说说带了一张图')
-  assert.match(q.params.images[0], /^base64:\/\//)
+  const q = mock.qzone.get(r.tid)
+  assert.ok(q, '返回的日记 ID 应指向本次发布的内容')
+  assert.equal(q.ugc_right, 64)
+  assert.match(q.content, /白米饭/)
+  assert.equal(q.images.length, 1, '说说带了一张图')
+  assert.match(q.images[0], /^base64:\/\//)
   assert.deepEqual(sent, [], '日记那一轮没转发到聊天里')
   const d = (await fake.call('/qzone/delete', { tid: r.tid })).json()
   assert.equal(d.ok, true)
-  assert.equal(mock.qzone.size, qzoneSizeBefore)
+  assert.equal(mock.qzone.has(r.tid), false)
 
   // 面板关掉「日记配图」：只发文字
   await fake.call('/save', { diary: { attachImage: false } })
@@ -771,8 +772,9 @@ test('空间日记：手动写一篇（仅自己可见），配今天画的图�
   const r2 = (await api.hub.capture(() => fake.call('/diary/run', { visibility: 'self' }))).result.json()
   assert.equal(r2.ok, true, r2.message)
   assert.equal(r2.images, 0)
-  const q2 = mock.sent('send_qzone_msg')[n2]
-  assert.equal(q2.params.images, undefined, '关掉后不带图')
+  const q2 = mock.qzone.get(r2.tid)
+  assert.ok(q2, '应保存这次发布的纯文字日记')
+  assert.equal(q2.images, undefined, '关掉后不带图')
   await fake.call('/qzone/delete', { tid: r2.tid })
 
   // 配图发不出去（空间不认这张图）：不能憋住整篇日记，退回只发文字
@@ -783,8 +785,9 @@ test('空间日记：手动写一篇（仅自己可见），配今天画的图�
     const r3 = (await api.hub.capture(() => fake.call('/diary/run', { visibility: 'self' }))).result.json()
     assert.equal(r3.ok, true, '配图失败也要把日记发出去')
     assert.equal(r3.images, 0, '最后没配成图')
-    const q3 = mock.sent('send_qzone_msg')[n3]
-    assert.equal(q3.params.images, undefined, '退回只发文字的说说')
+    const q3 = mock.qzone.get(r3.tid)
+    assert.ok(q3, '应保存配图失败后发布的日记')
+    assert.equal(q3.images, undefined, '退回只发文字的说说')
     await fake.call('/qzone/delete', { tid: r3.tid })
   } finally {
     mock.state.failQzoneImage = false

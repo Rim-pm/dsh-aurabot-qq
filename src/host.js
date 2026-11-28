@@ -21,6 +21,7 @@ import { loadConfig, saveConfig, commitConfig, configRevision, publicConfig, mer
 import { quietWindowOf } from './core/time-window.js'
 import { createLogger } from './core/logger.js'
 import { encodeResponse } from './core/http-compress.js'
+import { createReplyStatus } from './core/reply-status.js'
 import { registerSecret, redact } from './core/redact.js'
 import { createOneBotClient } from './onebot/client.js'
 import { createOutbox } from './onebot/outbox.js'
@@ -317,6 +318,9 @@ export function apply(ctx) {
           if (dangerGuard.handleReply(`private:${ev.user_id}`, ev.user_id, text)) return
           if (approvalRelay?.handleReply(`private:${ev.user_id}`, ev.user_id, text)) return
         }
+        hub.onMessage(ev).catch((error) => log.error('处理消息出错：', error.message))
+      } else if (ev.message_type === 'group') {
+        // 网关上报的本号群消息（reportSelfMessage）：交给中枢补进群聊上下文，不触发回复
         hub.onMessage(ev).catch((error) => log.error('处理消息出错：', error.message))
       }
     } else if (ev.post_type === 'notice' && ev.notice_type === 'bot_offline') {
@@ -863,6 +867,13 @@ export function apply(ctx) {
     getConfig,
   }
   mods = createModules({ ctx, core, getConfig, setConfig, logger, version: VERSION, builtins: BUILTINS, personaMemoryRuntime })
+  const replyStatus = createReplyStatus({ chatOfSession: id => hub.chatOfSession(id), log })
+  mods.listen('reply/status', value => replyStatus.report(value))
+  ctx.effect(() => () => replyStatus.dispose(), 'aurabot: 回复稿件标识')
+  route('/reply-status', async req => {
+    const q = query(req)
+    return { ok: true, status: await replyStatus.read(q.sessionId, q.startSeq, q.endSeq) }
+  })
   bridge = createBridge({ ctx, getConfig, setConfig, hub, mods, log: logger.child('bridge'), version: VERSION, apiVersion: API_VERSION, overview: () => overview() })
   core.bridge = bridge
   core.modules = mods
@@ -1260,6 +1271,7 @@ export function apply(ctx) {
   // ---------- 盯会话：一轮结束就发回 QQ ----------
   ctx.effect(() => {
     const off = ctx.on('session/event', (session, event) => {
+      try { replyStatus.onEvent(session, event) } catch {}
       try {
         hub.onSessionEvent(session, event)
       } catch (error) {
@@ -1469,6 +1481,7 @@ export function apply(ctx) {
       (Object.hasOwn(expected, 'groups') && !isDeepStrictEqual(expected.groups, cfg.allow.groups)) ||
       (Object.hasOwn(expected, 'memberFilter') && !isDeepStrictEqual(expected.memberFilter, cfg.memberFilter)) ||
       (Object.hasOwn(expected, 'group') && !isDeepStrictEqual(expected.group, cfg.group)) ||
+      (Object.hasOwn(expected, 'groupExtraction') && !isDeepStrictEqual(expected.groupExtraction, cfg.memory.groupExtraction || {})) ||
       (Object.hasOwn(expected, 'passiveGroups') && !isDeepStrictEqual(expected.passiveGroups, cfg.memory.passiveGroups))
     )) return saveEnvelope({ ok: false, code: 'group_settings_conflict', message: '群设置已在别处修改，本次没有保存。请记下要保留的改动，再点「读取最新设置」放弃草稿。' })
     const before = cfg
@@ -2690,6 +2703,15 @@ export function apply(ctx) {
   route('/modules/community/remove', async (req) => {
     const b = await readBody(req)
     return { ...(await community.remove(String(b.id || ''), { purge: b.purge === true })), modules: mods.status() }
+  })
+  route('/modules/remove', async (req) => {
+    const b = await readBody(req)
+    return { ...(await mods.remove(String(b.id || ''), { purge: b.purge === true })), list: mods.status() }
+  })
+  // 批量更新已安装且有可用新版的市场模块。
+  route('/modules/community/update-all', async (req, res) => {
+    if (req.method !== 'POST') return send(res, 405, { ok: false, message: '请使用 POST' })
+    return { ...(await community.updateAll()), modules: mods.status() }
   })
   // 模块市场地址：换索引源（自建索引 / 国内镜像 / 内网部署）用。留空 = 回到内置 GitHub 地址；
   // 只收 http/https，别把 file:// 之类塞进来当下载源。单一真相在 ext.market.registryUrl，

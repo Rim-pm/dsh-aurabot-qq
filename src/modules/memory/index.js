@@ -643,6 +643,7 @@ export default {
       if (memory.setInsights(String(b.key || ''), (b.list || []).map((t) => String(t).trim()).filter(Boolean)) === false) return { ok: false, message: '这个人尚未有直接互动，或已设置不再记住' }
       return { ok: true, message: '相处经验已保存' }
     })
+    api.route('/memory/backlog', async () => ({ ok: true, ...await memory.backlog() }))
     api.route('/memory/extract', async (req) => {
       const b = await http.body(req)
       // 立即整理一次：连今天的也提炼（今天的聊天流水不删，写日记还要用）
